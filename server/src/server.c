@@ -133,26 +133,25 @@ int main(int argc, char *argv[])
 					perror("recvfrom"); goto out;
 				}
 
-				if (n < 20 || (buf[0] >> 4) != 4) {
+				if (n < IP_MIN_HDR || IP_VERSION(buf) != 4) {
 					printf("[drop] udp: not IPv4 (%d bytes)\n", n);
 					continue;
 				}
-				/* 안쪽 IP 헤더 기준 오프셋 12~15 = 출발지, 16~19 = 목적지 */
-				memcpy(&inner, buf + 12, 4);
+				memcpy(&inner, buf + IP_SRC_OFF, IP_ADDR_LEN);
 				peer_learn(inner, &src, srclen);
 
 				if (acl_enabled && acl_check(buf, n) != ACL_ALLOW) {
 					struct in_addr inner_dst;
-					memcpy(&inner_dst, buf + 16, 4);
+					memcpy(&inner_dst, buf + IP_DST_OFF, IP_ADDR_LEN);
 					printf("[deny] %s -> %s proto=%d (%d bytes)\n",
 							ip_str(inner, ib), ip_str(inner_dst, ob),
-							buf[9], n);
+							buf[IP_PROTO_OFF], n);
 					continue;
 				}
 
 				printf("[udp->tun] %d bytes from %s:%d (inner src %s), icmp type=%d\n",
 						n, ip_str(src.sin_addr, ob), ntohs(src.sin_port),
-						ip_str(inner, ib), buf[20]);
+						ip_str(inner, ib), buf[IP_IHL(buf)]);
 
 				if (write(tun_fd, buf, n) < 0) {
 					perror("write tun");
@@ -162,13 +161,13 @@ int main(int argc, char *argv[])
 				n = read(tun_fd, buf, sizeof(buf));
 				if (n < 0) { perror("read tun"); goto out; }
 
-				if (n < 20 || (buf[0] >> 4) != 4) {
+				if (n < IP_MIN_HDR || IP_VERSION(buf) != 4) {
 					printf("[skip] non-IPv4 (ver=%d, %d bytes)\n",
-							buf[0] >> 4, n);
+							IP_VERSION(buf), n);
 					continue;
 				}
 
-				memcpy(&inner, buf + 16, 4);
+				memcpy(&inner, buf + IP_DST_OFF, IP_ADDR_LEN);
 
 				p = peer_lookup(inner);
 				if (p == NULL) {
@@ -179,7 +178,7 @@ int main(int argc, char *argv[])
 				printf("[tun->udp] %d bytes to %s (%s:%d), icmp type=%d\n",
 						n, ip_str(inner, ib),
 						ip_str(p->outer.sin_addr, ob), ntohs(p->outer.sin_port),
-						buf[20]);
+						buf[IP_IHL(buf)]);
 
 				sent = sendto(sock, buf, n, 0,
 						(struct sockaddr *)&p->outer, p->outer_len);

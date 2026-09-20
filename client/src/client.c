@@ -125,11 +125,11 @@ int main(int argc, char *argv[])
 					goto out;
 				}
 
-				if (n < 20 || (buf[0] >> 4) != 4) {
-					printf("[%s][skip] non-IPv4 (ver=%d, %d bytes)\n", ifname, buf[0] >> 4, n);
+				if (n < IP_MIN_HDR || IP_VERSION(buf) != 4) {
+					printf("[%s][skip] non-IPv4 (ver=%d, %d bytes)\n", ifname, IP_VERSION(buf), n);
 				}
-				else{
-					printf("[%s][tun->udp] %d bytes, proto=%d, icmp type=%d\n", ifname, n, buf[9], buf[20]);
+				else {
+					printf("[%s][tun->udp] %d bytes, proto=%d, icmp type=%d\n", ifname, n, buf[IP_PROTO_OFF], buf[IP_IHL(buf)]);
 					sent = sendto(sock, buf, n, 0, (struct sockaddr *)&peer, sizeof(peer));
 					if (sent < 0) perror("sendto");
 				}
@@ -141,12 +141,12 @@ int main(int argc, char *argv[])
 					perror("recvfrom"); goto out;
 				}
 
-				if (n < 20 || (buf[0] >> 4) != 4) {
+				if (n < IP_MIN_HDR || IP_VERSION(buf) != 4) {
 					printf("[%s][drop] udp: not IPv4 (%d bytes)\n", ifname, n);
 					continue;
 				}
 
-				printf("[%s][udp->tun] %d bytes, proto=%d, icmp type=%d\n", ifname, n, buf[9], buf[20]);
+				printf("[%s][udp->tun] %d bytes, proto=%d, icmp type=%d\n", ifname, n, buf[IP_PROTO_OFF], buf[IP_IHL(buf)]);
 
 				if (write(tun_fd, buf, n) < 0) {
 					perror("write tun");
