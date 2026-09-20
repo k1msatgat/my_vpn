@@ -128,8 +128,8 @@ int main(int argc, char *argv[])
 				peer_learn(inner, &src, srclen);
 
 				if (acl_enabled && acl_check(buf, n) != ACL_ALLOW) {
-				struct in_addr inner_dst;
-				memcpy(&inner_dst, buf + 16, 4);
+					struct in_addr inner_dst;
+					memcpy(&inner_dst, buf + 16, 4);
 					printf("[deny] %s -> %s proto=%d (%d bytes)\n",
 							ip_str(inner, ib), ip_str(inner_dst, ob),
 							buf[9], n);
