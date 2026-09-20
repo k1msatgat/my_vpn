@@ -76,6 +76,16 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
+	ev.events = EPOLLIN;
+	ev.data.fd = sock;
+	if (epoll_ctl(epfd, EPOLL_CTL_ADD, sock, &ev) < 0){
+		perror("epoll_ctl: sock");
+		close(epfd);
+		close(sock);
+		close(tun_fd);
+		return 1;
+	}
+
 	printf("[%s] epoll ready (epfd=%d, tun_fd=%d, sock=%d)\n", ifname, epfd, tun_fd, sock);
 
 	for (;;){
