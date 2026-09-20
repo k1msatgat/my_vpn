@@ -1,8 +1,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
+#include <signal.h>
 #include <errno.h>
+#include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <sys/epoll.h>
@@ -12,6 +13,14 @@
 #include "common.h"
 
 #define MAX_EVENTS 8
+
+static volatile sig_atomic_t running = 1;
+
+static void on_signal(int sig)
+{
+	(void)sig;
+	running = 0;
+}
 
 int main(int argc, char *argv[])
 {
@@ -28,6 +37,9 @@ int main(int argc, char *argv[])
 		fprintf(stderr, " e.g. %s tun0 49.247.139.39 9000\n", argv[0]);
 	}
 
+	signal(SIGINT, on_signal);
+	signal(SIGTERM, on_signal);
+
 	strncpy(ifname, argv[1], IFNAMSIZ - 1);
 	ifname[IFNAMSIZ - 1] = '\0';
 
@@ -38,7 +50,7 @@ int main(int argc, char *argv[])
 	}
 
 	printf("[%s] tun device ready (fd=%d)\n", ifname, tun_fd);
-	
+
 	sock = socket(AF_INET, SOCK_DGRAM, 0);
 	if (sock < 0) {
 		perror("socket");
@@ -88,9 +100,12 @@ int main(int argc, char *argv[])
 
 	printf("[%s] epoll ready (epfd=%d, tun_fd=%d, sock=%d)\n", ifname, epfd, tun_fd, sock);
 
-	for (;;){
+	while (running){
 		nev = epoll_wait(epfd, events, MAX_EVENTS, -1);
 		if (nev < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
 			perror("epoll_wait");
 			break;
 		}

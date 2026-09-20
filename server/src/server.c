@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 #include <unistd.h>
 #include <errno.h>
 #include <arpa/inet.h>
@@ -14,6 +15,14 @@
 #include "acl.h"
 
 #define MAX_EVENTS 8
+
+static volatile sig_atomic_t running = 1;
+
+static void on_signal(int sig)
+{
+	(void)sig;
+	running = 0;
+}
 
 int main(int argc, char *argv[])
 {
@@ -50,6 +59,9 @@ int main(int argc, char *argv[])
 	} else {
 		printf("acl: disabled (no rule file)\n");
 	}
+
+	signal(SIGINT, on_signal);
+	signal(SIGTERM, on_signal);
 
 	ifname[0] = '\0';
 	tun_fd = tun_alloc(ifname);
@@ -94,10 +106,12 @@ int main(int argc, char *argv[])
 
 	printf("epoll ready (epfd=%d, tun_fd=%d, sock=%d)\n", epfd, tun_fd, sock);
 
-	for (;;) {
+	while (running) {
 		nev = epoll_wait(epfd, events, MAX_EVENTS, -1);
 		if (nev < 0) {
-			if (errno == EINTR) continue;
+			if (errno == EINTR){
+				continue;
+			}
 			perror("epoll_wait");
 			break;
 		}
