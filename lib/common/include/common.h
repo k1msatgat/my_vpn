@@ -12,6 +12,10 @@
 #define IP_ADDR_LEN     4
 #define IP_MIN_HDR     20
 
+#define L4_SPORT_OFF   0
+#define L4_DPORT_OFF   2
+#define L4_PORT_LEN    2
+
 #define IP_VERSION(buf)  ((buf)[0] >> 4)
 #define IP_IHL(buf)      (((buf)[0] & 0x0F) * 4)
 

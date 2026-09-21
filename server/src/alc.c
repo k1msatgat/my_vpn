@@ -1,9 +1,11 @@
+#include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <arpa/inet.h>
 
 #include "acl.h"
+#include "common.h"
 
 static struct acl_rule rules[MAX_RULES];
 static int             nrules;
@@ -175,22 +177,22 @@ int acl_check(const unsigned char *pkt, int len)
 	unsigned short dport = 0;
 	int            ihl, i;
 
-	if (len < 20) {
+	if (len < IP_MIN_HDR) {
 		return ACL_DENY; 
 	}
 
-	ihl = (pkt[0] & 0x0F) * 4;
-	if (ihl < 20 || ihl > len) {
+	ihl = IP_IHL(pkt) * 4;
+	if (ihl < IP_MIN_HDR || ihl > len) {
 		return ACL_DENY;
 	}
 
-	memcpy(&src, pkt + 12, 4);
-	memcpy(&dst, pkt + 16, 4);
-	proto = pkt[9];
+	memcpy(&src, pkt + IP_SRC_OFF, IP_ADDR_LEN);
+	memcpy(&dst, pkt + IP_DST_OFF, IP_ADDR_LEN);
+	proto = pkt[IP_PROTO_OFF];
 
-	if (proto == 6 || proto == 17) {
-		if (len >= ihl + 4) {
-			memcpy(&dport, pkt + ihl + 2, 2);
+	if (proto == IPPROTO_TCP || proto == IPPROTO_UDP) {
+		if (len >= ihl + L4_DPORT_OFF + L4_PORT_LEN) {
+			memcpy(&dport, pkt + ihl + L4_DPORT_OFF, L4_PORT_LEN);
 		}
 		else {
 			return ACL_DENY;
@@ -212,7 +214,7 @@ int acl_check(const unsigned char *pkt, int len)
 			continue;
 		}
 
-		if (proto == 6 || proto == 17) {
+		if (proto == IPPROTO_TCP || proto == IPPROTO_UDP) {
 			if (dport < r->dport_lo || dport > r->dport_hi) continue;
 		}
 
