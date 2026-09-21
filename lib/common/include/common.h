@@ -2,6 +2,7 @@
 #define COMMON_H
 
 #include <netinet/in.h>
+#include <stdint.h>
 #define TUN_MTU		1400
 #define BUF_SIZE	2048
 #define TUN_PROR	9000
@@ -18,6 +19,25 @@
 
 #define IP_VERSION(buf)  ((buf)[0] >> 4)
 #define IP_IHL(buf)      (((buf)[0] & 0x0F) * 4)
+
+typedef enum MSG_TYPE {
+	MSG_REQ_HANDSHAKE = 1,
+	MSG_RES_HANDSHAKE,
+	MSG_DATA,
+	MSG_KEEPALIVE
+} msg_type_t;
+
+struct msg_header {
+	uint8_t version;
+	uint8_t type;
+	uint8_t reserved[2];
+	uint32_t session_idx;
+};
+
+struct data_header {
+	uint64_t counter;
+};
+
 
 int tun_alloc(char *dev);
 void hex_dump(const unsigned char *buf, int len);
