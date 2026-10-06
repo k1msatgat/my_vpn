@@ -43,5 +43,11 @@ int tun_alloc(char *dev);
 void hex_dump(const unsigned char *buf, int len);
 const char *ip_str(struct in_addr a, char *dst);
 
+int msg_encode(unsigned char *buf, size_t cap, const struct msg_header *h);
+int msg_decode(const unsigned char *buf, size_t len, struct msg_header *h);
+
+int data_encode(unsigned char *buf, size_t cap, const struct data_header *d);
+int data_decode(const unsigned char *buf, size_t len, struct data_header *d);
+
 #endif
 
