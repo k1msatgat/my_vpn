@@ -3,6 +3,7 @@
 
 #include <netinet/in.h>
 #include <stdint.h>
+
 #define TUN_MTU		1400
 #define BUF_SIZE	2048
 #define TUN_PROR	9000
@@ -20,11 +21,13 @@
 #define IP_VERSION(buf)  ((buf)[0] >> 4)
 #define IP_IHL(buf)      (((buf)[0] & 0x0F) * 4)
 
+#define PKT_HDR_LEN (sizeof(struct msg_headr) + sizeof(struct data_head))
+
 typedef enum MSG_TYPE {
-	MSG_REQ_HANDSHAKE = 1,
-	MSG_RES_HANDSHAKE,
-	MSG_DATA,
-	MSG_KEEPALIVE
+	MSG_TYPE_REQ_HANDSHAKE = 1,
+	MSG_TYPE_RES_HANDSHAKE,
+	MSG_TYPE_DATA,
+	MSG_TYPE_KEEPALIVE
 } msg_type_t;
 
 struct msg_header {
