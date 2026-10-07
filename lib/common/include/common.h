@@ -21,7 +21,7 @@
 #define IP_VERSION(buf)  ((buf)[0] >> 4)
 #define IP_IHL(buf)      (((buf)[0] & 0x0F) * 4)
 
-#define PKT_HDR_LEN (sizeof(struct msg_headr) + sizeof(struct data_head))
+#define PKT_HDR_LEN (sizeof(msg_header_t) + sizeof(data_header_t))
 
 typedef enum MSG_TYPE {
 	MSG_TYPE_REQ_HANDSHAKE = 1,
@@ -30,16 +30,16 @@ typedef enum MSG_TYPE {
 	MSG_TYPE_KEEPALIVE
 } msg_type_t;
 
-struct msg_header {
+typedef struct msg_header {
 	uint8_t version;
 	uint8_t type;
 	uint8_t reserved[2];
 	uint32_t session_idx;
-};
+} msg_header_t;
 
-struct data_header {
+typedef struct data_header {
 	uint64_t counter;
-};
+} data_header_t;
 
 
 int tun_alloc(char *dev);

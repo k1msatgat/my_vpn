@@ -36,7 +36,14 @@ int main(int argc, char *argv[])
 	struct epoll_event ev;
 	struct epoll_event events[MAX_EVENTS];
 	struct sockaddr_in peer;
-	unsigned char buf[BUF_SIZE];
+	int32_t fd = 0;
+
+	uint8_t packet[BUF_SIZE];
+	msg_header_t msg_header;
+	data_header_t data_header;
+	uint64_t tx_counter = 0;
+	int off = 0;
+
 
 	if (argc != 4){
 		fprintf(stderr, "usage: %s <ifname> <server-ip> <port>\n", argv[0]);
@@ -117,7 +124,7 @@ int main(int argc, char *argv[])
 		}
 
 		for (i=0;i<nev;i++){
-			int fd = events[i].data.fd;
+			fd = events[i].data.fd;
 
 			if (events[i].events & (EPOLLERR | EPOLLHUP)) {
 				fprintf(stderr, "[%s][err] fd=%d evnets=0x%x\n", ifname, fd, events[i].events);
@@ -125,36 +132,45 @@ int main(int argc, char *argv[])
 			}
 
 			if (fd == tun_fd) {
-				n = read(tun_fd, buf, sizeof(buf));
+				n = read(tun_fd, packet + PKT_HDR_LEN, sizeof(packet) - PKT_HDR_LEN);
 				if (n < 0) {
 					perror("read tun");
 					goto out;
 				}
 
-				if (n < IP_MIN_HDR || IP_VERSION(buf) != 4) {
-					printf("[%s][skip] non-IPv4 (ver=%d, %d bytes)\n", ifname, IP_VERSION(buf), n);
+				if (n < IP_MIN_HDR || IP_VERSION(packet) != 4) {
+					printf("[%s][skip] non-IPv4 (ver=%d, %d bytes)\n", ifname, IP_VERSION(packet), n);
 				}
 				else {
-					printf("[%s][tun->udp] %d bytes, proto=%d, icmp type=%d\n", ifname, n, buf[IP_PROTO_OFF], buf[IP_IHL(buf)]);
-					sent = sendto(sock, buf, n, 0, (struct sockaddr *)&peer, sizeof(peer));
+					printf("[%s][tun->udp] %d bytes, proto=%d, icmp type=%d\n", ifname, n, packet[IP_PROTO_OFF], packet[IP_IHL(packet)]);
+					memset(&msg_header,0, sizeof(msg_header_t));
+					msg_header.version = 0; // 첫 버전으로 버전 관리 규칙이 생기기전까지 우선 0 을 사용한다.
+					msg_header.type = MSG_TYPE_DATA;
+					msg_header.session_idx = 0;
+					data_header.counter = tx_counter++;
+
+					off = msg_encode(packet, sizeof(packet), &msg_header);
+					off += data_encode(packet+off, sizeof(packet) - off, &data_header);
+
+					sent = sendto(sock, packet, off, 0, (struct sockaddr *)&peer, sizeof(peer));
 					if (sent < 0) perror("sendto");
 				}
 
 			}
 			else if(fd == sock) {
-				n = recvfrom(sock, buf, sizeof(buf), 0, NULL, NULL);
+				n = recvfrom(sock, packet, sizeof(packet), 0, NULL, NULL);
 				if ( n < 0) {
 					perror("recvfrom"); goto out;
 				}
 
-				if (n < IP_MIN_HDR || IP_VERSION(buf) != 4) {
+				if (n < IP_MIN_HDR || IP_VERSION(packet) != 4) {
 					printf("[%s][drop] udp: not IPv4 (%d bytes)\n", ifname, n);
 					continue;
 				}
 
-				printf("[%s][udp->tun] %d bytes, proto=%d, icmp type=%d\n", ifname, n, buf[IP_PROTO_OFF], buf[IP_IHL(buf)]);
+				printf("[%s][udp->tun] %d bytes, proto=%d, icmp type=%d\n", ifname, n, packet[IP_PROTO_OFF], packet[IP_IHL(packet)]);
 
-				if (write(tun_fd, buf, n) < 0) {
+				if (write(tun_fd, packet, n) < 0) {
 					perror("write tun");
 				}
 			}
