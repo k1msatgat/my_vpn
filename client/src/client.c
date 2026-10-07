@@ -163,6 +163,21 @@ int main(int argc, char *argv[])
 					perror("recvfrom"); goto out;
 				}
 
+				off = msg_decode(packet, (size_t)n, &msg_header);
+
+				if (off < 0 || msg_header.type != MSG_TYPE_DATA) {
+					printf("[%s][drop] bad header(%d bytes)\n", ifname, n);
+					continue;
+				}
+
+				if  (data_decode(packet + off, (size_t)(n - off), &data_header) < 0) {
+					printf("[%s][drop] short data header\n", ifname);
+				}
+
+				off += sizeof(data_header_t);
+
+				n -= off;
+
 				if (n < IP_MIN_HDR || IP_VERSION(packet) != 4) {
 					printf("[%s][drop] udp: not IPv4 (%d bytes)\n", ifname, n);
 					continue;
