@@ -14,6 +14,12 @@
 
 #define MAX_EVENTS 8
 
+struct session {
+	uint32_t idx;
+	uint64_t tx_counter;
+	struct sockaddr_in server;
+};
+
 static volatile sig_atomic_t running = 1;
 
 static void on_signal(int sig)
