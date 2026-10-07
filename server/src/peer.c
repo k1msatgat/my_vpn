@@ -3,7 +3,7 @@
 #include <arpa/inet.h>
 #include "peer.h"
 
-static struct peer peers[MAX_PEERS];
+static peer_t peers[MAX_PEERS];
 
 static const char *ip4(struct in_addr a, char *dst)
 {
@@ -15,7 +15,7 @@ void peer_init(void)
 	memset(peers, 0, sizeof(peers));
 }
 
-struct peer *peer_lookup(struct in_addr inner)
+peer_t *peer_lookup(struct in_addr inner)
 {
 	int i;
 
@@ -26,11 +26,11 @@ struct peer *peer_lookup(struct in_addr inner)
 	return NULL;
 }
 
-struct peer *peer_learn(struct in_addr inner,
+peer_t *peer_learn(struct in_addr inner,
 		const struct sockaddr_in *outer, socklen_t len)
 {
 	char ib[INET_ADDRSTRLEN], ob[INET_ADDRSTRLEN], nb[INET_ADDRSTRLEN];
-	struct peer *p;
+	peer_t *p;
 	int i, victim = 0;
 
 	p = peer_lookup(inner);

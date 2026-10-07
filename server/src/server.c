@@ -35,7 +35,7 @@ int main(int argc, char *argv[])
 	struct sockaddr_in local_addr, src;
 	socklen_t srclen;
 	struct in_addr inner;
-	struct peer *p;
+	peer_t *p;
 	unsigned char buf[BUF_SIZE];
 
 	if (argc != 2 && argc != 3) {

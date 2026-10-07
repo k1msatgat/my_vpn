@@ -6,18 +6,20 @@
 
 #define MAX_PEERS 8
 
-struct peer {
-    int                used;       
-    struct in_addr     inner;      
-    struct sockaddr_in outer;      
-    socklen_t          outer_len;
-    time_t             last_seen;  
-};
+typedef struct peer {
+    int32_t used;
+    int32_t session_idx;
+    uint64_t tx_counter;
+    struct in_addr inner;
+    struct sockaddr_in outer;
+    socklen_t outer_len;
+    time_t last_seen;
+} peer_t;
 
 void         peer_init(void);
-struct peer *peer_learn(struct in_addr inner,
+peer_t *peer_learn(struct in_addr inner,
                         const struct sockaddr_in *outer, socklen_t len);
-struct peer *peer_lookup(struct in_addr inner);
+peer_t *peer_lookup(struct in_addr inner);
 void         peer_dump(void);
 
-#endif 
+#endif
