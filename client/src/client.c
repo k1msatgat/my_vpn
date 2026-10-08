@@ -1,3 +1,6 @@
+#include <asm-generic/errno-base.h>
+#include <asm-generic/errno.h>
+#include <asm-generic/socket.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,11 +17,15 @@
 
 #define MAX_EVENTS 8
 
-struct session {
+#define HS_TIMEOUT_SEC 1
+#define HS_RETRY 5
+
+typedef struct session {
 	uint32_t idx;
 	uint64_t tx_counter;
+	struct in_addr tun_ip;
 	struct sockaddr_in server;
-};
+}session_t;
 
 static volatile sig_atomic_t running = 1;
 
@@ -28,6 +35,72 @@ static void on_signal(int sig)
 	running = 0;
 }
 
+static int do_handshake(int32_t sock, session_t *session){
+	uint8_t req[sizeof(msg_header_t) + sizeof(struct in_addr)];
+	uint8_t res [BUF_SIZE];
+	msg_header_t msg_header;
+	struct sockaddr_in from;
+	socklen_t fromlen;
+	struct timeval tv;
+	int32_t off = 0;
+	int32_t n = 0;
+	int32_t tries = 0;
+
+	tv.tv_sec = HS_TIMEOUT_SEC;
+	tv.tv_usec = 0;
+	if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0){
+		perror("setsockopt SO_RCVTIMEO");
+		return -1;
+	}
+
+	memset(&msg_header, 0, sizeof(msg_header_t));
+	msg_header.version = PROTOCOL_VERSION;
+	msg_header.type = MSG_TYPE_REQ_HANDSHAKE;
+	msg_header.session_idx = 0;
+	off = msg_encode(req, sizeof(req), &msg_header);
+	memcpy(req + off, &session->tun_ip, sizeof(session->tun_ip));
+	off += sizeof(session->tun_ip);
+
+	for (tries = 0; tries < HS_RETRY; tries++) {
+		printf("[HS] request %d/%d\n", tries, HS_RETRY);
+		if (sendto(sock, req, off, 0, (struct sockaddr*)&session->server, sizeof(session->server))){
+			perror("sendto handshake");
+			return -1;
+		}
+
+		fromlen = sizeof(from);
+		n = recvfrom(sock, res, sizeof(res), 0,  (struct sockaddr *)&from, &fromlen);
+		if (n < 0){
+			if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR ) {
+				continue;
+			}
+			perror("recvfrom handshake");
+			return -1;
+		}
+
+		if (from.sin_addr.s_addr != session->server.sin_addr.s_addr || from.sin_port != session->server.sin_port){
+			continue;
+		}
+
+		if (msg_decode(res, (size_t)n, &msg_header) < 0){
+				continue;
+		}
+
+		if (msg_header.version != PROTOCOL_VERSION || msg_header.type != MSG_TYPE_RES_HANDSHAKE || msg_header.session_idx == 0) {
+			continue;
+		}
+
+		session->idx = msg_header.session_idx;
+
+		tv.tv_sec = 0;
+		setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+		printf("[HS] established idx=%08x\n", session->idx);
+		return 0;
+	}
+	fprintf(stderr, "[HS] no response from server\n");
+	return -1;
+}
+
 int main(int argc, char *argv[])
 {
 	char ifname[IFNAMSIZ];
@@ -35,23 +108,30 @@ int main(int argc, char *argv[])
 	int epfd, nev, i;
 	struct epoll_event ev;
 	struct epoll_event events[MAX_EVENTS];
-	struct sockaddr_in peer;
 	int32_t fd = 0;
 
 	uint8_t packet[BUF_SIZE];
 	msg_header_t msg_header;
 	data_header_t data_header;
-	uint64_t tx_counter = 0;
 	int off = 0;
 
+	session_t session;
 
-	if (argc != 4){
-		fprintf(stderr, "usage: %s <ifname> <server-ip> <port>\n", argv[0]);
-		fprintf(stderr, " e.g. %s tun0 49.247.139.39 9000\n", argv[0]);
+	if (argc != 5){
+		fprintf(stderr, "usage: %s <ifname> <server-ip> <port> <tunnel-ip>\n", argv[0]);
+		fprintf(stderr, " e.g. %s tun0 49.247.139.39 9000 10.0.0.1\n", argv[0]);
+		return 1;
 	}
 
 	signal(SIGINT, on_signal);
 	signal(SIGTERM, on_signal);
+
+	memset(&session, 0, sizeof(session_t));
+
+	if (inet_pton(AF_INET, argv[4], &session.tun_ip) != 1){
+		fprintf(stderr, "bad server address : %s\n", argv[4]);
+		return 1;
+	}
 
 	strncpy(ifname, argv[1], IFNAMSIZ - 1);
 	ifname[IFNAMSIZ - 1] = '\0';
@@ -71,17 +151,11 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
-	memset(&peer, 0, sizeof(peer));
-	peer.sin_family = AF_INET;
-	peer.sin_port = htons(atoi(argv[3]));
-	if (inet_pton(AF_INET, argv[2], &peer.sin_addr) != 1){
-		fprintf(stderr, "bad server address : %s\n", argv[2]);
-		close(sock);
-		close(tun_fd);
-		return 1;
-	}
-
 	printf("[%s] tunneling to %s:%s\n", ifname, argv[2], argv[3]);
+
+	if (do_handshake(sock, &session)) {
+		goto out;
+	}
 
 	epfd = epoll_create1(EPOLL_CLOEXEC);
 	if (epfd < 0) {
@@ -144,15 +218,15 @@ int main(int argc, char *argv[])
 				else {
 					printf("[%s][tun->udp] %d bytes, proto=%d, icmp type=%d\n", ifname, n, packet[IP_PROTO_OFF], packet[IP_IHL(packet)]);
 					memset(&msg_header,0, sizeof(msg_header_t));
-					msg_header.version = 0; // 첫 버전으로 버전 관리 규칙이 생기기전까지 우선 0 을 사용한다.
+					msg_header.version = PROTOCOL_VERSION;
 					msg_header.type = MSG_TYPE_DATA;
-					msg_header.session_idx = 0;
-					data_header.counter = tx_counter++;
+					msg_header.session_idx = session.idx;
+					data_header.counter = session.tx_counter++;
 
 					off = msg_encode(packet, sizeof(packet), &msg_header);
 					off += data_encode(packet+off, sizeof(packet) - off, &data_header);
 
-					sent = sendto(sock, packet, off, 0, (struct sockaddr *)&peer, sizeof(peer));
+					sent = sendto(sock, packet, off, 0, (struct sockaddr *)&session.server, sizeof(session.server));
 					if (sent < 0) perror("sendto");
 				}
 
@@ -168,6 +242,10 @@ int main(int argc, char *argv[])
 				if (off < 0 || msg_header.type != MSG_TYPE_DATA) {
 					printf("[%s][drop] bad header(%d bytes)\n", ifname, n);
 					continue;
+				}
+
+				if (msg_header.session_idx != session.idx) {
+					printf("[%s][drop] wrong session [%08x][%08x]", ifname, msg_header.session_idx, session.idx);
 				}
 
 				if  (data_decode(packet + off, (size_t)(n - off), &data_header) < 0) {

@@ -4,6 +4,8 @@
 #include <netinet/in.h>
 #include <stdint.h>
 
+#define PROTOCOL_VERSION 1 //우선 common 에서 서버와 클라이언트 모두 동일 버전사용하도록 설정.
+
 #define TUN_MTU		1400
 #define BUF_SIZE	2048
 #define TUN_PROR	9000
