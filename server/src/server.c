@@ -24,6 +24,36 @@ static void on_signal(int sig)
 	running = 0;
 }
 
+static void handle_handshake(int32_t sock, const uint8_t *packet, int32_t n, const struct sockaddr_in *src, socklen_t srclen) {
+	char ib[INET_ADDRSTRLEN];
+	uint8_t res[sizeof(msg_header_t)];
+	msg_header_t msg_header;
+	struct in_addr tun_ip;
+	peer_t *peer;
+
+	if (n < (int32_t)(sizeof(msg_header_t) + sizeof(tun_ip))) {
+		printf("[HS] shrot request (%d bytes)\n", n);
+		return;
+	}
+
+	memcpy(&tun_ip, packet + sizeof(msg_header_t), sizeof(tun_ip));
+
+	peer = peer_register(tun_ip, src, srclen);
+	if (peer == NULL) {
+		printf("[HS] register failed for %s\n", ip_str(tun_ip, ib));
+	}
+
+	memset(&msg_header, 0, sizeof(msg_header));
+	msg_header.version = PROTOCOL_VERSION;
+	msg_header.type = MSG_TYPE_RES_HANDSHAKE;
+	msg_header.session_idx = peer->session_idx;
+	msg_encode(res, sizeof(res), &msg_header);
+
+	if (sendto(sock, res, sizeof(res), 0, (const struct sockaddr *)&peer->outer, peer->outer_len) < 0){
+		perror("sendto handshake");
+	}
+}
+
 int main(int argc, char *argv[])
 {
 	char ifname[IFNAMSIZ];
@@ -138,7 +168,8 @@ int main(int argc, char *argv[])
 					continue;
 				}
 				memcpy(&inner, buf + IP_SRC_OFF, IP_ADDR_LEN);
-				peer_learn(inner, &src, srclen);
+
+				//peer_learn(inner, &src, srclen);
 
 				if (acl_enabled && acl_check(buf, n) != ACL_ALLOW) {
 					struct in_addr inner_dst;
