@@ -55,6 +55,25 @@ static void handle_handshake(int32_t sock, const uint8_t *packet, int32_t n, con
 	}
 }
 
+static void send_keepalive(int32_t sock, const peer_t *peer){
+	int32_t sent;
+	int32_t off;
+	uint8_t packet[sizeof(msg_header_t)];
+	msg_header_t msg_header;
+
+	memset(&msg_header, 0, sizeof(msg_header));
+	msg_header.version = PROTOCOL_VERSION;
+	msg_header.session_idx = peer->session_idx;
+	msg_header.type = MSG_TYPE_KEEPALIVE;
+
+	off = msg_encode(packet, sizeof(packet), &msg_header);
+	sent = sendto(sock, packet, off, 0,
+			(const struct sockaddr *)&peer->outer, peer->outer_len);
+	if (sent < 0) {
+		perror("sendto");
+	}
+}
+
 int main(int argc, char *argv[])
 {
 	char ifname[IFNAMSIZ];
@@ -184,21 +203,27 @@ int main(int argc, char *argv[])
 					continue;
 				}
 
-				switch (msg_header.type) {
-					case MSG_TYPE_REQ_HANDSHAKE:
-						handle_handshake(sock, packet, n, &src, srclen);
-						continue;
-					case MSG_TYPE_DATA:
-						break;
-					default:
-						printf("[drop] unknown type %u\n", msg_header.type);
-						continue;
+				if (msg_header.type == MSG_TYPE_REQ_HANDSHAKE) {
+					handle_handshake(sock, packet, n, &src, srclen);
+					continue;
 				}
 
 				peer = peer_find_idx(msg_header.session_idx);
 				if (peer == NULL) {
 					printf("[drop] unknown session_idx[%08x]\n", msg_header.session_idx);
 					continue;
+				}
+
+				switch (msg_header.type) {
+					case MSG_TYPE_DATA:
+						break;
+					case MSG_TYPE_KEEPALIVE:
+						peer_touch(peer, &src, srclen);
+						send_keepalive(sock, peer);
+						continue;
+					default:
+						printf("[drop] unknown type %u\n", msg_header.type);
+						continue;
 				}
 
 				if (data_decode(packet + off, (size_t)(n - off), &data_header) < 0) {
@@ -227,6 +252,7 @@ int main(int argc, char *argv[])
 							ip[IP_PROTO_OFF], n);
 					continue;
 				}
+
 				peer_touch(peer, &src, srclen);
 
 				printf("[udp->tun] %d bytes from %s:%d (inner src %s), icmp type=%d\n",
