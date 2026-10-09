@@ -181,7 +181,7 @@ int acl_check(const unsigned char *pkt, int len)
 		return ACL_DENY; 
 	}
 
-	ihl = IP_IHL(pkt) * 4;
+	ihl = IP_IHL(pkt);
 	if (ihl < IP_MIN_HDR || ihl > len) {
 		return ACL_DENY;
 	}

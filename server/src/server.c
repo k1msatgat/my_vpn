@@ -229,6 +229,10 @@ int main(int argc, char *argv[])
 				}
 				peer_touch(peer, &src, srclen);
 
+				printf("[udp->tun] %d bytes from %s:%d (inner src %s), icmp type=%d\n",
+						n, ip_str(src.sin_addr, ob), ntohs(src.sin_port),
+						ip_str(inner, ib), ip[IP_IHL(ip)]);
+
 				if (write(tun_fd, ip, n) < 0) {
 					perror("write tun");
 				}
