@@ -109,6 +109,8 @@ int main(int argc, char *argv[])
 	struct epoll_event ev;
 	struct epoll_event events[MAX_EVENTS];
 	int32_t fd = 0;
+	struct sockaddr_in from;
+	socklen_t fromlen;
 
 	uint8_t packet[BUF_SIZE];
 	uint8_t *ip;
@@ -243,9 +245,16 @@ int main(int argc, char *argv[])
 
 			}
 			else if(fd == sock) {
-				n = recvfrom(sock, packet, sizeof(packet), 0, NULL, NULL);
+				fromlen = sizeof(from);
+				n = recvfrom(sock, packet, sizeof(packet), 0, (struct sockaddr *)&from, &fromlen);
 				if ( n < 0) {
 					perror("recvfrom"); goto out;
+				}
+
+				if (from.sin_addr.s_addr != session.server.sin_addr.s_addr ||
+						from.sin_port != session.server.sin_port) {
+					printf("[%s][drop] not from server\n", ifname);
+					continue;
 				}
 
 				off = msg_decode(packet, (size_t)n, &msg_header);
