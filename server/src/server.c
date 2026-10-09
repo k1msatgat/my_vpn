@@ -32,7 +32,7 @@ static void handle_handshake(int32_t sock, const uint8_t *packet, int32_t n, con
 	peer_t *peer;
 
 	if (n < (int32_t)(sizeof(msg_header_t) + sizeof(tun_ip))) {
-		printf("[HS] shrot request (%d bytes)\n", n);
+		printf("[HS] short request (%d bytes)\n", n);
 		return;
 	}
 
@@ -60,7 +60,7 @@ int main(int argc, char *argv[])
 	char ifname[IFNAMSIZ];
 	char ib[INET_ADDRSTRLEN], ob[INET_ADDRSTRLEN];
 	int tun_fd, sock, n, sent, port;
-	int epfd, nev, i;
+	int epfd = -1, nev, i;
 	int acl_enabled = 0;
 	struct epoll_event ev, events[MAX_EVENTS];
 	struct sockaddr_in local_addr;
@@ -69,16 +69,23 @@ int main(int argc, char *argv[])
 	struct in_addr inner;
 	peer_t *peer;
 	struct in_addr inner_dst;
-	uint8_t buf[BUF_SIZE];
+	uint8_t packet[BUF_SIZE];
+	uint8_t *ip;
 	msg_header_t msg_header;
 	data_header_t data_header;
 	int32_t off;
+	char *end;
+	int ret = 1;
 
 	if (argc != 2 && argc != 3) {
 		fprintf(stderr, "usage: %s <port> [acl-file]\n", argv[0]);
 		return 1;
 	}
-	port = atoi(argv[1]);
+	port = strtol(argv[1], &end, 10);
+	if (*end != '\0' || port <= 0 || port > 65535) {
+		fprintf(stderr, "invalid port : %s\n", argv[1]);
+		return 1;
+	}
 
 	peer_init();
 	acl_init();
@@ -115,17 +122,17 @@ int main(int argc, char *argv[])
 	memset(&local_addr, 0, sizeof(local_addr));
 	local_addr.sin_family      = AF_INET;
 	local_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-	local_addr.sin_port        = htons(port);
+	local_addr.sin_port        = htons((uint16_t)port);
 
 	if (bind(sock, (struct sockaddr *)&local_addr, sizeof(local_addr)) < 0) {
-		perror("bind"); close(sock); close(tun_fd); return 1;
+		perror("bind"); goto out;
 	}
 
 	printf("listening on UDP 0.0.0.0:%d\n", port);
 
 	epfd = epoll_create1(EPOLL_CLOEXEC);
 	if (epfd < 0) {
-		perror("epoll_create1"); close(sock); close(tun_fd); return 1;
+		perror("epoll_create1"); goto out;
 	}
 
 	ev.events  = EPOLLIN;
@@ -163,14 +170,14 @@ int main(int argc, char *argv[])
 
 			if (fd == sock) {
 				srclen = sizeof(src);
-				n = recvfrom(sock, buf, sizeof(buf), 0,
+				n = recvfrom(sock, packet, sizeof(packet), 0,
 						(struct sockaddr *)&src, &srclen);
 				if (n < 0) {
 					perror("recvfrom"); goto out;
 				}
 
 
-				off = msg_decode(buf, (size_t)n, &msg_header);
+				off = msg_decode(packet, (size_t)n, &msg_header);
 				if (off < 0 || msg_header.version != PROTOCOL_VERSION) {
 					printf("[drop] bad header (%d bytes)\n", n);
 					continue;
@@ -178,7 +185,7 @@ int main(int argc, char *argv[])
 
 				switch (msg_header.type) {
 					case MSG_TYPE_REQ_HANDSHAKE:
-						handle_handshake(sock, buf, n, &src, srclen);
+						handle_handshake(sock, packet, n, &src, srclen);
 						continue;
 					case MSG_TYPE_DATA:
 						break;
@@ -193,46 +200,48 @@ int main(int argc, char *argv[])
 					continue;
 				}
 
-				if (data_decode(buf + off, (size_t)(n - off), &data_header) < 0) {
+				if (data_decode(packet + off, (size_t)(n - off), &data_header) < 0) {
 					continue;
 				}
 
 				off += sizeof(data_header_t);
 				n -= off;
 
-				if (n < IP_MIN_HDR || IP_VERSION(buf + off) != 4){
+				ip = packet + off;
+				if (n < IP_MIN_HDR || IP_VERSION(ip) != 4){
 					continue;
 				}
 
-				if (acl_enabled && acl_check(buf + off, n) != ACL_ALLOW) {
-					memcpy(&inner_dst, buf + IP_DST_OFF, IP_ADDR_LEN);
+				memcpy(&inner, ip + IP_SRC_OFF, IP_ADDR_LEN);
+
+				if (acl_enabled && acl_check(ip, n) != ACL_ALLOW) {
+					memcpy(&inner_dst, ip + IP_DST_OFF, IP_ADDR_LEN);
 					printf("[deny] %s -> %s proto=%d (%d bytes)\n",
 							ip_str(inner, ib), ip_str(inner_dst, ob),
-							buf[IP_PROTO_OFF], n);
+							ip[IP_PROTO_OFF], n);
 					continue;
 				}
-
-				memcpy(&inner, buf + off + IP_SRC_OFF, IP_ADDR_LEN);
 
 				printf("[udp->tun] %d bytes from %s:%d (inner src %s), icmp type=%d\n",
 						n, ip_str(src.sin_addr, ob), ntohs(src.sin_port),
-						ip_str(inner, ib), buf[IP_IHL(buf)]);
+						ip_str(inner, ib), ip[IP_IHL(ip)]);
 
-				if (write(tun_fd, buf + off, n) < 0) {
+				if (write(tun_fd, ip, n) < 0) {
 					perror("write tun");
 				}
 			}
 			else if (fd == tun_fd) {
-				n = read(tun_fd, buf + PKT_HDR_LEN, sizeof(buf) - PKT_HDR_LEN);
+				n = read(tun_fd, packet + PKT_HDR_LEN, sizeof(packet) - PKT_HDR_LEN);
 				if (n < 0) { perror("read tun"); goto out; }
 
-				if (n < IP_MIN_HDR || IP_VERSION(buf) != 4) {
+				ip = packet + PKT_HDR_LEN;
+				if (n < IP_MIN_HDR || IP_VERSION(ip) != 4) {
 					printf("[skip] non-IPv4 (ver=%d, %d bytes)\n",
-							IP_VERSION(buf), n);
+							IP_VERSION(ip), n);
 					continue;
 				}
 
-				memcpy(&inner, buf + PKT_HDR_LEN + IP_DST_OFF, IP_ADDR_LEN);
+				memcpy(&inner, ip + IP_DST_OFF, IP_ADDR_LEN);
 
 				memset(&msg_header, 0, sizeof(msg_header));
 
@@ -245,17 +254,17 @@ int main(int argc, char *argv[])
 				printf("[tun->udp] %d bytes to %s (%s:%d), icmp type=%d\n",
 						n, ip_str(inner, ib),
 						ip_str(peer->outer.sin_addr, ob), ntohs(peer->outer.sin_port),
-						buf[off + IP_IHL(buf)]);
+						ip[IP_IHL(ip)]);
 
 				msg_header.version = PROTOCOL_VERSION;
 				msg_header.type = MSG_TYPE_DATA;
 				msg_header.session_idx = peer->session_idx;
 				data_header.counter = peer->tx_counter++;
 
-				off = msg_encode(buf, sizeof(buf), &msg_header);
-				off += data_encode(buf + off, sizeof(buf) - off, &data_header);
+				off = msg_encode(packet, sizeof(packet), &msg_header);
+				off += data_encode(packet + off, sizeof(packet) - off, &data_header);
 
-				sent = sendto(sock, buf, off + n, 0,
+				sent = sendto(sock, packet, off + n, 0,
 						(struct sockaddr *)&peer->outer, peer->outer_len);
 				if (sent < 0) {
 					perror("sendto");
@@ -263,11 +272,14 @@ int main(int argc, char *argv[])
 			}
 		}
 	}
+	ret = 0;
 
 out:
-	close(epfd);
+	if (epfd >= 0) {
+		close(epfd);
+	}
 	close(sock);
 	close(tun_fd);
-	return 0;
+	return ret;
 }
 

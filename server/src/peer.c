@@ -28,7 +28,7 @@ static uint32_t make_idx(int32_t slot)
 	return idx;
 }
 
-peer_t *peer_find_idx(int32_t idx)
+peer_t *peer_find_idx(uint32_t idx)
 {
 	uint32_t slot = idx & IDX_SLOT_MASK;
 
@@ -122,8 +122,8 @@ void peer_dump(void)
 	printf("--- peer table ---\n");
 	for (i = 0; i < MAX_PEERS; i++) {
 		if (!peers[i].used) continue;
-		printf("  [%d] %-12s <- %s:%d  (age %lds)\n", i,
-				ip4(peers[i].inner, ib),
+		printf("  [%d] %-12s idx=%08x <- %s:%d  (age %lds)\n", i,
+				ip4(peers[i].inner, ib), peers[i].session_idx,
 				ip4(peers[i].outer.sin_addr, ob),
 				ntohs(peers[i].outer.sin_port),
 				(long)(time(NULL) - peers[i].last_seen));

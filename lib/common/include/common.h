@@ -43,6 +43,9 @@ typedef struct data_header {
 	uint64_t counter;
 } data_header_t;
 
+_Static_assert(sizeof(msg_header_t) == 8, "msg_header wire size");
+_Static_assert(sizeof(data_header_t) == 8, "data_header wire size");
+
 
 int tun_alloc(char *dev);
 void hex_dump(const unsigned char *buf, int len);

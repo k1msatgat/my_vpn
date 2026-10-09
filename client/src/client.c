@@ -1,6 +1,3 @@
-#include <asm-generic/errno-base.h>
-#include <asm-generic/errno.h>
-#include <asm-generic/socket.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,6 +7,7 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <sys/epoll.h>
+#include <sys/time.h>
 #include <netinet/in.h>
 #include <net/if.h>
 
@@ -61,9 +59,9 @@ static int do_handshake(int32_t sock, session_t *session){
 	memcpy(req + off, &session->tun_ip, sizeof(session->tun_ip));
 	off += sizeof(session->tun_ip);
 
-	for (tries = 0; tries < HS_RETRY; tries++) {
+	for (tries = 1; tries <= HS_RETRY && running; tries++) {
 		printf("[HS] request %d/%d\n", tries, HS_RETRY);
-		if (sendto(sock, req, off, 0, (struct sockaddr*)&session->server, sizeof(session->server))){
+		if (sendto(sock, req, off, 0, (struct sockaddr*)&session->server, sizeof(session->server)) < 0){
 			perror("sendto handshake");
 			return -1;
 		}
@@ -105,17 +103,19 @@ int main(int argc, char *argv[])
 {
 	char ifname[IFNAMSIZ];
 	int tun_fd, sock, n, sent;
-	int epfd, nev, i;
+	int epfd = -1, nev, i;
 	struct epoll_event ev;
 	struct epoll_event events[MAX_EVENTS];
 	int32_t fd = 0;
 
 	uint8_t packet[BUF_SIZE];
+	uint8_t *ip;
 	msg_header_t msg_header;
 	data_header_t data_header;
 	int off = 0;
 	char *end;
 	int32_t server_port;
+	int ret = 1;
 
 	session_t session;
 
@@ -155,18 +155,18 @@ int main(int argc, char *argv[])
 	server_port = strtol(argv[3], &end, 10);
 	if (*end != '\0' || server_port <= 0 || server_port > 65535) {
 		fprintf(stderr, "invalid port : %s\n", argv[3]);
-		return -1;
+		goto out;
 	}
 	session.server.sin_port = htons((uint16_t)server_port);
 
 	if (inet_pton(AF_INET, argv[2], &session.server.sin_addr) != 1) {
-		fprintf(stderr, "invalid server ip : %s", argv[2]);
-		return -1;
+		fprintf(stderr, "invalid server ip : %s\n", argv[2]);
+		goto out;
 	}
 
 	if (inet_pton(AF_INET, argv[4], &session.tun_ip) != 1){
-		fprintf(stderr, "invald tun ip : %s\n", argv[4]);
-		return -1;
+		fprintf(stderr, "invalid tun ip : %s\n", argv[4]);
+		goto out;
 	}
 
 	if (do_handshake(sock, &session)) {
@@ -176,29 +176,21 @@ int main(int argc, char *argv[])
 	epfd = epoll_create1(EPOLL_CLOEXEC);
 	if (epfd < 0) {
 		perror("epoll_create1");
-		close(sock);
-		close(tun_fd);
-		return 1;
+		goto out;
 	}
 
 	ev.events = EPOLLIN;
 	ev.data.fd = tun_fd;
 	if (epoll_ctl(epfd, EPOLL_CTL_ADD, tun_fd, &ev) < 0){
-		perror("epoll_ctl: sock");
-		close(epfd);
-		close(sock);
-		close(tun_fd);
-		return 1;
+		perror("epoll_ctl: tun_fd");
+		goto out;
 	}
 
 	ev.events = EPOLLIN;
 	ev.data.fd = sock;
 	if (epoll_ctl(epfd, EPOLL_CTL_ADD, sock, &ev) < 0){
 		perror("epoll_ctl: sock");
-		close(epfd);
-		close(sock);
-		close(tun_fd);
-		return 1;
+		goto out;
 	}
 
 	printf("[%s] epoll ready (epfd=%d, tun_fd=%d, sock=%d)\n", ifname, epfd, tun_fd, sock);
@@ -217,7 +209,7 @@ int main(int argc, char *argv[])
 			fd = events[i].data.fd;
 
 			if (events[i].events & (EPOLLERR | EPOLLHUP)) {
-				fprintf(stderr, "[%s][err] fd=%d evnets=0x%x\n", ifname, fd, events[i].events);
+				fprintf(stderr, "[%s][err] fd=%d events=0x%x\n", ifname, fd, events[i].events);
 				continue;
 			}
 
@@ -228,11 +220,12 @@ int main(int argc, char *argv[])
 					goto out;
 				}
 
-				if (n < IP_MIN_HDR || IP_VERSION(packet) != 4) {
-					printf("[%s][skip] non-IPv4 (ver=%d, %d bytes)\n", ifname, IP_VERSION(packet), n);
+				ip = packet + PKT_HDR_LEN;
+				if (n < IP_MIN_HDR || IP_VERSION(ip) != 4) {
+					printf("[%s][skip] non-IPv4 (ver=%d, %d bytes)\n", ifname, IP_VERSION(ip), n);
 				}
 				else {
-					printf("[%s][tun->udp] %d bytes, proto=%d, icmp type=%d\n", ifname, n, packet[IP_PROTO_OFF], packet[IP_IHL(packet)]);
+					printf("[%s][tun->udp] %d bytes, proto=%d, icmp type=%d\n", ifname, n, ip[IP_PROTO_OFF], ip[IP_IHL(ip)]);
 					memset(&msg_header,0, sizeof(msg_header_t));
 					msg_header.version = PROTOCOL_VERSION;
 					msg_header.type = MSG_TYPE_DATA;
@@ -242,7 +235,7 @@ int main(int argc, char *argv[])
 					off = msg_encode(packet, sizeof(packet), &msg_header);
 					off += data_encode(packet+off, sizeof(packet) - off, &data_header);
 
-					sent = sendto(sock, packet, off, 0, (struct sockaddr *)&session.server, sizeof(session.server));
+					sent = sendto(sock, packet, off + n, 0, (struct sockaddr *)&session.server, sizeof(session.server));
 					if (sent < 0) perror("sendto");
 				}
 
@@ -255,42 +248,48 @@ int main(int argc, char *argv[])
 
 				off = msg_decode(packet, (size_t)n, &msg_header);
 
-				if (off < 0 || msg_header.type != MSG_TYPE_DATA) {
+				if (off < 0 || msg_header.version != PROTOCOL_VERSION || msg_header.type != MSG_TYPE_DATA) {
 					printf("[%s][drop] bad header(%d bytes)\n", ifname, n);
 					continue;
 				}
 
 				if (msg_header.session_idx != session.idx) {
-					printf("[%s][drop] wrong session [%08x][%08x]", ifname, msg_header.session_idx, session.idx);
+					printf("[%s][drop] wrong session [%08x][%08x]\n", ifname, msg_header.session_idx, session.idx);
+					continue;
 				}
 
 				if  (data_decode(packet + off, (size_t)(n - off), &data_header) < 0) {
 					printf("[%s][drop] short data header\n", ifname);
+					continue;
 				}
 
 				off += sizeof(data_header_t);
 
 				n -= off;
 
-				if (n < IP_MIN_HDR || IP_VERSION(packet) != 4) {
+				ip = packet + off;
+				if (n < IP_MIN_HDR || IP_VERSION(ip) != 4) {
 					printf("[%s][drop] udp: not IPv4 (%d bytes)\n", ifname, n);
 					continue;
 				}
 
-				printf("[%s][udp->tun] %d bytes, proto=%d, icmp type=%d\n", ifname, n, packet[IP_PROTO_OFF], packet[IP_IHL(packet)]);
+				printf("[%s][udp->tun] %d bytes, proto=%d, icmp type=%d\n", ifname, n, ip[IP_PROTO_OFF], ip[IP_IHL(ip)]);
 
-				if (write(tun_fd, packet, n) < 0) {
+				if (write(tun_fd, ip, n) < 0) {
 					perror("write tun");
 				}
 			}
 		}
 	}
+	ret = 0;
 
 out :
-	close(epfd);
+	if (epfd >= 0) {
+		close(epfd);
+	}
 	close(sock);
 	close(tun_fd);
 
-	return 0;
+	return ret;
 }
 
