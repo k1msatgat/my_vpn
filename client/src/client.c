@@ -114,6 +114,8 @@ int main(int argc, char *argv[])
 	msg_header_t msg_header;
 	data_header_t data_header;
 	int off = 0;
+	char *end;
+	int32_t server_port;
 
 	session_t session;
 
@@ -125,13 +127,6 @@ int main(int argc, char *argv[])
 
 	signal(SIGINT, on_signal);
 	signal(SIGTERM, on_signal);
-
-	memset(&session, 0, sizeof(session_t));
-
-	if (inet_pton(AF_INET, argv[4], &session.tun_ip) != 1){
-		fprintf(stderr, "bad server address : %s\n", argv[4]);
-		return 1;
-	}
 
 	strncpy(ifname, argv[1], IFNAMSIZ - 1);
 	ifname[IFNAMSIZ - 1] = '\0';
@@ -152,6 +147,27 @@ int main(int argc, char *argv[])
 	}
 
 	printf("[%s] tunneling to %s:%s\n", ifname, argv[2], argv[3]);
+
+	memset(&session, 0, sizeof(session_t));
+
+	session.server.sin_family = AF_INET;
+
+	server_port = strtol(argv[3], &end, 10);
+	if (*end != '\0' || server_port <= 0 || server_port > 65535) {
+		fprintf(stderr, "invalid port : %s\n", argv[3]);
+		return -1;
+	}
+	session.server.sin_port = htons((uint16_t)server_port);
+
+	if (inet_pton(AF_INET, argv[2], &session.server.sin_addr) != 1) {
+		fprintf(stderr, "invalid server ip : %s", argv[2]);
+		return -1;
+	}
+
+	if (inet_pton(AF_INET, argv[4], &session.tun_ip) != 1){
+		fprintf(stderr, "invald tun ip : %s\n", argv[4]);
+		return -1;
+	}
 
 	if (do_handshake(sock, &session)) {
 		goto out;
