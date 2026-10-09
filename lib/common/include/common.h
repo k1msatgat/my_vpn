@@ -25,6 +25,10 @@
 
 #define PKT_HDR_LEN (sizeof(msg_header_t) + sizeof(data_header_t))
 
+#define KEEPALIVE_INTERVAL_SEC 10
+#define KEEPALIVE_INTERVAL_MSEC (KEEPALIVE_INTERVAL_SEC * 1000)
+#define SESSION_TIMEOUT_SEC 60
+
 typedef enum MSG_TYPE {
 	MSG_TYPE_REQ_HANDSHAKE = 1,
 	MSG_TYPE_RES_HANDSHAKE,

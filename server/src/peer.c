@@ -4,6 +4,7 @@
 #include <string.h>
 #include <sys/random.h>
 
+#include "common.h"
 #include "peer.h"
 
 static peer_t peers[MAX_PEERS];
@@ -59,6 +60,21 @@ peer_t *peer_find_idx(uint32_t idx)
 	}
 
 	return &peers[slot];
+}
+
+void peer_check_expired(void) {
+	int i;
+	time_t now = time(NULL);
+	char dst[INET_ADDRSTRLEN];
+
+	for (i = 0; i < MAX_PEERS; i++){
+		if(peers[i].used){
+			if (now - peers[i].last_seen > SESSION_TIMEOUT_SEC){
+				peers[i].used = 0;
+				printf("[peer] expire inner ip[%s] idx=%08x\n",ip4(peers[i].inner, dst), peers[i].session_idx);
+			}
+		}
+	}
 }
 
 peer_t *peer_register(struct in_addr inner, const struct sockaddr_in *outer, socklen_t len)

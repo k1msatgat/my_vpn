@@ -170,7 +170,7 @@ int main(int argc, char *argv[])
 	printf("epoll ready (epfd=%d, tun_fd=%d, sock=%d)\n", epfd, tun_fd, sock);
 
 	while (running) {
-		nev = epoll_wait(epfd, events, MAX_EVENTS, -1);
+		nev = epoll_wait(epfd, events, MAX_EVENTS, 1000);
 		if (nev < 0) {
 			if (errno == EINTR){
 				continue;
@@ -178,6 +178,8 @@ int main(int argc, char *argv[])
 			perror("epoll_wait");
 			break;
 		}
+
+		peer_check_expired();
 
 		for (i = 0; i < nev; i++) {
 			fd = events[i].data.fd;

@@ -20,8 +20,6 @@
 #define HS_TIMEOUT_SEC 1
 #define HS_RETRY 5
 
-#define KEEPALIVE_INTERVAL_MS 10000
-
 typedef struct session {
 	uint32_t idx;
 	uint64_t tx_counter;
@@ -241,7 +239,7 @@ int main(int argc, char *argv[])
 			break;
 		}
 
-		if (last_tx_ms + KEEPALIVE_INTERVAL_MS < get_current_time_ms()){
+		if (last_tx_ms + KEEPALIVE_INTERVAL_MSEC < get_current_time_ms()){
 			send_keepalive(sock, &session);
 			last_tx_ms = get_current_time_ms();
 		}
@@ -299,6 +297,10 @@ int main(int argc, char *argv[])
 
 				off = msg_decode(packet, (size_t)n, &msg_header);
 
+				if (off < 0 || msg_header.version != PROTOCOL_VERSION) {
+					continue;
+				}
+
 				if (msg_header.session_idx != session.idx) {
 					printf("[%s][drop] wrong session [%08x][%08x]\n", ifname, msg_header.session_idx, session.idx);
 					continue;
@@ -310,13 +312,8 @@ int main(int argc, char *argv[])
 					case MSG_TYPE_DATA:
 						break;
 					default:
-						printf("[%s][drop] bad header(%d bytes)\n", ifname, n);
+						printf("[%s][drop] unknown type(%d bytes)\n", ifname, n);
 						continue;
-				}
-
-
-				if (off < 0 || msg_header.version != PROTOCOL_VERSION || msg_header.type != MSG_TYPE_DATA) {
-					continue;
 				}
 
 				if  (data_decode(packet + off, (size_t)(n - off), &data_header) < 0) {
