@@ -1,8 +1,10 @@
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
 #include <errno.h>
+#include <time.h>
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
@@ -18,6 +20,8 @@
 #define HS_TIMEOUT_SEC 1
 #define HS_RETRY 5
 
+#define KEEPALIVE_INTERVAL_MS 10000
+
 typedef struct session {
 	uint32_t idx;
 	uint64_t tx_counter;
@@ -31,6 +35,13 @@ static void on_signal(int sig)
 {
 	(void)sig;
 	running = 0;
+}
+
+static uint64_t get_current_time_ms(void){
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+
+	return ((uint64_t)ts.tv_sec * 1000) + ((uint64_t)(ts.tv_nsec / 1000000));
 }
 
 static int do_handshake(int32_t sock, session_t *session){
@@ -101,6 +112,24 @@ static int do_handshake(int32_t sock, session_t *session){
 	return -1;
 }
 
+static void send_keepalive(int32_t sock, const session_t *session) {
+	msg_header_t msg_header;
+	int32_t off;
+	int32_t sent;
+	uint8_t packet[sizeof(msg_header)];
+
+	memset(&msg_header,0, sizeof(msg_header_t));
+	msg_header.version = PROTOCOL_VERSION;
+	msg_header.type = MSG_TYPE_KEEPALIVE;
+	msg_header.session_idx = session->idx;
+	off = msg_encode(packet, sizeof(packet), &msg_header);
+
+	sent = sendto(sock, packet, off, 0, (struct sockaddr *)&session->server, sizeof(session->server));
+	if (sent < 0) {
+		perror("sendto");
+	}
+}
+
 int main(int argc, char *argv[])
 {
 	char ifname[IFNAMSIZ];
@@ -120,6 +149,7 @@ int main(int argc, char *argv[])
 	char *end;
 	int32_t server_port;
 	int ret = 1;
+	uint64_t last_tx_ms = 0;
 
 	session_t session;
 
@@ -177,6 +207,8 @@ int main(int argc, char *argv[])
 		goto out;
 	}
 
+	last_tx_ms = get_current_time_ms();
+
 	epfd = epoll_create1(EPOLL_CLOEXEC);
 	if (epfd < 0) {
 		perror("epoll_create1");
@@ -200,13 +232,18 @@ int main(int argc, char *argv[])
 	printf("[%s] epoll ready (epfd=%d, tun_fd=%d, sock=%d)\n", ifname, epfd, tun_fd, sock);
 
 	while (running){
-		nev = epoll_wait(epfd, events, MAX_EVENTS, -1);
+		nev = epoll_wait(epfd, events, MAX_EVENTS, 1000);
 		if (nev < 0) {
 			if (errno == EINTR) {
 				continue;
 			}
 			perror("epoll_wait");
 			break;
+		}
+
+		if (last_tx_ms + KEEPALIVE_INTERVAL_MS < get_current_time_ms()){
+			send_keepalive(sock, &session);
+			last_tx_ms = get_current_time_ms();
 		}
 
 		for (i=0;i<nev;i++){
@@ -240,7 +277,10 @@ int main(int argc, char *argv[])
 					off += data_encode(packet+off, sizeof(packet) - off, &data_header);
 
 					sent = sendto(sock, packet, off + n, 0, (struct sockaddr *)&session.server, sizeof(session.server));
-					if (sent < 0) perror("sendto");
+					if (sent < 0) {
+						perror("sendto");
+					}
+					last_tx_ms = get_current_time_ms();
 				}
 
 			}
