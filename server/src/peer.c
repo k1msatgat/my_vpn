@@ -1,4 +1,5 @@
 #include <arpa/inet.h>
+#include <netinet/in.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/random.h>
@@ -26,6 +27,23 @@ static uint32_t make_idx(int32_t slot)
 
 	} while(idx == 0);
 	return idx;
+}
+
+void peer_touch(peer_t *peer, const struct sockaddr_in *outer, socklen_t len) {
+	char ib[INET_ADDRSTRLEN];
+	char ob[INET6_ADDRSTRLEN];
+	char nb[INET6_ADDRSTRLEN];
+
+	if (peer->outer.sin_addr.s_addr != outer->sin_addr.s_addr || peer->outer.sin_port != outer->sin_port) {
+		printf("[peer] rebind %s: %s:%d -> %s:%d\n",
+				ip4(peer->inner, ib),
+				ip4(peer->outer.sin_addr, ob), ntohs(peer->outer.sin_port),
+				ip4(outer->sin_addr, nb),   ntohs(outer->sin_port));
+		peer->outer = *outer;
+		peer->outer_len = len;
+	}
+
+	peer->last_seen = time(NULL);
 }
 
 peer_t *peer_find_idx(uint32_t idx)

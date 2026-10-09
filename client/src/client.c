@@ -55,7 +55,9 @@ static int do_handshake(int32_t sock, session_t *session){
 	msg_header.version = PROTOCOL_VERSION;
 	msg_header.type = MSG_TYPE_REQ_HANDSHAKE;
 	msg_header.session_idx = 0;
+
 	off = msg_encode(req, sizeof(req), &msg_header);
+
 	memcpy(req + off, &session->tun_ip, sizeof(session->tun_ip));
 	off += sizeof(session->tun_ip);
 

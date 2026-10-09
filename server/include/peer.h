@@ -21,6 +21,7 @@ typedef struct peer {
     time_t last_seen;
 } peer_t;
 
+void peer_touch(peer_t *peer, const struct sockaddr_in *outer, socklen_t len);
 void peer_init(void);
 peer_t *peer_register(struct in_addr inner,
                         const struct sockaddr_in *outer, socklen_t len);

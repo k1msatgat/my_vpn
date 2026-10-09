@@ -76,6 +76,7 @@ int main(int argc, char *argv[])
 	int32_t off;
 	char *end;
 	int ret = 1;
+	int fd = 0;
 
 	if (argc != 2 && argc != 3) {
 		fprintf(stderr, "usage: %s <port> [acl-file]\n", argv[0]);
@@ -160,7 +161,7 @@ int main(int argc, char *argv[])
 		}
 
 		for (i = 0; i < nev; i++) {
-			int fd = events[i].data.fd;
+			fd = events[i].data.fd;
 
 			if (events[i].events & (EPOLLERR | EPOLLHUP)) {
 				fprintf(stderr, "[err] fd=%d events=0x%x\n",
@@ -214,6 +215,11 @@ int main(int argc, char *argv[])
 
 				memcpy(&inner, ip + IP_SRC_OFF, IP_ADDR_LEN);
 
+				if (inner.s_addr != peer->inner.s_addr) {
+					printf("[drop] spoofed src %s for idx %08x\n", ip_str(inner, ib), peer->session_idx);
+					continue;
+				}
+
 				if (acl_enabled && acl_check(ip, n) != ACL_ALLOW) {
 					memcpy(&inner_dst, ip + IP_DST_OFF, IP_ADDR_LEN);
 					printf("[deny] %s -> %s proto=%d (%d bytes)\n",
@@ -221,10 +227,7 @@ int main(int argc, char *argv[])
 							ip[IP_PROTO_OFF], n);
 					continue;
 				}
-
-				printf("[udp->tun] %d bytes from %s:%d (inner src %s), icmp type=%d\n",
-						n, ip_str(src.sin_addr, ob), ntohs(src.sin_port),
-						ip_str(inner, ib), ip[IP_IHL(ip)]);
+				peer_touch(peer, &src, srclen);
 
 				if (write(tun_fd, ip, n) < 0) {
 					perror("write tun");
