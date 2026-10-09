@@ -299,13 +299,23 @@ int main(int argc, char *argv[])
 
 				off = msg_decode(packet, (size_t)n, &msg_header);
 
-				if (off < 0 || msg_header.version != PROTOCOL_VERSION || msg_header.type != MSG_TYPE_DATA) {
-					printf("[%s][drop] bad header(%d bytes)\n", ifname, n);
+				if (msg_header.session_idx != session.idx) {
+					printf("[%s][drop] wrong session [%08x][%08x]\n", ifname, msg_header.session_idx, session.idx);
 					continue;
 				}
 
-				if (msg_header.session_idx != session.idx) {
-					printf("[%s][drop] wrong session [%08x][%08x]\n", ifname, msg_header.session_idx, session.idx);
+				switch(msg_header.type){
+					case MSG_TYPE_KEEPALIVE:
+						continue; //우선 서버 장애 발생시는 고려하지 않음.
+					case MSG_TYPE_DATA:
+						break;
+					default:
+						printf("[%s][drop] bad header(%d bytes)\n", ifname, n);
+						continue;
+				}
+
+
+				if (off < 0 || msg_header.version != PROTOCOL_VERSION || msg_header.type != MSG_TYPE_DATA) {
 					continue;
 				}
 
