@@ -25,6 +25,7 @@ typedef struct session {
 	uint64_t tx_counter;
 	struct in_addr tun_ip;
 	struct sockaddr_in server;
+	time_t last_rx_s;
 }session_t;
 
 static volatile sig_atomic_t running = 1;
@@ -52,6 +53,7 @@ static int do_handshake(int32_t sock, session_t *session){
 	int32_t off = 0;
 	int32_t n = 0;
 	int32_t tries = 0;
+	int ret = -1;
 
 	tv.tv_sec = HS_TIMEOUT_SEC;
 	tv.tv_usec = 0;
@@ -74,7 +76,7 @@ static int do_handshake(int32_t sock, session_t *session){
 		printf("[HS] request %d/%d\n", tries, HS_RETRY);
 		if (sendto(sock, req, off, 0, (struct sockaddr*)&session->server, sizeof(session->server)) < 0){
 			perror("sendto handshake");
-			return -1;
+			goto out;
 		}
 
 		fromlen = sizeof(from);
@@ -84,7 +86,7 @@ static int do_handshake(int32_t sock, session_t *session){
 				continue;
 			}
 			perror("recvfrom handshake");
-			return -1;
+			goto out;
 		}
 
 		if (from.sin_addr.s_addr != session->server.sin_addr.s_addr || from.sin_port != session->server.sin_port){
@@ -99,15 +101,24 @@ static int do_handshake(int32_t sock, session_t *session){
 			continue;
 		}
 
-		session->idx = msg_header.session_idx;
+		if (session->idx != msg_header.session_idx) {
+			session->idx = msg_header.session_idx;
+			session->tx_counter = 0;
+		}
 
-		tv.tv_sec = 0;
-		setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 		printf("[HS] established idx=%08x\n", session->idx);
-		return 0;
+		ret = 0;
+		goto out;
 	}
 	fprintf(stderr, "[HS] no response from server\n");
-	return -1;
+
+out:
+	tv.tv_sec = 0;
+	tv.tv_usec = 0;
+	if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0){
+		perror("setsockopt SO_RCVTIMEO");
+	}
+	return ret;
 }
 
 static void send_keepalive(int32_t sock, const session_t *session) {
@@ -131,6 +142,7 @@ static void send_keepalive(int32_t sock, const session_t *session) {
 int main(int argc, char *argv[])
 {
 	char ifname[IFNAMSIZ];
+	char sb[INET_ADDRSTRLEN];
 	int tun_fd, sock, n, sent;
 	int epfd = -1, nev, i;
 	struct epoll_event ev;
@@ -206,6 +218,7 @@ int main(int argc, char *argv[])
 	}
 
 	last_tx_ms = get_current_time_ms();
+	session.last_rx_s = time(NULL);
 
 	epfd = epoll_create1(EPOLL_CLOEXEC);
 	if (epfd < 0) {
@@ -237,6 +250,15 @@ int main(int argc, char *argv[])
 			}
 			perror("epoll_wait");
 			break;
+		}
+
+		if (session.last_rx_s + SERVER_TIMEOUT_SEC < time(NULL)){
+			printf("[%s][HS] no rx from server for %ds, re-handshake\n", ifname, SERVER_TIMEOUT_SEC);
+			if (do_handshake(sock, &session) < 0){
+				fprintf(stderr, "[%s][HS] failed re-handshake[%s][%d], retry in %ds\n", ifname,
+						ip_str(session.server.sin_addr, sb), ntohs(session.server.sin_port), SERVER_TIMEOUT_SEC);
+			}
+			session.last_rx_s = time(NULL);
 		}
 
 		if (last_tx_ms + KEEPALIVE_INTERVAL_MSEC < get_current_time_ms()){
@@ -289,14 +311,7 @@ int main(int argc, char *argv[])
 					perror("recvfrom"); goto out;
 				}
 
-				if (from.sin_addr.s_addr != session.server.sin_addr.s_addr ||
-						from.sin_port != session.server.sin_port) {
-					printf("[%s][drop] not from server\n", ifname);
-					continue;
-				}
-
 				off = msg_decode(packet, (size_t)n, &msg_header);
-
 				if (off < 0 || msg_header.version != PROTOCOL_VERSION) {
 					continue;
 				}
@@ -306,9 +321,17 @@ int main(int argc, char *argv[])
 					continue;
 				}
 
+				if (from.sin_addr.s_addr != session.server.sin_addr.s_addr ||
+						from.sin_port != session.server.sin_port) {
+					printf("[%s][drop] not from server\n", ifname);
+					continue;
+				}
+
+				session.last_rx_s = time(NULL);
+
 				switch(msg_header.type){
 					case MSG_TYPE_KEEPALIVE:
-						continue; //우선 서버 장애 발생시는 고려하지 않음.
+						continue;
 					case MSG_TYPE_DATA:
 						break;
 					default:

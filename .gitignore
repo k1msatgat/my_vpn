@@ -4,4 +4,5 @@ bin/
 *.d
 *.a
 compile_commands.json
+*.swp
 
