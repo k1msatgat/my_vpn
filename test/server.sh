@@ -36,6 +36,12 @@ start_server() {
 	setup_if "$dev" "$SERVER_TUN_IP"
 }
 
+# 클라이언트 터널 IP 가 이 장비의 로컬 주소로 남아 있으면 커널이 터널로 들어온 패킷을 버린다.
+STALE_IF=$(ip -o -4 addr show | awk -v ip="$CLIENT_TUN_IP" '{split($4, a, "/"); if (a[1] == ip) print $2}' | head -n 1)
+if [ -n "$STALE_IF" ]; then
+	die "client tunnel ip $CLIENT_TUN_IP is assigned locally on $STALE_IF; remove it first: sudo ip tuntap del dev $STALE_IF mode tun"
+fi
+
 say "server: udp port $PORT, tunnel ip $SERVER_TUN_IP, acl ${ACL_FILE:-off}"
 start_server
 

@@ -24,6 +24,9 @@ Zero Trust Network Access(ZTNA)의 기반 구조를 학습하는 것을 목표�
 - **핸드셰이크 & 세션 idx** — 서버가 클라이언트별로 추측하기 어려운 32bit 세션 식별자 발급
 - **피어 테이블** — O(1) 세션 조회, 테이블이 가득 차면 LRU 방식으로 교체
 - **ACL** — `src / dst / proto / dport` 기반 first-match 정책, 기본 거부(default deny)
+- **위조 방어** — 서버는 inner src가 세션에 등록된 터널 IP와 같은지, 클라이언트는 출발지가 서버인지 확인
+- **Keepalive & 세션 만료** — 유휴 시 10초마다 keepalive, 서버는 60초 무응답 세션을 정리
+- **재핸드셰이크** — 클라이언트가 30초간 서버 응답이 없으면 스스로 세션을 다시 맺음
 - **epoll 단일 스레드 이벤트 루프** — TUN fd와 UDP 소켓을 하나의 루프에서 처리
 - **헤드룸 기반 버퍼 설계** — 헤더 자리를 비워두고 읽어 송신 경로에서 추가 memcpy 없음
 
@@ -52,7 +55,7 @@ Zero Trust Network Access(ZTNA)의 기반 구조를 학습하는 것을 목표�
 | `MSG_TYPE_REQ_HANDSHAKE` | 1 | `msg_header` + 클라이언트 터널 IP (4B) |
 | `MSG_TYPE_RES_HANDSHAKE` | 2 | `msg_header` (발급된 `session_idx` 포함) |
 | `MSG_TYPE_DATA` | 3 | `msg_header` + `data_header` + IP 패킷 |
-| `MSG_TYPE_KEEPALIVE` | 4 | 예약 (미구현) |
+| `MSG_TYPE_KEEPALIVE` | 4 | `msg_header`만 (8B) |
 
 - 헤더 크기는 `_Static_assert`로 컴파일 타임에 8바이트임을 보장합니다.
 - 정수 필드는 `msg_encode` / `data_encode`에서 네트워크 바이트 순서로 변환합니다.
@@ -72,6 +75,34 @@ sequenceDiagram
 ```
 
 - 클라이언트는 1초 타임아웃으로 최대 5회 재전송하며, 서버 주소에서 온 응답만 받습니다.
+- 같은 터널 IP가 같은 외부 주소에서 다시 요청하면 서버는 기존 세션의 idx를 그대로 돌려줍니다.
+
+### Keepalive & session lifetime
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+    Note over C: 10초간 송신 없음
+    C->>S: KEEPALIVE (idx)
+    Note over S: last_seen 갱신
+    S->>C: KEEPALIVE (idx)
+    Note over C: last_rx 갱신
+    Note over S: 60초간 수신 없음 → 세션 만료
+    Note over C: 30초간 수신 없음 → 재핸드셰이크
+    C->>S: REQ_HANDSHAKE
+    S->>C: RES_HANDSHAKE (새 idx)
+```
+
+| 상수 (`common.h`) | 값 | 의미 |
+|---|---|---|
+| `KEEPALIVE_INTERVAL_SEC` | 10 | 클라이언트가 이 시간 동안 아무것도 보내지 않았으면 keepalive 전송 |
+| `SERVER_TIMEOUT_SEC` | 30 | 클라이언트가 이 시간 동안 서버에서 아무것도 받지 못하면 재핸드셰이크 |
+| `SESSION_TIMEOUT_SEC` | 60 | 서버가 이 시간 동안 수신이 없는 세션을 만료 |
+
+- keepalive는 NAT 매핑 유지와 생존 확인을 겸합니다. 서버는 받은 keepalive에 같은 형식으로 응답합니다.
+- 서버가 재시작했거나 세션이 만료된 경우 서버는 옛 idx의 패킷을 버리고, 클라이언트는 응답이 끊긴 것을 감지해 새 세션을 받습니다.
+- 재핸드셰이크로 idx가 바뀌면 클라이언트는 `tx_counter`를 0으로 되돌립니다. idx가 그대로면 세션이 이어지는 것이므로 유지합니다.
 
 ### Session index
 
@@ -115,10 +146,20 @@ write(tun, buf + 16, n - 16)                       └─ 커널로 전달
 서버 측 검증 순서:
 
 1. 헤더 길이 / 프로토콜 버전
-2. 메시지 타입 분기 (핸드셰이크 → `handle_handshake`)
+2. 핸드셰이크 요청이면 `handle_handshake`로 분기
 3. `session_idx`로 피어 조회 (`peer_find_idx`)
-4. `data_header` 및 IPv4 형식 검사
-5. ACL 정책 검사 (활성화 시)
+4. 메시지 타입 분기 (keepalive → `last_seen` 갱신 후 응답)
+5. `data_header` 및 IPv4 형식 검사
+6. inner src가 피어의 터널 IP와 같은지 검사
+7. ACL 정책 검사 (활성화 시)
+8. 모든 검사를 통과한 뒤에만 피어의 외부 주소와 `last_seen` 갱신 (`peer_touch`)
+
+클라이언트 측 검증 순서:
+
+1. 출발지 주소/포트가 서버와 같은지
+2. 헤더 길이 / 프로토콜 버전
+3. `session_idx`가 자신의 세션과 같은지
+4. 메시지 타입 분기, `data_header` 및 IPv4 형식 검사
 
 ---
 
@@ -181,6 +222,25 @@ ping 10.0.0.1     # client → server
 [tun0][udp->tun] 84 bytes, proto=1, icmp type=0
 ```
 
+### Test scripts
+
+`test/`의 스크립트는 빌드, 실행, 인터페이스 설정(IP/MTU)을 한 번에 하고 시나리오별로 `PASS` / `FAIL`을 출력합니다.
+서버 장비에서 먼저 실행한 뒤 클라이언트 장비에서 실행합니다.
+
+| 시나리오 | 서버 | 클라이언트 | 확인하는 것 |
+|---|---|---|---|
+| 기본 연결 | `test/server.sh` | `test/client.sh` | 핸드셰이크와 ping 왕복 |
+| 유휴 120초 | `test/server.sh` | `test/client.sh idle` | keepalive로 세션이 유지되고 재핸드셰이크가 발동하지 않음 |
+| 클라이언트 정지 70초 | `test/server.sh` | `test/client.sh stop` | 서버의 세션 만료, 클라이언트의 재핸드셰이크 |
+| 서버 재시작 | `test/server.sh restart` | `test/client.sh restart` | 서버 `kill -9` 후 재시작 시 새 세션으로 복구 |
+
+```bash
+SERVER_IP=203.0.113.10 test/client.sh idle    # 설정은 환경변수로 변경 (기본값은 test/common.sh)
+```
+
+- 로그는 `test/logs/`에도 저장됩니다.
+- 서버 장비에 클라이언트 터널 IP가 로컬 주소로 남아 있으면(이전 테스트의 persistent tun 등) 커널이 터널로 들어온 패킷을 버리므로, 서버 스크립트가 시작 전에 이를 검사합니다.
+
 ---
 
 ## ACL
@@ -215,13 +275,17 @@ my_vpn/
 │   ├── include/common.h   #   와이어 헤더 정의, IP 오프셋 매크로
 │   └── src/common.c       #   tun_alloc, encode/decode, hex_dump
 ├── client/
-│   └── src/client.c       # 핸드셰이크 + epoll 터널 루프
+│   └── src/client.c       # 핸드셰이크, keepalive, 재핸드셰이크 + epoll 터널 루프
 ├── server/
 │   ├── include/{peer,acl}.h
 │   └── src/
-│       ├── server.c       # epoll 루프, 핸드셰이크 처리, 패킷 검증
-│       ├── peer.c         # 피어 테이블, 세션 idx 발급/조회
+│       ├── server.c       # epoll 루프, 핸드셰이크/keepalive 처리, 패킷 검증
+│       ├── peer.c         # 피어 테이블, 세션 idx 발급/조회, 세션 만료
 │       └── alc.c          # ACL 파싱 및 매칭
+├── test/
+│   ├── common.sh          # 공용 설정 및 함수
+│   ├── server.sh          # 서버 실행 / 재시작 시나리오
+│   └── client.sh          # 클라이언트 실행 / idle·stop·restart 시나리오
 └── Makefile               # 컴포넌트별 bin/ 분리 빌드, 의존성 자동 추적
 ```
 
@@ -236,13 +300,21 @@ my_vpn/
 | 등록되지 않은 클라이언트의 데이터 주입 | 방어 | 유효한 `session_idx` 필요 |
 | 오래된 세션 idx 재사용 | 방어 | slot 재사용 시 난수 부분 변경 |
 | 정책 외 목적지 접근 | 방어 | ACL default deny |
-| 세션 내 inner src IP 위조 | **미방어** | 다음 단계: 피어 inner 주소 검증 |
-| 클라이언트의 비서버 출발지 패킷 수신 | **미방어** | 다음 단계: 출발지 주소 확인 |
-| 도청 / idx 탈취 | **미방어** | 평문 프로토콜 — 암호화 단계에서 해결 |
-| 핸드셰이크 위장 (세션 탈취) | **미방어** | 인증 단계에서 해결 |
-| 재전송 공격 | **미방어** | `counter` 필드 예약 — 수신 측 검증 예정 |
+| 세션 내 inner src IP 위조 | 방어 | inner src가 피어의 터널 IP와 다르면 폐기 |
+| 클라이언트의 비서버 출발지 패킷 수신 | 방어 | 출발지 주소/포트가 서버와 다르면 폐기 |
+| 죽은 세션이 테이블을 계속 점유 | 방어 | 60초 무응답 세션 만료 |
+| 도청 / idx 탈취 | **미방어** | 평문 프로토콜 — idx를 아는 공격자는 패킷 주입과 외부 주소 변경이 가능. 암호화 단계에서 해결 |
+| 핸드셰이크 위장 (세션 탈취) | **미방어** | 터널 IP만 알면 누구나 세션을 받을 수 있음. 인증 단계에서 해결 |
+| 재전송 공격 | **미방어** | `counter`는 송신만 하고 수신 측 검증 없음. 인증 없이는 값 변조가 가능해 암호화와 함께 추가 예정 |
 
 > 학습 목적의 프로젝트이며, 프로덕션 환경에서 사용하기 위한 보안 수준이 아닙니다.
+
+### Known limitations
+
+- **재핸드셰이크는 블로킹입니다.** 메인 루프 안에서 응답을 최대 5초 기다리며, 그동안 터널 패킷은 처리되지 않습니다. 실패하면 30초 뒤에 다시 시도합니다.
+- **종료 통지가 없습니다.** 클라이언트가 종료해도 서버는 알지 못하고, 세션은 60초 뒤 만료로 정리됩니다.
+- **세션 만료와 재핸드셰이크 판정은 벽시계(`time()`) 기준입니다.** 시스템 시간이 크게 바뀌면 만료나 재핸드셰이크가 일찍 일어날 수 있습니다.
+- **IPv4만 터널링합니다.** IPv6 패킷은 건너뜁니다.
 
 ---
 
@@ -252,8 +324,11 @@ my_vpn/
 - [x] 와이어 헤더 설계 및 encode/decode
 - [x] 핸드셰이크와 세션 idx 기반 피어 관리
 - [x] ACL (default deny)
-- [ ] 위조 방어 — inner src 검증, 검증 후 NAT 외부 주소 갱신, 클라이언트 출발지 확인
+- [x] 위조 방어 — inner src 검증, 검증 후 NAT 외부 주소 갱신, 클라이언트 출발지 확인
+- [x] Keepalive 및 세션 만료
+- [x] 클라이언트 재핸드셰이크 (서버 재시작 / 세션 만료 복구)
+- [x] 시나리오 테스트 스크립트
 - [ ] 암호화 & 키 교환 — X25519 + ChaCha20-Poly1305, `counter`를 nonce 및 재전송 방지에 사용
 - [ ] 신원 기반 인증 — 클라이언트 키 인증, 사용자/기기 단위 정책 (ZTNA)
-- [ ] Keepalive 및 세션 만료
+- [ ] 비블로킹 재핸드셰이크 (상태 머신), 종료 통지 메시지
 - [ ] Windows 클라이언트 — Wintun, Win32/MFC GUI, Windows 서비스 + Named Pipe IPC
