@@ -7,3 +7,9 @@ compile_commands.json
 *.swp
 
 test/logs/
+
+# Windows (Visual Studio)
+windows/.vs/
+windows/build/
+windows/third_party/wintun/
+*.vcxproj.user

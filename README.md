@@ -94,7 +94,7 @@ sequenceDiagram
     S->>C: RES_HANDSHAKE (새 idx)
 ```
 
-| 상수 (`common.h`) | 값 | 의미 |
+| 상수 (`proto.h`) | 값 | 의미 |
 |---|---|---|
 | `KEEPALIVE_INTERVAL_SEC` | 10 | 클라이언트가 이 시간 동안 아무것도 보내지 않았으면 keepalive 전송 |
 | `SERVER_TIMEOUT_SEC` | 30 | 클라이언트가 이 시간 동안 서버에서 아무것도 받지 못하면 재핸드셰이크 |
@@ -243,6 +243,43 @@ SERVER_IP=203.0.113.10 test/client.sh idle    # 설정은 환경변수로 변경
 
 ---
 
+## Windows client
+
+`windows/`에 같은 와이어 프로토콜을 쓰는 Windows용 클라이언트가 있습니다. 서버는 Linux 그대로이며,
+프로토콜 코드(`lib/common`의 `proto.h` / `proto.c`)는 Linux와 Windows가 같은 소스를 빌드합니다.
+
+| | Linux (`client/`) | Windows (`windows/`) |
+|---|---|---|
+| 가상 인터페이스 | `/dev/net/tun` fd, `read` / `write` | [Wintun](https://www.wintun.net/) 링버퍼, `WintunReceivePacket` / `WintunSendPacket` |
+| 이벤트 루프 | `epoll_wait` | `WaitForMultipleObjects` (종료 이벤트 + Wintun read 이벤트 + `WSAEventSelect` 소켓 이벤트) |
+| 핸드셰이크 대기 | `SO_RCVTIMEO` 블로킹 `recvfrom` | 같은 이벤트 대기 — 대기 중에도 종료 요청에 바로 반응 |
+| 종료 | `SIGINT` / `SIGTERM` | manual-reset 이벤트 (콘솔에서는 Ctrl+C) |
+| 시간 | `clock_gettime`, `time` | `GetTickCount64` |
+| IP / MTU 설정 | `ip addr add`, `ip link set mtu` | 프로그램이 직접 설정 (`CreateUnicastIpAddressEntry`, `SetIpInterfaceEntry`) |
+
+- 터널 로직은 `core/tunnel.c`의 블로킹 함수 `tunnel_run()` 하나이고, 로그와 상태 변화는 콜백으로 알립니다.
+  콘솔 클라이언트는 이를 메인 스레드에서, GUI는 워커 스레드에서 호출하는 구조입니다.
+- Windows의 UDP 소켓은 ICMP port unreachable을 받으면 다음 `recvfrom`이 `WSAECONNRESET`으로 실패합니다.
+  서버가 내려가 있는 동안에도 재핸드셰이크를 계속 시도해야 하므로 `SIO_UDP_CONNRESET`으로 이 동작을 끕니다.
+- Wintun은 패킷을 링버퍼 안에서 직접 넘겨주므로 Linux의 헤드룸 방식을 쓸 수 없어, 송신 경로에서 한 번 복사합니다.
+
+### Build & run
+
+1. [wintun.net](https://www.wintun.net/)에서 Wintun zip을 받아 `windows/third_party/`에 풉니다.
+   (`windows/third_party/wintun/include/wintun.h`, `windows/third_party/wintun/bin/amd64/wintun.dll`)
+2. Visual Studio 2022로 `windows/my_vpn.sln`을 열어 x64로 빌드합니다. `wintun.dll`은 빌드 후 실행 파일 옆으로 복사됩니다.
+3. **관리자 권한** 터미널에서 실행합니다. 어댑터 생성과 IP / MTU 설정까지 프로그램이 합니다.
+
+```
+windows\build\Debug\vpn_client.exe <adapter-name> <server-ip> <port> <tunnel-ip>
+:: 예) vpn_client.exe my_vpn 203.0.113.10 9000 10.0.0.3
+```
+
+- 터널 대역은 `/24`로 설정합니다.
+- 서버에서 Windows 클라이언트로 ping을 보내려면 Windows 방화벽에서 ICMPv4 인바운드를 허용해야 합니다.
+
+---
+
 ## ACL
 
 규칙 파일은 한 줄에 하나씩, **위에서부터 처음 일치한 규칙**이 적용되며 일치하는 규칙이 없으면 거부합니다.
@@ -272,8 +309,11 @@ any             any            any     any          deny
 ```
 my_vpn/
 ├── lib/common/            # 클라이언트/서버 공용
-│   ├── include/common.h   #   와이어 헤더 정의, IP 오프셋 매크로
-│   └── src/common.c       #   tun_alloc, encode/decode, hex_dump
+│   ├── include/proto.h    #   와이어 헤더 정의, IP 오프셋 매크로 (Linux / Windows 공용)
+│   ├── include/common.h   #   Linux 전용 선언 (proto.h 포함)
+│   └── src/
+│       ├── proto.c        #   encode/decode (Linux / Windows 공용)
+│       └── common.c       #   tun_alloc, hex_dump
 ├── client/
 │   └── src/client.c       # 핸드셰이크, keepalive, 재핸드셰이크 + epoll 터널 루프
 ├── server/
@@ -282,6 +322,10 @@ my_vpn/
 │       ├── server.c       # epoll 루프, 핸드셰이크/keepalive 처리, 패킷 검증
 │       ├── peer.c         # 피어 테이블, 세션 idx 발급/조회, 세션 만료
 │       └── alc.c          # ACL 파싱 및 매칭
+├── windows/               # Windows 클라이언트 (Visual Studio 솔루션)
+│   ├── my_vpn.sln
+│   ├── core/tunnel.{h,c}  #   Wintun + Winsock 터널 루프 (tunnel_run)
+│   └── cli/               #   콘솔 클라이언트 (main.c, vpn_client.vcxproj)
 ├── test/
 │   ├── common.sh          # 공용 설정 및 함수
 │   ├── server.sh          # 서버 실행 / 재시작 시나리오
@@ -331,7 +375,8 @@ my_vpn/
 - [ ] 암호화 & 키 교환 — X25519 + ChaCha20-Poly1305, `counter`를 nonce 및 재전송 방지에 사용
 - [ ] 신원 기반 인증 — 클라이언트 키 인증, 사용자/기기 단위 정책 (ZTNA)
 - [ ] 비블로킹 재핸드셰이크 (상태 머신), 종료 통지 메시지
-- [ ] Windows 클라이언트 — Wintun, Win32/MFC GUI, Windows 서비스 + Named Pipe IPC
+- [ ] Windows 클라이언트 — Wintun 콘솔 클라이언트 (구현, 실기 검증 중)
+- [ ] Windows 클라이언트 — Win32/MFC GUI, Windows 서비스 + Named Pipe IPC
 
 ---
 
@@ -345,4 +390,5 @@ my_vpn/
 | AI 리뷰 | 위 구현의 diff를 AI에게 검토받고, 지적받은 버그는 직접 수정 |
 | AI 작성 | `test/` 테스트 스크립트 전체 |
 | AI 작성 (일부) | `client.c`의 재핸드셰이크 로그, `do_handshake`의 `SO_RCVTIMEO` 원복과 `tx_counter` 리셋 |
+| AI 작성 | `windows/` Windows 클라이언트 전체 (Linux 클라이언트의 프로토콜 동작을 기준으로 작성), `proto.h` / `proto.c` 분리 (기존 코드 이동) |
 | AI 초안 | 이 README의 keepalive/재핸드셰이크 이후 갱신분 |
