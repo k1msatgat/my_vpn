@@ -12,4 +12,5 @@ test/logs/
 windows/.vs/
 windows/build/
 windows/third_party/wintun/
+windows/test/logs/
 *.vcxproj.user

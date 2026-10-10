@@ -238,6 +238,23 @@ ping 10.0.0.1     # client → server
 SERVER_IP=203.0.113.10 test/client.sh idle    # 설정은 환경변수로 변경 (기본값은 test/common.sh)
 ```
 
+Windows 클라이언트는 `windows/test/client.ps1`이 같은 시나리오를 돌립니다. 빌드 → 권한 상승(UAC) →
+실행 → 판정까지 한 번에 하고, 결과는 `windows/test/logs/`에 남습니다.
+
+| 시나리오 | 서버 (Linux) | 클라이언트 (Windows) |
+|---|---|---|
+| 기본 연결 | `test/server.sh` | `windows\test\client.ps1` |
+| 유휴 120초 | `test/server.sh` | `windows\test\client.ps1 idle` |
+| 서버 재시작 | `test/server.sh restart` | `windows\test\client.ps1 restart` |
+
+```powershell
+$env:SERVER_IP='203.0.113.10'; windows\test\client.ps1 idle -Sec 180
+```
+
+- 터널 IP 기본값은 `10.0.0.3`입니다 (`10.0.0.2`는 Linux 클라이언트가 씁니다).
+- 유휴 시나리오는 재핸드셰이크가 없었는지만 보지 않고, keepalive가 실제로 나가고 **서버 응답이 돌아왔는지**까지 확인합니다.
+- 종료는 Ctrl-C 경로(`GenerateConsoleCtrlEvent`)로 보내 어댑터와 터널 IP가 스스로 정리되는지도 함께 봅니다.
+
 - 로그는 `test/logs/`에도 저장됩니다.
 - 서버 장비에 클라이언트 터널 IP가 로컬 주소로 남아 있으면(이전 테스트의 persistent tun 등) 커널이 터널로 들어온 패킷을 버리므로, 서버 스크립트가 시작 전에 이를 검사합니다.
 
