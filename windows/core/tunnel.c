@@ -52,6 +52,8 @@ typedef struct tunnel {
 	WINTUN_ADAPTER_HANDLE adapter;
 	WINTUN_SESSION_HANDLE tun;
 	uint32_t bcast;		/* 터널 대역의 브로드캐스트 주소 (network byte order) */
+	uint64_t t0_ms;		/* 패킷 타임스탬프 기준점 */
+	uint64_t seq;		/* 패킷 일련번호 */
 	session_t session;
 } tunnel_t;
 
@@ -294,6 +296,98 @@ static int deliverable_dst(const tunnel_t *t, const uint8_t *ip)
 	return dst != t->bcast;
 }
 
+/* ---- packet events ------------------------------------------------------- */
+const char *tunnel_verdict_name(int verdict)
+{
+	switch (verdict) {
+	case TUNNEL_PASS:		return "pass";
+	case TUNNEL_DROP_NON_IPV4:	return "non-IPv4";
+	case TUNNEL_DROP_NON_UNICAST:	return "non-unicast";
+	case TUNNEL_DROP_TOO_LONG:	return "too long";
+	case TUNNEL_DROP_NOT_SERVER:	return "not from server";
+	case TUNNEL_DROP_BAD_HEADER:	return "bad header";
+	case TUNNEL_DROP_WRONG_SESSION:	return "wrong session";
+	case TUNNEL_DROP_UNKNOWN_TYPE:	return "unknown type";
+	case TUNNEL_DROP_IO_ERROR:	return "io error";
+	default:			return "?";
+	}
+}
+
+static void pkt_init(const tunnel_t *t, tunnel_packet_t *p, int dir, int verdict)
+{
+	memset(p, 0, sizeof(*p));
+	p->t_ms = GetTickCount64() - t->t0_ms;
+	p->dir = (uint8_t)dir;
+	p->verdict = (uint8_t)verdict;
+}
+
+/* inner IPv4 헤더에서 주소 / 프로토콜과 L4 식별 정보를 꺼낸다.
+ * ihl 을 신뢰하지 않고 길이를 매번 확인한다 — 신뢰할 수 없는 입력이다. */
+static void pkt_inner(tunnel_packet_t *p, const uint8_t *ip, uint32_t len)
+{
+	uint32_t ihl;
+
+	if (len < IP_MIN_HDR) {
+		return;
+	}
+
+	p->has_inner = 1;
+	p->inner_len = len;
+	p->proto = ip[IP_PROTO_OFF];
+	memcpy(&p->inner_src, ip + IP_SRC_OFF, IP_ADDR_LEN);
+	memcpy(&p->inner_dst, ip + IP_DST_OFF, IP_ADDR_LEN);
+
+	ihl = (uint32_t)IP_IHL(ip);
+	if (ihl < IP_MIN_HDR || ihl > len) {
+		return;
+	}
+
+	if (p->proto == 1) {			/* ICMP: type / code */
+		if (len - ihl >= 2) {
+			p->has_l4 = 1;
+			p->icmp_type = ip[ihl];
+			p->icmp_code = ip[ihl + 1];
+		}
+	}
+	else if (p->proto == 6 || p->proto == 17) {	/* TCP / UDP: 포트 */
+		if (len - ihl >= 4) {
+			uint16_t v;
+
+			p->has_l4 = 1;
+			memcpy(&v, ip + ihl + L4_SPORT_OFF, L4_PORT_LEN);
+			p->sport = ntohs(v);
+			memcpy(&v, ip + ihl + L4_DPORT_OFF, L4_PORT_LEN);
+			p->dport = ntohs(v);
+		}
+	}
+}
+
+/* 상세창 hex 덤프용. 와이어 앞부분을 그대로 떠 둔다. */
+static void pkt_snap(tunnel_packet_t *p, const uint8_t *wire, uint32_t len)
+{
+	uint32_t n = len < TUNNEL_SNAP_LEN ? len : TUNNEL_SNAP_LEN;
+
+	memcpy(p->snap, wire, n);
+	p->snap_len = (uint8_t)n;
+}
+
+static void pkt_emit(tunnel_t *t, tunnel_packet_t *p)
+{
+	if (!t->cfg->on_packet) {
+		return;
+	}
+
+	p->seq = ++t->seq;
+	t->cfg->on_packet(t->cfg->ctx, p);
+}
+
+/* 패킷 텍스트 로그는 on_packet 이 없을 때만 남긴다 (콘솔 클라이언트용).
+ * 둘 다 켜면 같은 내용을 두 번 만드는 셈이다. */
+static int pkt_log_text(const tunnel_t *t)
+{
+	return t->cfg->log_packets && !t->cfg->on_packet;
+}
+
 /* ---- protocol ------------------------------------------------------------ */
 /* 0: 세션 수립, -1: 응답 없음 / 오류 / 중지 요청 */
 static int do_handshake(tunnel_t *t)
@@ -303,6 +397,7 @@ static int do_handshake(tunnel_t *t)
 	uint8_t req[sizeof(msg_header_t) + sizeof(struct in_addr)];
 	uint8_t res[BUF_SIZE];
 	msg_header_t msg_header;
+	tunnel_packet_t pkt;
 	struct sockaddr_in from;
 	uint64_t deadline;
 	uint64_t now;
@@ -325,6 +420,12 @@ static int do_handshake(tunnel_t *t)
 		tlog(t, "[HS] request %d/%d", tries, HS_RETRY);
 		udp_send(t, req, off);
 
+		pkt_init(t, &pkt, TUNNEL_DIR_TX, TUNNEL_PASS);
+		pkt.msg_type = MSG_TYPE_REQ_HANDSHAKE;
+		pkt.wire_len = (uint32_t)off;
+		pkt_snap(&pkt, req, (uint32_t)off);
+		pkt_emit(t, &pkt);
+
 		deadline = GetTickCount64() + HS_TIMEOUT_MSEC;
 		for (;;) {
 			while ((n = udp_recv(t, res, (int)sizeof(res), &from)) >= 0) {
@@ -345,6 +446,13 @@ static int do_handshake(tunnel_t *t)
 					session->idx = msg_header.session_idx;
 					session->tx_counter = 0;
 				}
+
+				pkt_init(t, &pkt, TUNNEL_DIR_RX, TUNNEL_PASS);
+				pkt.msg_type = MSG_TYPE_RES_HANDSHAKE;
+				pkt.session_idx = msg_header.session_idx;
+				pkt.wire_len = (uint32_t)n;
+				pkt_snap(&pkt, res, (uint32_t)n);
+				pkt_emit(t, &pkt);
 
 				tlog(t, "[HS] established idx=%08x", session->idx);
 				return 0;
@@ -377,6 +485,7 @@ static void send_keepalive(tunnel_t *t)
 {
 	msg_header_t msg_header;
 	uint8_t packet[sizeof(msg_header_t)];
+	tunnel_packet_t pkt;
 	int off;
 
 	memset(&msg_header, 0, sizeof(msg_header_t));
@@ -388,9 +497,16 @@ static void send_keepalive(tunnel_t *t)
 	udp_send(t, packet, off);
 	t->session.last_ka_ms = t->session.last_tx_ms;
 
-	if (t->cfg->log_packets) {
+	if (pkt_log_text(t)) {
 		tlog(t, "[keepalive] sent");
 	}
+
+	pkt_init(t, &pkt, TUNNEL_DIR_TX, TUNNEL_PASS);
+	pkt.msg_type = MSG_TYPE_KEEPALIVE;
+	pkt.session_idx = msg_header.session_idx;
+	pkt.wire_len = (uint32_t)off;
+	pkt_snap(&pkt, packet, (uint32_t)off);
+	pkt_emit(t, &pkt);
 }
 
 /* TUN -> UDP. Wintun 링버퍼에 쌓인 패킷을 모두 비운다. */
@@ -400,6 +516,7 @@ static int pump_tun(tunnel_t *t)
 	uint8_t packet[BUF_SIZE];
 	msg_header_t msg_header;
 	data_header_t data_header;
+	tunnel_packet_t pkt;
 	BYTE *ip;
 	DWORD n;
 	DWORD err;
@@ -416,18 +533,37 @@ static int pump_tun(tunnel_t *t)
 			return -1;
 		}
 
-		if (n < IP_MIN_HDR || IP_VERSION(ip) != 4 || n > sizeof(packet) - PKT_HDR_LEN) {
-			if (t->cfg->log_packets) {
+		if (n < IP_MIN_HDR || IP_VERSION(ip) != 4) {
+			if (pkt_log_text(t)) {
 				tlog(t, "[skip] non-IPv4 (ver=%d, %lu bytes)", IP_VERSION(ip), n);
 			}
+			pkt_init(t, &pkt, TUNNEL_DIR_TX, TUNNEL_DROP_NON_IPV4);
+			pkt.wire_len = n;
+			pkt_snap(&pkt, ip, n);
+			pkt_emit(t, &pkt);
+		}
+		else if (n > sizeof(packet) - PKT_HDR_LEN) {
+			if (pkt_log_text(t)) {
+				tlog(t, "[skip] too long (%lu bytes)", n);
+			}
+			pkt_init(t, &pkt, TUNNEL_DIR_TX, TUNNEL_DROP_TOO_LONG);
+			pkt.wire_len = n;
+			pkt_inner(&pkt, ip, n);
+			pkt_snap(&pkt, ip, n);
+			pkt_emit(t, &pkt);
 		}
 		else if (!deliverable_dst(t, ip)) {
-			if (t->cfg->log_packets) {
+			if (pkt_log_text(t)) {
 				tlog(t, "[skip] non-unicast dst (%lu bytes, proto=%d)", n, ip[IP_PROTO_OFF]);
 			}
+			pkt_init(t, &pkt, TUNNEL_DIR_TX, TUNNEL_DROP_NON_UNICAST);
+			pkt.wire_len = n;
+			pkt_inner(&pkt, ip, n);
+			pkt_snap(&pkt, ip, n);
+			pkt_emit(t, &pkt);
 		}
 		else {
-			if (t->cfg->log_packets) {
+			if (pkt_log_text(t)) {
 				tlog(t, "[tun->udp] %lu bytes, proto=%d", n, ip[IP_PROTO_OFF]);
 			}
 
@@ -444,6 +580,16 @@ static int pump_tun(tunnel_t *t)
 			memcpy(packet + off, ip, n);
 
 			udp_send(t, packet, off + (int)n);
+
+			pkt_init(t, &pkt, TUNNEL_DIR_TX, TUNNEL_PASS);
+			pkt.msg_type = MSG_TYPE_DATA;
+			pkt.session_idx = msg_header.session_idx;
+			pkt.has_counter = 1;
+			pkt.counter = data_header.counter;
+			pkt.wire_len = (uint32_t)off + n;
+			pkt_inner(&pkt, ip, n);
+			pkt_snap(&pkt, packet, (uint32_t)off + n);
+			pkt_emit(t, &pkt);
 		}
 
 		WintunReleaseReceivePacket(t->tun, ip);
@@ -457,25 +603,44 @@ static int pump_udp(tunnel_t *t)
 	uint8_t packet[BUF_SIZE];
 	msg_header_t msg_header;
 	data_header_t data_header;
+	tunnel_packet_t pkt;
 	struct sockaddr_in from;
 	uint8_t *ip;
 	BYTE *out;
+	int wire;	/* 수신한 UDP 페이로드 길이. 아래에서 n을 깎으므로 따로 둔다 */
 	int off;
 	int n;
 
 	while ((n = udp_recv(t, packet, (int)sizeof(packet), &from)) >= 0) {
+		wire = n;
+
+		/* 검증 단계마다 verdict만 바꿔 같은 이벤트를 내보낸다.
+		 * 폐기된 패킷도 올려야 UI가 "왜 안 통했는지"를 집계할 수 있다. */
+		pkt_init(t, &pkt, TUNNEL_DIR_RX, TUNNEL_PASS);
+		pkt.wire_len = (uint32_t)wire;
+		pkt_snap(&pkt, packet, (uint32_t)wire);
+
 		if (!from_server(session, &from)) {
 			tlog(t, "[drop] not from server");
+			pkt.verdict = TUNNEL_DROP_NOT_SERVER;
+			pkt_emit(t, &pkt);
 			continue;
 		}
 
-		off = msg_decode(packet, (size_t)n, &msg_header);
+		off = msg_decode(packet, (size_t)wire, &msg_header);
 		if (off < 0 || msg_header.version != PROTOCOL_VERSION) {
+			pkt.verdict = TUNNEL_DROP_BAD_HEADER;
+			pkt_emit(t, &pkt);
 			continue;
 		}
+
+		pkt.msg_type = msg_header.type;
+		pkt.session_idx = msg_header.session_idx;
 
 		if (msg_header.session_idx != session->idx) {
 			tlog(t, "[drop] wrong session [%08x][%08x]", msg_header.session_idx, session->idx);
+			pkt.verdict = TUNNEL_DROP_WRONG_SESSION;
+			pkt_emit(t, &pkt);
 			continue;
 		}
 
@@ -485,44 +650,60 @@ static int pump_udp(tunnel_t *t)
 			case MSG_TYPE_KEEPALIVE:
 				/* last_rx_ms는 위에서 이미 갱신했다. 세션이 살아 있다는 증거라
 				 * 유휴 시나리오에서 확인할 수 있게 로그를 남긴다. */
-				if (t->cfg->log_packets) {
+				if (pkt_log_text(t)) {
 					tlog(t, "[keepalive] recv");
 				}
+				pkt_emit(t, &pkt);
 				continue;
 			case MSG_TYPE_DATA:
 				break;
 			default:
-				tlog(t, "[drop] unknown type(%d bytes)", n);
+				tlog(t, "[drop] unknown type(%d bytes)", wire);
+				pkt.verdict = TUNNEL_DROP_UNKNOWN_TYPE;
+				pkt_emit(t, &pkt);
 				continue;
 		}
 
-		if (data_decode(packet + off, (size_t)(n - off), &data_header) < 0) {
+		if (data_decode(packet + off, (size_t)(wire - off), &data_header) < 0) {
 			tlog(t, "[drop] short data header");
+			pkt.verdict = TUNNEL_DROP_BAD_HEADER;
+			pkt_emit(t, &pkt);
 			continue;
 		}
 
+		pkt.has_counter = 1;
+		pkt.counter = data_header.counter;
+
 		off += (int)sizeof(data_header_t);
 
-		n -= off;
+		n = wire - off;
 
 		ip = packet + off;
 		if (n < IP_MIN_HDR || IP_VERSION(ip) != 4) {
 			tlog(t, "[drop] udp: not IPv4 (%d bytes)", n);
+			pkt.verdict = TUNNEL_DROP_NON_IPV4;
+			pkt_emit(t, &pkt);
 			continue;
 		}
 
-		if (t->cfg->log_packets) {
+		pkt_inner(&pkt, ip, (uint32_t)n);
+
+		if (pkt_log_text(t)) {
 			tlog(t, "[udp->tun] %d bytes, proto=%d", n, ip[IP_PROTO_OFF]);
 		}
 
 		out = WintunAllocateSendPacket(t->tun, (DWORD)n);
 		if (!out) {
 			tlog(t, "WintunAllocateSendPacket failed: %lu", GetLastError());
+			pkt.verdict = TUNNEL_DROP_IO_ERROR;
+			pkt_emit(t, &pkt);
 			continue;
 		}
 
 		memcpy(out, ip, (size_t)n);
 		WintunSendPacket(t->tun, out);
+
+		pkt_emit(t, &pkt);
 	}
 
 	return n == RECV_ERROR ? -1 : 0;
@@ -549,6 +730,7 @@ int tunnel_run(const tunnel_config_t *cfg, HANDLE stop_event)
 	t->sock = INVALID_SOCKET;
 
 	t->bcast = subnet_broadcast(cfg->tun_ip, cfg->prefix_len);
+	t->t0_ms = GetTickCount64();
 
 	session->tun_ip = cfg->tun_ip;
 	session->server.sin_family = AF_INET;

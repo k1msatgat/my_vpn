@@ -9,6 +9,14 @@ struct vpn_session {
 	HANDLE thread;		/* 워커가 돌거나 끝났지만 아직 join 안 된 상태면 non-NULL */
 	HANDLE stop_event;	/* manual-reset. tunnel_run이 모든 대기 지점에서 같이 본다 */
 	tunnel_config_t cfg;	/* 워커가 보는 사본 */
+
+	/* 패킷 링버퍼. 워커가 넣고 UI 스레드가 꺼내므로 보호가 필요하다. */
+	CRITICAL_SECTION lock;
+	tunnel_packet_t *ring;
+	int ring_head;
+	int ring_count;
+	uint64_t ring_lost;
+	volatile LONG notify_pending;
 };
 
 /* ---- worker -> UI ------------------------------------------------------- */
@@ -42,6 +50,70 @@ static void on_state_cb(void *ctx, tunnel_state_t state)
 	vpn_session_t *s = (vpn_session_t *)ctx;
 
 	PostMessageW(s->notify, WM_VPN_STATE, (WPARAM)state, 0);
+}
+
+/* 패킷은 초당 수천 건이 될 수 있어 건당 PostMessage 를 하면 메시지 큐가 넘친다.
+ * 링버퍼에 쌓고 "처리 안 된 알림이 없을 때만" 한 번 깨운다. 그래서 패킷 수와
+ * 무관하게 큐에 떠 있는 알림은 최대 하나다. */
+static void on_packet_cb(void *ctx, const tunnel_packet_t *p)
+{
+	vpn_session_t *s = (vpn_session_t *)ctx;
+
+	EnterCriticalSection(&s->lock);
+	if (s->ring_count == VPN_PACKET_RING) {
+		/* 꽉 찼으면 가장 오래된 것을 버린다. 최신 패킷을 살리는 쪽이 분석에 쓸모 있다. */
+		s->ring_head = (s->ring_head + 1) % VPN_PACKET_RING;
+		s->ring_count--;
+		s->ring_lost++;
+	}
+	s->ring[(s->ring_head + s->ring_count) % VPN_PACKET_RING] = *p;
+	s->ring_count++;
+	LeaveCriticalSection(&s->lock);
+
+	if (InterlockedExchange(&s->notify_pending, 1) == 0) {
+		if (!PostMessageW(s->notify, WM_VPN_PACKETS, 0, 0)) {
+			InterlockedExchange(&s->notify_pending, 0);
+		}
+	}
+}
+
+int vpn_session_drain_packets(vpn_session_t *s, tunnel_packet_t *out, int max)
+{
+	int n = 0;
+
+	if (!s || !out || max <= 0) {
+		return 0;
+	}
+
+	/* 비우기 **전에** 플래그를 내린다. 꺼내는 중에 들어온 패킷이 새 알림을
+	 * 보낼 수 있어야 한다. 순서를 바꾸면 그 패킷의 깨우기가 억제되어
+	 * 링에 남은 채 다음 패킷까지 묻힌다. */
+	InterlockedExchange(&s->notify_pending, 0);
+
+	EnterCriticalSection(&s->lock);
+	while (n < max && s->ring_count > 0) {
+		out[n++] = s->ring[s->ring_head];
+		s->ring_head = (s->ring_head + 1) % VPN_PACKET_RING;
+		s->ring_count--;
+	}
+	LeaveCriticalSection(&s->lock);
+
+	return n;
+}
+
+uint64_t vpn_session_lost_packets(vpn_session_t *s)
+{
+	uint64_t v;
+
+	if (!s) {
+		return 0;
+	}
+
+	EnterCriticalSection(&s->lock);
+	v = s->ring_lost;
+	LeaveCriticalSection(&s->lock);
+
+	return v;
 }
 
 static DWORD WINAPI worker(LPVOID arg)
@@ -78,6 +150,16 @@ vpn_session_t *vpn_session_create(HWND notify)
 		return NULL;
 	}
 
+	s->ring = (tunnel_packet_t *)HeapAlloc(GetProcessHeap(), 0,
+			sizeof(*s->ring) * VPN_PACKET_RING);
+	if (!s->ring) {
+		CloseHandle(s->stop_event);
+		HeapFree(GetProcessHeap(), 0, s);
+		return NULL;
+	}
+
+	InitializeCriticalSection(&s->lock);
+
 	return s;
 }
 
@@ -94,7 +176,16 @@ int vpn_session_start(vpn_session_t *s, const tunnel_config_t *cfg)
 	s->cfg = *cfg;
 	s->cfg.on_log = on_log_cb;
 	s->cfg.on_state = on_state_cb;
+	s->cfg.on_packet = on_packet_cb;
 	s->cfg.ctx = s;
+
+	/* 새 연결이면 지난 세션의 패킷은 버린다. */
+	EnterCriticalSection(&s->lock);
+	s->ring_head = 0;
+	s->ring_count = 0;
+	s->ring_lost = 0;
+	LeaveCriticalSection(&s->lock);
+	InterlockedExchange(&s->notify_pending, 0);
 
 	s->thread = CreateThread(NULL, 0, worker, s, 0, NULL);
 	if (!s->thread) {
@@ -151,6 +242,8 @@ void vpn_session_destroy(vpn_session_t *s)
 	}
 
 	CloseHandle(s->stop_event);
+	DeleteCriticalSection(&s->lock);
+	HeapFree(GetProcessHeap(), 0, s->ring);
 	HeapFree(GetProcessHeap(), 0, s);
 }
 

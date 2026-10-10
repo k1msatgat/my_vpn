@@ -23,6 +23,10 @@ BOOL CVpnGuiApp::InitInstance()
 		return FALSE;
 	}
 
+	/* 연결 설정을 다음 실행에도 기억하도록 레지스트리 키를 정한다
+	 * (HKCU\Software\my_vpn\vpn_gui). 지정하지 않으면 MFC 가 .ini 를 쓴다. */
+	SetRegistryKey(_T("my_vpn"));
+
 	/* UI 스레드도 InetPtonW 를 쓰므로 Winsock 이 필요하다. tunnel_run 안에서도
 	 * WSAStartup / WSACleanup 을 한 번 더 하지만, Winsock 은 호출 횟수를 세므로
 	 * 중첩해도 문제가 없다. */

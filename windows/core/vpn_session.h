@@ -20,6 +20,10 @@ extern "C" {
 #define WM_VPN_LOG	(WM_APP + 1)	/* lParam = char*, 받는 쪽이 vpn_session_free_log()로 해제 */
 #define WM_VPN_STATE	(WM_APP + 2)	/* wParam = tunnel_state_t */
 #define WM_VPN_DONE	(WM_APP + 3)	/* wParam = tunnel_run() 반환값 (0 정상 종료) */
+#define WM_VPN_PACKETS	(WM_APP + 4)	/* 링버퍼에 패킷이 쌓였다. drain_packets 로 꺼낸다 */
+
+/* 패킷 링버퍼 크기. UI가 못 따라오면 가장 오래된 것부터 버린다. */
+#define VPN_PACKET_RING 4096
 
 /* 종료 요청 후 워커를 기다리는 한도. 어댑터 정리에 보통 1초 안 걸린다. */
 #define VPN_STOP_TIMEOUT_MS 10000
@@ -51,6 +55,13 @@ int vpn_session_active(const vpn_session_t *s);
 void vpn_session_drain(HWND notify);
 
 void vpn_session_free_log(char *line);
+
+/* 링버퍼에서 최대 max개를 꺼내 out에 복사하고 꺼낸 개수를 돌려준다.
+ * WM_VPN_PACKETS를 받은 UI 스레드에서 0이 나올 때까지 부른다. */
+int vpn_session_drain_packets(vpn_session_t *s, tunnel_packet_t *out, int max);
+
+/* 링버퍼가 꽉 차서 버린 패킷 수. 0이 아니면 UI가 유실을 표시해야 한다. */
+uint64_t vpn_session_lost_packets(vpn_session_t *s);
 
 #ifdef __cplusplus
 }

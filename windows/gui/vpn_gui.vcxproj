@@ -76,6 +76,9 @@
            매니페스트에 박아 두면 실행할 때 Windows 가 권한 상승을 먼저 묻는다. -->
       <EnableUAC>true</EnableUAC>
       <UACExecutionLevel>RequireAdministrator</UACExecutionLevel>
+      <!-- comctl32 v6 를 매니페스트에 선언해야 비주얼 스타일이 적용된다.
+           없으면 버튼 / 리스트가 테마 없이 Win95 모양으로 그려진다. -->
+      <AdditionalManifestDependencies>type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'</AdditionalManifestDependencies>
     </Link>
     <ResourceCompile>
       <AdditionalIncludeDirectories>$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -106,6 +109,7 @@
   <ItemGroup>
     <ClCompile Include="VpnGuiApp.cpp" />
     <ClCompile Include="MainDlg.cpp" />
+    <ClCompile Include="PacketStore.cpp" />
     <ClCompile Include="..\core\vpn_session.c" />
     <ClCompile Include="..\core\tunnel.c" />
     <ClCompile Include="..\..\lib\common\src\proto.c" />
@@ -115,6 +119,7 @@
     <ClInclude Include="resource.h" />
     <ClInclude Include="VpnGuiApp.h" />
     <ClInclude Include="MainDlg.h" />
+    <ClInclude Include="PacketStore.h" />
     <ClInclude Include="..\core\vpn_session.h" />
     <ClInclude Include="..\core\tunnel.h" />
     <ClInclude Include="..\..\lib\common\include\proto.h" />

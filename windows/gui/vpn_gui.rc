@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <commctrl.h>
 #include "resource.h"
 
 /* 소스는 UTF-8(BOM 없음)이므로 rc.exe 에게 코드 페이지를 알려준다.
@@ -8,29 +9,57 @@
 
 LANGUAGE LANG_KOREAN, SUBLANG_DEFAULT
 
-IDD_MAIN DIALOGEX 0, 0, 320, 240
-STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX
+/* 여기 좌표는 초깃값일 뿐이다. 실제 배치는 CMainDlg::OnSize 가 다시 잡으므로
+ * 창 크기를 바꿔도 리스트와 상세창이 따라 늘어난다. */
+IDD_MAIN DIALOGEX 0, 0, 560, 400
+STYLE DS_SETFONT | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU |
+      WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_THICKFRAME
 CAPTION "my_vpn 클라이언트"
 FONT 9, "Segoe UI", 400, 0, 0x1
 BEGIN
-    LTEXT           "어댑터", IDC_STATIC, 10, 12, 42, 10
-    EDITTEXT        IDC_ADAPTER, 54, 10, 96, 13, ES_AUTOHSCROLL
-    LTEXT           "터널 IP", IDC_STATIC, 160, 12, 42, 10
-    EDITTEXT        IDC_TUNIP, 204, 10, 96, 13, ES_AUTOHSCROLL
+    GROUPBOX        "연결", IDC_GRP_CONN, 7, 4, 546, 62
 
-    LTEXT           "서버", IDC_STATIC, 10, 32, 42, 10
-    EDITTEXT        IDC_SERVER, 54, 30, 96, 13, ES_AUTOHSCROLL
-    LTEXT           "포트", IDC_STATIC, 160, 32, 42, 10
-    EDITTEXT        IDC_PORT, 204, 30, 50, 13, ES_AUTOHSCROLL | ES_NUMBER
+    LTEXT           "어댑터", IDC_LBL_ADAPTER, 16, 20, 40, 9
+    EDITTEXT        IDC_ADAPTER, 58, 18, 104, 14, ES_AUTOHSCROLL
+    LTEXT           "터널 IP", IDC_LBL_TUNIP, 174, 20, 40, 9
+    EDITTEXT        IDC_TUNIP, 216, 18, 104, 14, ES_AUTOHSCROLL
 
-    CONTROL         "패킷 로그", IDC_LOGPKT, "Button",
-                    BS_AUTOCHECKBOX | WS_TABSTOP, 54, 51, 64, 10
-    DEFPUSHBUTTON   "연결", IDC_CONNECT, 186, 48, 54, 16
-    PUSHBUTTON      "해제", IDC_DISCONNECT, 246, 48, 54, 16
+    LTEXT           "서버", IDC_LBL_SERVER, 16, 40, 40, 9
+    EDITTEXT        IDC_SERVER, 58, 38, 104, 14, ES_AUTOHSCROLL
+    LTEXT           "포트", IDC_LBL_PORT, 174, 40, 40, 9
+    EDITTEXT        IDC_PORT, 216, 38, 52, 14, ES_AUTOHSCROLL | ES_NUMBER
 
-    LTEXT           "상태", IDC_STATIC, 10, 74, 42, 10
-    LTEXT           "", IDC_STATE, 54, 74, 246, 10
+    LTEXT           "상태", IDC_LBL_STATE, 334, 20, 28, 9
+    LTEXT           "", IDC_STATE, 364, 20, 100, 9
+    LTEXT           "", IDC_ELAPSED, 364, 40, 100, 9
 
-    LISTBOX         IDC_LOG, 10, 90, 300, 140,
-                    LBS_NOINTEGRALHEIGHT | LBS_NOSEL | WS_VSCROLL | WS_HSCROLL | WS_TABSTOP
+    DEFPUSHBUTTON   "연결", IDC_CONNECT, 470, 16, 76, 18
+    PUSHBUTTON      "해제", IDC_DISCONNECT, 470, 38, 76, 18
+
+    LTEXT           "필터", IDC_LBL_FILTER, 12, 76, 24, 9
+    COMBOBOX        IDC_FILTER_DIR, 38, 73, 78, 80,
+                    CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL
+    CONTROL         "keepalive 숨김", IDC_HIDE_KA, "Button",
+                    BS_AUTOCHECKBOX | WS_TABSTOP, 126, 75, 82, 10
+    CONTROL         "폐기만", IDC_ONLY_DROPS, "Button",
+                    BS_AUTOCHECKBOX | WS_TABSTOP, 216, 75, 52, 10
+    PUSHBUTTON      "지움", IDC_CLEAR, 418, 72, 60, 16
+    PUSHBUTTON      "저장...", IDC_SAVE, 486, 72, 60, 16
+
+    CONTROL         "", IDC_TAB, WC_TABCONTROL, WS_TABSTOP, 7, 92, 546, 180
+
+    CONTROL         "", IDC_PACKETS, WC_LISTVIEW,
+                    LVS_REPORT | LVS_OWNERDATA | LVS_SINGLESEL |
+                    LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP, 12, 112, 536, 156
+    LISTBOX         IDC_LOG, 12, 112, 536, 156,
+                    LBS_NOINTEGRALHEIGHT | LBS_NOSEL | WS_VSCROLL | WS_HSCROLL |
+                    WS_BORDER | NOT WS_VISIBLE
+
+    GROUPBOX        "선택한 패킷", IDC_GRP_DETAIL, 7, 276, 546, 96
+    EDITTEXT        IDC_DETAIL, 13, 288, 534, 78,
+                    ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL |
+                    NOT WS_TABSTOP
+
+    LTEXT           "", IDC_STATS1, 10, 377, 543, 9
+    LTEXT           "", IDC_STATS2, 10, 388, 543, 9
 END
