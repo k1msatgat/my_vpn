@@ -332,3 +332,17 @@ my_vpn/
 - [ ] 신원 기반 인증 — 클라이언트 키 인증, 사용자/기기 단위 정책 (ZTNA)
 - [ ] 비블로킹 재핸드셰이크 (상태 머신), 종료 통지 메시지
 - [ ] Windows 클라이언트 — Wintun, Win32/MFC GUI, Windows 서비스 + Named Pipe IPC
+
+---
+
+## AI 사용 내역
+
+이 프로젝트는 학습이 목적이므로, AI(Claude Code)를 어디에 썼는지 구분해서 밝힙니다.
+
+| 구분 | 내용 |
+|---|---|
+| 직접 구현 | 와이어 프로토콜, 핸드셰이크, 피어 테이블, 위조 방어, keepalive, 세션 만료, 재핸드셰이크 등 클라이언트/서버 기능 로직 |
+| AI 리뷰 | 위 구현의 diff를 AI에게 검토받고, 지적받은 버그는 직접 수정 |
+| AI 작성 | `test/` 테스트 스크립트 전체 |
+| AI 작성 (일부) | `client.c`의 재핸드셰이크 로그, `do_handshake`의 `SO_RCVTIMEO` 원복과 `tx_counter` 리셋 |
+| AI 초안 | 이 README의 keepalive/재핸드셰이크 이후 갱신분 |
