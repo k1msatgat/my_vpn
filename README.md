@@ -17,6 +17,19 @@ Zero Trust Network Access(ZTNA)의 기반 구조를 학습하는 것을 목표�
 
 ---
 
+## 문서
+
+| | 내용 |
+|---|---|
+| 이 문서 | 설계 — 와이어 프로토콜, 패킷 흐름, 보안 모델, 로드맵 |
+| [docs/linux.md](docs/linux.md) | Linux 서버·클라이언트 빌드와 실행, 시나리오 테스트, ACL |
+| [docs/windows.md](docs/windows.md) | Windows 클라이언트 — Wintun, 이벤트 루프, MFC GUI와 패킷 분석기 |
+
+프로토콜 코드(`lib/common`의 `proto.h` / `proto.c`)는 Linux와 Windows가 같은 소스를 빌드합니다.
+플랫폼별로 갈라지는 것만 위 두 문서로 내렸습니다.
+
+---
+
 ## Features
 
 - **TUN 기반 L3 터널링** — `IFF_TUN | IFF_NO_PI`로 순수 IPv4 패킷만 송수신
@@ -163,235 +176,6 @@ write(tun, buf + 16, n - 16)                       └─ 커널로 전달
 
 ---
 
-## Build
-
-```bash
-make            # lib + client + server
-make clean      # 오브젝트/산출물 삭제
-make distclean  # bin/ 디렉터리 전체 삭제
-```
-
-- 요구사항: Linux, GCC, `/dev/net/tun`
-- `-Wall -Wextra` 경고 없이 빌드됩니다.
-
-| 산출물 | 경로 |
-|---|---|
-| 공용 라이브러리 | `lib/common/bin/libcommon.a` |
-| 클라이언트 | `client/bin/vpn_client` |
-| 서버 | `server/bin/vpn_server` |
-
----
-
-## Usage
-
-TUN 디바이스 생성에 root 권한(`CAP_NET_ADMIN`)이 필요합니다.
-
-### Server
-
-```bash
-sudo ./server/bin/vpn_server <port> [acl-file]
-
-# 다른 터미널에서 인터페이스 설정 (생성된 이름은 로그의 "tun device:" 확인)
-sudo ip addr add 10.0.0.1/24 dev tun0
-sudo ip link set tun0 mtu 1400 up
-```
-
-### Client
-
-```bash
-sudo ./client/bin/vpn_client <ifname> <server-ip> <port> <tunnel-ip>
-# 예) sudo ./client/bin/vpn_client tun0 203.0.113.10 9000 10.0.0.2
-
-sudo ip addr add 10.0.0.2/24 dev tun0
-sudo ip link set tun0 mtu 1400 up
-```
-
-- `<tunnel-ip>`는 인터페이스에 할당한 주소와 같아야 합니다. 서버는 이 주소로 응답 패킷의 목적지 피어를 찾습니다.
-- MTU 1400은 외부 IP(20) + UDP(8) + 터널 헤더(16)를 고려한 값입니다.
-
-### Test
-
-```bash
-ping 10.0.0.1     # client → server
-```
-
-```
-[HS] request 1/5
-[HS] established idx=5f3a9c02
-[tun0][tun->udp] 84 bytes, proto=1, icmp type=8
-[tun0][udp->tun] 84 bytes, proto=1, icmp type=0
-```
-
-### Test scripts
-
-`test/`의 스크립트는 빌드, 실행, 인터페이스 설정(IP/MTU)을 한 번에 하고 시나리오별로 `PASS` / `FAIL`을 출력합니다.
-서버 장비에서 먼저 실행한 뒤 클라이언트 장비에서 실행합니다.
-
-| 시나리오 | 서버 | 클라이언트 | 확인하는 것 |
-|---|---|---|---|
-| 기본 연결 | `test/server.sh` | `test/client.sh` | 핸드셰이크와 ping 왕복 |
-| 유휴 120초 | `test/server.sh` | `test/client.sh idle` | keepalive로 세션이 유지되고 재핸드셰이크가 발동하지 않음 |
-| 클라이언트 정지 70초 | `test/server.sh` | `test/client.sh stop` | 서버의 세션 만료, 클라이언트의 재핸드셰이크 |
-| 서버 재시작 | `test/server.sh restart` | `test/client.sh restart` | 서버 `kill -9` 후 재시작 시 새 세션으로 복구 |
-
-```bash
-SERVER_IP=203.0.113.10 test/client.sh idle    # 설정은 환경변수로 변경 (기본값은 test/common.sh)
-```
-
-Windows 클라이언트는 `windows/test/client.ps1`이 같은 시나리오를 돌립니다. 빌드 → 권한 상승(UAC) →
-실행 → 판정까지 한 번에 하고, 결과는 `windows/test/logs/`에 남습니다.
-
-| 시나리오 | 서버 (Linux) | 클라이언트 (Windows) |
-|---|---|---|
-| 기본 연결 | `test/server.sh` | `windows\test\client.ps1` |
-| 유휴 120초 | `test/server.sh` | `windows\test\client.ps1 idle` |
-| 서버 재시작 | `test/server.sh restart` | `windows\test\client.ps1 restart` |
-
-```powershell
-$env:SERVER_IP='203.0.113.10'; windows\test\client.ps1 idle -Sec 180
-```
-
-- 터널 IP 기본값은 `10.0.0.3`입니다 (`10.0.0.2`는 Linux 클라이언트가 씁니다).
-- 유휴 시나리오는 재핸드셰이크가 없었는지만 보지 않고, keepalive가 실제로 나가고 **서버 응답이 돌아왔는지**까지 확인합니다.
-- 종료는 Ctrl-C 경로(`GenerateConsoleCtrlEvent`)로 보내 어댑터와 터널 IP가 스스로 정리되는지도 함께 봅니다.
-  Ctrl-C는 콘솔 그룹 전체에 가므로 스크립트 자신도 같이 죽을 수 있어, 판정 결과를 종료 **전에** 먼저 파일로 남깁니다.
-- 스크립트는 UTF-8 **BOM**으로 저장합니다. Windows PowerShell 5.1은 BOM이 없으면 `.ps1`을 시스템
-  ANSI 코드페이지로 읽어, 한글이 든 문자열 리터럴의 닫는 따옴표가 멀티바이트 문자에 먹혀 파싱이 깨집니다.
-
-서버 재시작 복구는 양쪽 로그가 맞물리는 것까지 확인했습니다. 서버가 죽은 뒤에도 클라이언트의
-UDP 소켓은 그대로이므로 외부 주소/포트가 유지되고, 바뀌는 것은 세션 idx뿐입니다.
-
-```
-서버   [peer] register 10.0.0.3 <- 115.21.23.172:53559 idx=6bd26700
-       (kill -9 → 재시작)
-서버   [drop] unknown session_idx[6bd26700]        ← 새 서버가 옛 세션을 거부
-클라   [HS] no rx from server for 30s, re-handshake
-서버   [peer] register 10.0.0.3 <- 115.21.23.172:53559 idx=2ae3b200
-```
-
-- 로그는 `test/logs/`에도 저장됩니다.
-- 서버 장비에 클라이언트 터널 IP가 로컬 주소로 남아 있으면(이전 테스트의 persistent tun 등) 커널이 터널로 들어온 패킷을 버리므로, 서버 스크립트가 시작 전에 이를 검사합니다.
-
----
-
-## Windows client
-
-`windows/`에 같은 와이어 프로토콜을 쓰는 Windows용 클라이언트가 있습니다. 서버는 Linux 그대로이며,
-프로토콜 코드(`lib/common`의 `proto.h` / `proto.c`)는 Linux와 Windows가 같은 소스를 빌드합니다.
-
-| | Linux (`client/`) | Windows (`windows/`) |
-|---|---|---|
-| 가상 인터페이스 | `/dev/net/tun` fd, `read` / `write` | [Wintun](https://www.wintun.net/) 링버퍼, `WintunReceivePacket` / `WintunSendPacket` |
-| 이벤트 루프 | `epoll_wait` | `WaitForMultipleObjects` (종료 이벤트 + Wintun read 이벤트 + `WSAEventSelect` 소켓 이벤트) |
-| 핸드셰이크 대기 | `SO_RCVTIMEO` 블로킹 `recvfrom` | 같은 이벤트 대기 — 대기 중에도 종료 요청에 바로 반응 |
-| 종료 | `SIGINT` / `SIGTERM` | manual-reset 이벤트 (콘솔은 Ctrl+C, GUI는 해제 버튼) |
-| 시간 | `clock_gettime`, `time` | `GetTickCount64` |
-| IP / MTU 설정 | `ip addr add`, `ip link set mtu` | 프로그램이 직접 설정 (`CreateUnicastIpAddressEntry`, `SetIpInterfaceEntry`) |
-| keepalive 트리거 | 송신 유휴 10초 | 송신 유휴 10초 **또는** 수신 유휴 10초 (아래 참고) |
-| 터널에 넣지 않는 패킷 | — (tun0이 조용함) | 멀티캐스트 / 브로드캐스트 목적지 |
-
-- 터널 로직은 `core/tunnel.c`의 블로킹 함수 `tunnel_run()` 하나이고, 로그와 상태 변화는 콜백으로 알립니다.
-  콘솔 클라이언트는 이를 메인 스레드에서, GUI는 `core/vpn_session.c`를 통해 워커 스레드에서 호출합니다.
-- Windows의 UDP 소켓은 ICMP port unreachable을 받으면 다음 `recvfrom`이 `WSAECONNRESET`으로 실패합니다.
-  서버가 내려가 있는 동안에도 재핸드셰이크를 계속 시도해야 하므로 `SIO_UDP_CONNRESET`으로 이 동작을 끕니다.
-- Wintun은 패킷을 링버퍼 안에서 직접 넘겨주므로 Linux의 헤드룸 방식을 쓸 수 없어, 송신 경로에서 한 번 복사합니다.
-
-#### Windows는 터널 어댑터에도 계속 말을 건다
-
-Linux의 `tun0`은 아무도 쓰지 않으면 조용하지만, Windows는 어댑터가 올라오는 순간부터 그 인터페이스로
-mDNS / LLMNR / SSDP / IGMP를 꾸준히 내보냅니다. 서버는 inner dst로 피어를 1:1로 찾으므로
-멀티캐스트·브로드캐스트는 애초에 전달할 상대가 없는데, 이를 그대로 터널에 넣으면
-
-1. 서버는 받아서 자기 tun에 쓰고 커널이 버리므로 **응답이 돌아오지 않고**,
-2. 송신이 10초 안에 계속 일어나 `last_tx` 기준 keepalive가 **영구히 억제**되어,
-3. 수신이 끊긴 것으로 판정되어 서버가 살아 있는데도 **30초마다 재핸드셰이크**가 돕니다.
-
-실제로 120초 유휴 테스트에서 재현했습니다. 두 군데를 고쳤습니다.
-
-- 송신 경로에서 목적지가 멀티캐스트(`224.0.0.0/4` 이상)이거나 터널 대역의 브로드캐스트면 버립니다.
-  서버가 버릴 패킷을 보내지 않으니 대역과 서버 처리도 함께 아낍니다.
-- keepalive가 맡은 두 가지를 분리했습니다. **NAT 매핑 유지**는 송신 유휴 10초 기준 그대로 두고,
-  **생존 확인**은 "서버가 10초간 조용하면 보낸다"를 따로 둡니다. 데이터 패킷은 서버가 버릴 수 있어
-  응답을 보장하지 못하지만 keepalive는 서버가 반드시 되돌려주므로, 응답 없는 송신이 이어져도
-  재핸드셰이크 전에 생존 여부를 확인할 수 있습니다.
-
-`windows/test/client.ps1 idle`의 120초 유휴 구간 실측입니다.
-
-| | 수정 전 | 수정 후 |
-|---|---|---|
-| 재핸드셰이크 | 1회 | **0회** |
-| keepalive 송신 / 수신 | 0 / 0 (억제됨) | **11 / 11** |
-| `tun->udp` | 58 (대부분 전달 불가) | **6** (ping 왕복만) |
-| `udp->tun` | 0 | **6** |
-| 비유니캐스트 폐기 | — | 73 |
-
-### GUI (MFC)
-
-`gui/`는 `core/vpn_session.c` 위에 올린 MFC 다이얼로그입니다. `tunnel_run()`이 블로킹 함수이므로
-UI 스레드에서 부를 수 없고, 워커 스레드에서 돌리면서 스레드 경계를 넘겨야 합니다.
-
-| 문제 | 처리 |
-|---|---|
-| 콜백이 워커 스레드에서 불린다 | 컨트롤을 직접 건드리지 않고 `PostMessage`로 UI 스레드에 넘김 |
-| `SendMessage`를 쓰면? | UI 스레드가 워커 종료를 기다리는 중이면 서로를 기다리는 교착. `PostMessage`는 큐에 넣고 바로 복귀 |
-| 로그 문자열 수명 | 워커가 힙에 복사해 소유권을 메시지에 실어 넘기고, UI가 처리 후 해제. `PostMessage` 실패 시 보낸 쪽이 해제 |
-| 창을 닫을 때 | 종료 요청 → 워커 join → **그 다음** 큐에 남은 로그 버퍼 해제 (순서가 바뀌면 샘) |
-| 해제 버튼 | 요청만 하고 기다리지 않음. 워커가 끝나면 오는 `WM_VPN_DONE`에서 join (UI가 멈추지 않음) |
-| 강제 종료 | `TerminateThread`를 쓰지 않음. 정리 구간이 돌지 못하면 어댑터와 터널 IP가 남음 |
-
-### Build & run
-
-1. [wintun.net](https://www.wintun.net/)에서 Wintun zip을 받아 `windows/third_party/`에 풉니다.
-   (`windows/third_party/wintun/include/wintun.h`, `windows/third_party/wintun/bin/amd64/wintun.dll`)
-2. Visual Studio 2022 이상으로 `windows/my_vpn.sln`을 열어 x64로 빌드합니다. `wintun.dll`은 빌드 후 실행 파일 옆으로 복사됩니다.
-   GUI(`vpn_gui`)는 Visual Studio 설치 관리자의 개별 구성 요소에서 **"최신 v143(또는 v145) 빌드 도구용 C++ MFC"** 가 필요합니다
-   (없으면 `error MSB8041`). 콘솔 클라이언트(`vpn_client`)는 MFC 없이 빌드됩니다.
-3. **관리자 권한**으로 실행합니다. 어댑터 생성과 IP / MTU 설정까지 프로그램이 합니다.
-   GUI는 매니페스트에 `requireAdministrator`가 박혀 있어 실행할 때 Windows가 권한 상승을 먼저 묻습니다.
-
-```
-:: 콘솔
-windows\build\Debug\vpn_client.exe <adapter-name> <server-ip> <port> <tunnel-ip>
-:: 예) vpn_client.exe my_vpn 203.0.113.10 9000 10.0.0.3
-
-:: GUI — 같은 값을 창에서 입력하고 [연결]
-windows\build\Debug\vpn_gui.exe
-```
-
-- 터널 대역은 `/24`로 설정합니다. 온링크 라우트(`10.0.0.0/24`)는 주소를 붙이면 Windows가 직접 넣어주므로 따로 추가하지 않습니다.
-- 플랫폼 툴셋은 하드코딩하지 않고 설치된 VS의 기본값(`$(DefaultPlatformToolset)` — VS2022는 v143, VS2026은 v145)을 따릅니다.
-- 소스는 Linux와 함께 쓰므로 UTF-8(BOM 없음)입니다. MSVC는 기본적으로 시스템 코드페이지로 읽어 C4819가 나고
-  한글 와이드 문자열 리터럴도 깨지므로 `/utf-8`로 컴파일합니다. `.rc`는 `#pragma code_page(65001)`로 같은 문제를 막습니다.
-- 경로 기준은 `$(MSBuildProjectDirectory)`입니다. `$(SolutionDir)`은 `.sln`을 통해 빌드할 때만 정의되므로,
-  `msbuild windows\cli\vpn_client.vcxproj`처럼 프로젝트를 직접 빌드해도 되도록 쓰지 않습니다.
-- 서버에서 Windows 클라이언트로 ping을 보내려면 Windows 방화벽에서 ICMPv4 인바운드를 허용해야 합니다.
-
----
-
-## ACL
-
-규칙 파일은 한 줄에 하나씩, **위에서부터 처음 일치한 규칙**이 적용되며 일치하는 규칙이 없으면 거부합니다.
-
-```
-# src           dst            proto   dport        action
-10.0.0.0/24     10.0.0.1       icmp    any          allow
-10.0.0.0/24     10.0.0.1       tcp     22           allow
-10.0.0.0/24     10.0.0.1       tcp     8000-8080    allow
-any             any            any     any          deny
-```
-
-| 필드 | 형식 |
-|---|---|
-| src / dst | `a.b.c.d`, `a.b.c.d/n`, `any` |
-| proto | `icmp`, `tcp`, `udp`, `any`, 또는 숫자 |
-| dport | `n`, `lo-hi`, `any`, `-` (tcp/udp에만 적용) |
-| action | `allow`, `deny` |
-
-- 최대 32개 규칙, `#` 이후는 주석입니다.
-- 현재는 클라이언트 → 서버 방향(UDP → TUN)에 적용됩니다.
-
----
-
 ## Project structure
 
 ```
@@ -412,15 +196,22 @@ my_vpn/
 │       └── alc.c          # ACL 파싱 및 매칭
 ├── windows/               # Windows 클라이언트 (Visual Studio 솔루션)
 │   ├── my_vpn.sln
-│   ├── core/
+│   ├── core/              #   UI 프레임워크에 의존하지 않는 순수 Win32/C
 │   │   ├── tunnel.{h,c}       # Wintun + Winsock 터널 루프 (블로킹 tunnel_run)
-│   │   └── vpn_session.{h,c}  # 워커 스레드 + PostMessage 마셜링 (UI 프레임워크 비의존)
-│   ├── cli/               #   콘솔 클라이언트 (main.c)
-│   └── gui/               #   MFC 다이얼로그 (VpnGuiApp, MainDlg, vpn_gui.rc)
+│   │   └── vpn_session.{h,c}  # 워커 스레드 + 패킷 링버퍼 + PostMessage 마셜링
+│   ├── cli/               #   콘솔 클라이언트 (main.c) — 자동 테스트 대상
+│   ├── gui/               #   MFC 다이얼로그
+│   │   ├── MainDlg.{h,cpp}      # 가상 리스트, 상세창, 레이아웃
+│   │   ├── PacketStore.{h,cpp}  # 패킷 보관 / 필터 / 집계
+│   │   └── vpn_gui.rc
+│   └── test/client.ps1    #   Windows 시나리오 테스트 (run / idle / restart)
 ├── test/
 │   ├── common.sh          # 공용 설정 및 함수
 │   ├── server.sh          # 서버 실행 / 재시작 시나리오
 │   └── client.sh          # 클라이언트 실행 / idle·stop·restart 시나리오
+├── docs/
+│   ├── linux.md           # Linux 빌드·실행·테스트, ACL
+│   └── windows.md         # Windows 클라이언트, GUI, 패킷 분석기
 └── Makefile               # 컴포넌트별 bin/ 분리 빌드, 의존성 자동 추적
 ```
 
