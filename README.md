@@ -267,7 +267,7 @@ SERVER_IP=203.0.113.10 test/client.sh idle    # 설정은 환경변수로 변경
 
 1. [wintun.net](https://www.wintun.net/)에서 Wintun zip을 받아 `windows/third_party/`에 풉니다.
    (`windows/third_party/wintun/include/wintun.h`, `windows/third_party/wintun/bin/amd64/wintun.dll`)
-2. Visual Studio 2022로 `windows/my_vpn.sln`을 열어 x64로 빌드합니다. `wintun.dll`은 빌드 후 실행 파일 옆으로 복사됩니다.
+2. Visual Studio 2022 이상으로 `windows/my_vpn.sln`을 열어 x64로 빌드합니다. `wintun.dll`은 빌드 후 실행 파일 옆으로 복사됩니다.
 3. **관리자 권한** 터미널에서 실행합니다. 어댑터 생성과 IP / MTU 설정까지 프로그램이 합니다.
 
 ```
@@ -275,7 +275,11 @@ windows\build\Debug\vpn_client.exe <adapter-name> <server-ip> <port> <tunnel-ip>
 :: 예) vpn_client.exe my_vpn 203.0.113.10 9000 10.0.0.3
 ```
 
-- 터널 대역은 `/24`로 설정합니다.
+- 터널 대역은 `/24`로 설정합니다. 온링크 라우트(`10.0.0.0/24`)는 주소를 붙이면 Windows가 직접 넣어주므로 따로 추가하지 않습니다.
+- 플랫폼 툴셋은 하드코딩하지 않고 설치된 VS의 기본값(`$(DefaultPlatformToolset)` — VS2022는 v143, VS2026은 v145)을 따릅니다.
+- 소스는 Linux와 함께 쓰므로 UTF-8(BOM 없음)입니다. MSVC는 기본적으로 시스템 코드페이지로 읽어 주석에서 C4819가 나므로 `/utf-8`로 컴파일합니다.
+- 경로 기준은 `$(MSBuildProjectDirectory)`입니다. `$(SolutionDir)`은 `.sln`을 통해 빌드할 때만 정의되므로,
+  `msbuild windows\cli\vpn_client.vcxproj`처럼 프로젝트를 직접 빌드해도 되도록 쓰지 않습니다.
 - 서버에서 Windows 클라이언트로 ping을 보내려면 Windows 방화벽에서 ICMPv4 인바운드를 허용해야 합니다.
 
 ---
