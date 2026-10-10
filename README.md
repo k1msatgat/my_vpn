@@ -258,6 +258,17 @@ $env:SERVER_IP='203.0.113.10'; windows\test\client.ps1 idle -Sec 180
 - 스크립트는 UTF-8 **BOM**으로 저장합니다. Windows PowerShell 5.1은 BOM이 없으면 `.ps1`을 시스템
   ANSI 코드페이지로 읽어, 한글이 든 문자열 리터럴의 닫는 따옴표가 멀티바이트 문자에 먹혀 파싱이 깨집니다.
 
+서버 재시작 복구는 양쪽 로그가 맞물리는 것까지 확인했습니다. 서버가 죽은 뒤에도 클라이언트의
+UDP 소켓은 그대로이므로 외부 주소/포트가 유지되고, 바뀌는 것은 세션 idx뿐입니다.
+
+```
+서버   [peer] register 10.0.0.3 <- 115.21.23.172:53559 idx=6bd26700
+       (kill -9 → 재시작)
+서버   [drop] unknown session_idx[6bd26700]        ← 새 서버가 옛 세션을 거부
+클라   [HS] no rx from server for 30s, re-handshake
+서버   [peer] register 10.0.0.3 <- 115.21.23.172:53559 idx=2ae3b200
+```
+
 - 로그는 `test/logs/`에도 저장됩니다.
 - 서버 장비에 클라이언트 터널 IP가 로컬 주소로 남아 있으면(이전 테스트의 persistent tun 등) 커널이 터널로 들어온 패킷을 버리므로, 서버 스크립트가 시작 전에 이를 검사합니다.
 
@@ -457,7 +468,7 @@ my_vpn/
 - [ ] 암호화 & 키 교환 — X25519 + ChaCha20-Poly1305, `counter`를 nonce 및 재전송 방지에 사용
 - [ ] 신원 기반 인증 — 클라이언트 키 인증, 사용자/기기 단위 정책 (ZTNA)
 - [ ] 비블로킹 재핸드셰이크 (상태 머신), 종료 통지 메시지
-- [ ] Windows 클라이언트 — Wintun 콘솔 클라이언트 (ping 왕복·유휴 120초 확인, 서버 재시작 시나리오 남음)
+- [x] Windows 클라이언트 — Wintun 콘솔 클라이언트 (ping 왕복 / 유휴 120초 / 서버 재시작 복구 확인)
 - [ ] Windows 클라이언트 — MFC GUI (구현, x64 Debug/Release 빌드 확인, 실행 검증 남음)
 - [ ] Windows 클라이언트 — Windows 서비스 + Named Pipe IPC
 

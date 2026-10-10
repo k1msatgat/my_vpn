@@ -112,10 +112,17 @@ function Test-Ping([string]$ip) {
     return ($LASTEXITCODE -eq 0)
 }
 
+# 여러 번 불리므로 지난번에 보여 준 줄은 다시 찍지 않는다.
+$script:IdxShown = 0
+
 function Show-Idx {
-    Get-Content $ClientLog -ErrorAction SilentlyContinue |
-        Select-String -SimpleMatch '[HS] established' |
-        ForEach-Object { Say "  $_" }
+    $all = @(Get-Content $ClientLog -ErrorAction SilentlyContinue |
+        Select-String -SimpleMatch '[HS] established')
+
+    for ($i = $script:IdxShown; $i -lt $all.Count; $i++) {
+        Say "  $($all[$i])"
+    }
+    $script:IdxShown = $all.Count
 }
 
 # 콘솔 클라이언트는 Ctrl-C 로 끝내는 것이 정상 경로다 (SetConsoleCtrlHandler -> stop 이벤트 ->
