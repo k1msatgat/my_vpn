@@ -1,3 +1,7 @@
+﻿# 이 파일은 UTF-8 BOM 으로 저장한다. Windows PowerShell 5.1 은 BOM 이 없으면 .ps1 을
+# 시스템 ANSI 코드페이지(한국어 Windows 는 949)로 읽어 한글 문자열 리터럴이 깨지고,
+# 닫는 따옴표가 멀티바이트 문자에 먹혀 파싱까지 실패한다.
+#
 # Windows 클라이언트 시나리오 테스트. test/client.sh 의 run / idle / restart 를 옮긴 것이다.
 # 빌드 -> (필요하면) 권한 상승 -> 실행 -> 시나리오별 PASS / FAIL.
 # 서버 장비에서 test/server.sh 가 먼저 떠 있어야 한다.
@@ -172,9 +176,13 @@ function Finish([int]$code, [string]$msg) {
     else {
         Say "FAIL: $msg"
     }
-    Stop-Client
+
+    # Stop-Client 는 Ctrl-C 를 콘솔 그룹 전체에 보내므로 이 스크립트까지 같이 죽을 수 있다.
+    # 판정 결과를 먼저 디스크에 남기고, 살아남으면 정리 결과를 덧붙여 다시 저장한다.
     Save-Transcript
+    Stop-Client
     Say "log: $ClientLog"
+    Save-Transcript
     exit $code
 }
 
@@ -196,18 +204,40 @@ if (-not (Test-Admin)) {
     # 어댑터 생성과 IP / MTU 설정에 관리자 권한이 필요하다.
     # 빌드는 일반 권한으로 끝냈고 여기서만 올린다 (test/common.sh 의 become_root 와 같은 구조).
     Say 'elevating (UAC)'
-    $argv = @(
-        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath,
-        '-Mode', $Mode, '-Sec', $Sec,
-        '-ServerIp', $ServerIp, '-Port', $Port,
-        '-ServerTunIp', $ServerTunIp, '-ClientTunIp', $ClientTunIp,
-        '-Adapter', $Adapter, '-Config', $Config, '-Elevated'
-    )
-    $child = Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $argv -PassThru -Wait
 
+    # Start-Process 는 -ArgumentList 배열을 공백으로 이어붙이기만 하고 공백이 든 인자를
+    # 따로 인용해 주지 않는다. 경로에 공백이 있으면 잘리므로 직접 인용해 한 문자열로 넘긴다.
+    $q = { param($v) '"' + ($v -replace '"', '\"') + '"' }
+    $argStr = @(
+        '-NoProfile', '-ExecutionPolicy', 'Bypass',
+        '-File', (& $q $PSCommandPath),
+        '-Mode', $Mode,
+        '-Sec', $Sec,
+        '-ServerIp', (& $q $ServerIp),
+        '-Port', $Port,
+        '-ServerTunIp', (& $q $ServerTunIp),
+        '-ClientTunIp', (& $q $ClientTunIp),
+        '-Adapter', (& $q $Adapter),
+        '-Config', (& $q $Config),
+        '-Elevated'
+    ) -join ' '
+
+    # UAC 를 거절하면 Start-Process 가 예외를 던진다. 테스트 실패와 구분되게 받아 준다.
+    try {
+        $child = Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $argStr -PassThru -Wait
+    }
+    catch {
+        Die "elevation declined ($($_.Exception.Message.Trim())); 어댑터 생성에 관리자 권한이 필요합니다"
+    }
+
+    Write-Host ''
     if (Test-Path $Report) {
-        Write-Host ''
         Get-Content $Report
+    }
+    elseif (Test-Path $ClientLog) {
+        # 판정까지 못 간 경우. 최소한 클라이언트가 뭘 했는지는 보여 준다.
+        Say "no verdict written; tail of $ClientLog :"
+        Get-Content $ClientLog -Tail 15
     }
     exit $child.ExitCode
 }
