@@ -39,6 +39,7 @@ typedef struct session {
 	struct sockaddr_in server;
 	uint64_t last_rx_ms;
 	uint64_t last_tx_ms;
+	uint64_t last_ka_ms;	/* 마지막 keepalive 송신. 생존 확인 경로를 10초에 한 번으로 묶는다 */
 } session_t;
 
 typedef struct tunnel {
@@ -50,6 +51,7 @@ typedef struct tunnel {
 	HMODULE wintun;
 	WINTUN_ADAPTER_HANDLE adapter;
 	WINTUN_SESSION_HANDLE tun;
+	uint32_t bcast;		/* 터널 대역의 브로드캐스트 주소 (network byte order) */
 	session_t session;
 } tunnel_t;
 
@@ -251,6 +253,47 @@ static int from_server(const session_t *session, const struct sockaddr_in *from)
 		from->sin_port == session->server.sin_port;
 }
 
+/* ---- outbound filter ----------------------------------------------------- */
+/* 터널 대역의 브로드캐스트 주소. prefix가 /32면 브로드캐스트가 없으므로 0을 돌려준다
+ * (dst 0.0.0.0은 어차피 전달 대상이 아니라 비교에 써도 무해하다). */
+static uint32_t subnet_broadcast(struct in_addr addr, uint8_t prefix_len)
+{
+	uint32_t mask;
+
+	if (prefix_len == 0) {
+		return 0xFFFFFFFFu;
+	}
+	if (prefix_len >= 32) {
+		return 0;
+	}
+
+	mask = htonl(0xFFFFFFFFu << (32 - prefix_len));
+
+	return (addr.s_addr & mask) | ~mask;
+}
+
+/* 서버는 inner dst로 피어를 1:1로 찾아(peer_lookup) 그 피어에게만 보내므로,
+ * 멀티캐스트나 브로드캐스트는 애초에 전달할 상대가 없다.
+ *
+ * Linux의 tun0은 조용하지만 Windows는 어댑터가 올라오는 순간부터 모든 인터페이스에
+ * mDNS / LLMNR / SSDP / IGMP를 꾸준히 내보낸다. 이를 그대로 터널에 넣으면
+ *   1) 서버는 자기 tun에 write한 뒤 커널이 버리므로 응답이 돌아오지 않고,
+ *   2) udp_send()가 last_tx_ms를 10초 안에 계속 갱신해 유휴 keepalive가 영구히 억제되어
+ * 결국 서버가 살아 있는데도 30초마다 재핸드셰이크가 돈다. */
+static int deliverable_dst(const tunnel_t *t, const uint8_t *ip)
+{
+	uint32_t dst;
+
+	/* 224.0.0.0/4 멀티캐스트와 240.0.0.0/4 (255.255.255.255 포함) */
+	if (ip[IP_DST_OFF] >= 224) {
+		return 0;
+	}
+
+	memcpy(&dst, ip + IP_DST_OFF, IP_ADDR_LEN);
+
+	return dst != t->bcast;
+}
+
 /* ---- protocol ------------------------------------------------------------ */
 /* 0: 세션 수립, -1: 응답 없음 / 오류 / 중지 요청 */
 static int do_handshake(tunnel_t *t)
@@ -343,6 +386,11 @@ static void send_keepalive(tunnel_t *t)
 	off = msg_encode(packet, sizeof(packet), &msg_header);
 
 	udp_send(t, packet, off);
+	t->session.last_ka_ms = t->session.last_tx_ms;
+
+	if (t->cfg->log_packets) {
+		tlog(t, "[keepalive] sent");
+	}
 }
 
 /* TUN -> UDP. Wintun 링버퍼에 쌓인 패킷을 모두 비운다. */
@@ -371,6 +419,11 @@ static int pump_tun(tunnel_t *t)
 		if (n < IP_MIN_HDR || IP_VERSION(ip) != 4 || n > sizeof(packet) - PKT_HDR_LEN) {
 			if (t->cfg->log_packets) {
 				tlog(t, "[skip] non-IPv4 (ver=%d, %lu bytes)", IP_VERSION(ip), n);
+			}
+		}
+		else if (!deliverable_dst(t, ip)) {
+			if (t->cfg->log_packets) {
+				tlog(t, "[skip] non-unicast dst (%lu bytes, proto=%d)", n, ip[IP_PROTO_OFF]);
 			}
 		}
 		else {
@@ -430,6 +483,11 @@ static int pump_udp(tunnel_t *t)
 
 		switch (msg_header.type) {
 			case MSG_TYPE_KEEPALIVE:
+				/* last_rx_ms는 위에서 이미 갱신했다. 세션이 살아 있다는 증거라
+				 * 유휴 시나리오에서 확인할 수 있게 로그를 남긴다. */
+				if (t->cfg->log_packets) {
+					tlog(t, "[keepalive] recv");
+				}
 				continue;
 			case MSG_TYPE_DATA:
 				break;
@@ -489,6 +547,8 @@ int tunnel_run(const tunnel_config_t *cfg, HANDLE stop_event)
 	t->cfg = cfg;
 	t->stop_event = stop_event;
 	t->sock = INVALID_SOCKET;
+
+	t->bcast = subnet_broadcast(cfg->tun_ip, cfg->prefix_len);
 
 	session->tun_ip = cfg->tun_ip;
 	session->server.sin_family = AF_INET;
@@ -576,7 +636,15 @@ int tunnel_run(const tunnel_config_t *cfg, HANDLE stop_event)
 			session->last_rx_ms = now;
 		}
 
-		if (now - session->last_tx_ms > KEEPALIVE_INTERVAL_MSEC) {
+		/* keepalive가 맡은 두 가지를 따로 본다.
+		 *  - NAT 매핑 유지: 내가 10초 동안 아무것도 보내지 않았으면 보낸다.
+		 *  - 생존 확인: 서버가 10초 동안 조용하면 응답을 유도한다. 데이터 패킷은 서버가
+		 *    버릴 수 있어 응답을 보장하지 못하지만, keepalive는 서버가 반드시 되돌려준다.
+		 *    이 경로가 없으면 "응답 없는 송신"이 이어질 때 keepalive가 억제된 채
+		 *    재핸드셰이크까지 가 버린다. last_ka_ms로 10초에 한 번만 나가게 묶는다. */
+		if (now - session->last_tx_ms > KEEPALIVE_INTERVAL_MSEC ||
+				(now - session->last_rx_ms > KEEPALIVE_INTERVAL_MSEC &&
+				 now - session->last_ka_ms > KEEPALIVE_INTERVAL_MSEC)) {
 			send_keepalive(t);
 		}
 
