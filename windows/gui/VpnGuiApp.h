@@ -1,0 +1,17 @@
+#pragma once
+
+#ifndef __AFXWIN_H__
+#error "include framework.h before VpnGuiApp.h"
+#endif
+
+class CVpnGuiApp : public CWinApp
+{
+public:
+	CVpnGuiApp();
+
+	BOOL InitInstance() override;
+	int ExitInstance() override;
+
+private:
+	bool m_wsa_ready;
+};

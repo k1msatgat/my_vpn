@@ -1,0 +1,36 @@
+#include <windows.h>
+#include "resource.h"
+
+/* 소스는 UTF-8(BOM 없음)이므로 rc.exe 에게 코드 페이지를 알려준다.
+ * MFC 의 afxres.h 는 쓰지 않는다 — 다이얼로그 하나와 컨트롤 ID 만 필요하고,
+ * windows.h 만으로 충분해서 MFC 가 없는 환경에서도 이 .rc 는 컴파일된다. */
+#pragma code_page(65001)
+
+LANGUAGE LANG_KOREAN, SUBLANG_DEFAULT
+
+IDD_MAIN DIALOGEX 0, 0, 320, 240
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX
+CAPTION "my_vpn 클라이언트"
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    LTEXT           "어댑터", IDC_STATIC, 10, 12, 42, 10
+    EDITTEXT        IDC_ADAPTER, 54, 10, 96, 13, ES_AUTOHSCROLL
+    LTEXT           "터널 IP", IDC_STATIC, 160, 12, 42, 10
+    EDITTEXT        IDC_TUNIP, 204, 10, 96, 13, ES_AUTOHSCROLL
+
+    LTEXT           "서버", IDC_STATIC, 10, 32, 42, 10
+    EDITTEXT        IDC_SERVER, 54, 30, 96, 13, ES_AUTOHSCROLL
+    LTEXT           "포트", IDC_STATIC, 160, 32, 42, 10
+    EDITTEXT        IDC_PORT, 204, 30, 50, 13, ES_AUTOHSCROLL | ES_NUMBER
+
+    CONTROL         "패킷 로그", IDC_LOGPKT, "Button",
+                    BS_AUTOCHECKBOX | WS_TABSTOP, 54, 51, 64, 10
+    DEFPUSHBUTTON   "연결", IDC_CONNECT, 186, 48, 54, 16
+    PUSHBUTTON      "해제", IDC_DISCONNECT, 246, 48, 54, 16
+
+    LTEXT           "상태", IDC_STATIC, 10, 74, 42, 10
+    LTEXT           "", IDC_STATE, 54, 74, 246, 10
+
+    LISTBOX         IDC_LOG, 10, 90, 300, 140,
+                    LBS_NOINTEGRALHEIGHT | LBS_NOSEL | WS_VSCROLL | WS_HSCROLL | WS_TABSTOP
+END

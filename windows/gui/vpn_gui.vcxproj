@@ -1,0 +1,126 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <ProjectGuid>{5C2A9F13-4E86-4B0D-91A7-2D6C8F3B7E40}</ProjectGuid>
+    <Keyword>MFCProj</Keyword>
+    <RootNamespace>vpn_gui</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <!-- $(SolutionDir) 는 .sln 을 통해 빌드할 때만 정의된다. msbuild 로 이 .vcxproj 를
+       직접 빌드해도 되도록 프로젝트 위치를 기준으로 삼는다. -->
+  <PropertyGroup Label="Paths">
+    <WindowsRoot>$(MSBuildProjectDirectory)\..</WindowsRoot>
+    <RepoRoot>$(MSBuildProjectDirectory)\..\..</RepoRoot>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <!-- 설치된 VS의 기본 툴셋을 쓴다. VS2022는 v143, VS2026은 v145. -->
+  <PropertyGroup Label="Toolset">
+    <MyVpnToolset Condition="'$(DefaultPlatformToolset)'!=''">$(DefaultPlatformToolset)</MyVpnToolset>
+    <MyVpnToolset Condition="'$(MyVpnToolset)'==''">v143</MyVpnToolset>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>$(MyVpnToolset)</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+    <UseOfMfc>Dynamic</UseOfMfc>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>$(MyVpnToolset)</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+    <UseOfMfc>Dynamic</UseOfMfc>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup>
+    <OutDir>$(WindowsRoot)\build\$(Configuration)\</OutDir>
+    <IntDir>$(WindowsRoot)\build\obj\$(ProjectName)\$(Configuration)\</IntDir>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard_C>stdc17</LanguageStandard_C>
+      <!-- C 파일(tunnel.c / vpn_session.c / proto.c)과 C++ 파일이 섞여 있어
+           미리 컴파일된 헤더를 쓰지 않는다. PCH 는 언어마다 따로 만들어야 하고,
+           C 파일이 pch.h(= MFC 헤더) 를 포함할 수는 없다. -->
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <AdditionalIncludeDirectories>$(RepoRoot)\lib\common\include;$(WindowsRoot)\core;$(WindowsRoot)\third_party\wintun\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <!-- MFC 헤더가 windows.h 를 직접 다루므로 WIN32_LEAN_AND_MEAN 은 정의하지 않는다. -->
+      <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <!-- 소스가 UTF-8(BOM 없음)이다. 이 옵션이 없으면 한글 와이드 문자열 리터럴이 깨진다. -->
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>ws2_32.lib;iphlpapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <!-- Wintun 어댑터 생성과 IP / MTU 설정에 관리자 권한이 필요하다.
+           매니페스트에 박아 두면 실행할 때 Windows 가 권한 상승을 먼저 묻는다. -->
+      <EnableUAC>true</EnableUAC>
+      <UACExecutionLevel>RequireAdministrator</UACExecutionLevel>
+    </Link>
+    <ResourceCompile>
+      <AdditionalIncludeDirectories>$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ResourceCompile>
+    <PostBuildEvent>
+      <Command>copy /Y "$(WindowsRoot)\third_party\wintun\bin\amd64\wintun.dll" "$(OutDir)"</Command>
+      <Message>Copy wintun.dll next to the executable</Message>
+    </PostBuildEvent>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <Optimization>Disabled</Optimization>
+      <PreprocessorDefinitions>_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <Optimization>MaxSpeed</Optimization>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <PreprocessorDefinitions>NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <Link>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="VpnGuiApp.cpp" />
+    <ClCompile Include="MainDlg.cpp" />
+    <ClCompile Include="..\core\vpn_session.c" />
+    <ClCompile Include="..\core\tunnel.c" />
+    <ClCompile Include="..\..\lib\common\src\proto.c" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="framework.h" />
+    <ClInclude Include="resource.h" />
+    <ClInclude Include="VpnGuiApp.h" />
+    <ClInclude Include="MainDlg.h" />
+    <ClInclude Include="..\core\vpn_session.h" />
+    <ClInclude Include="..\core\tunnel.h" />
+    <ClInclude Include="..\..\lib\common\include\proto.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="vpn_gui.rc" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>
