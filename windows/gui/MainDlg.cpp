@@ -639,6 +639,7 @@ CString CMainDlg::VerdictName(int verdict)
 	case TUNNEL_DROP_WRONG_SESSION:	return _T("세션 불일치");
 	case TUNNEL_DROP_UNKNOWN_TYPE:	return _T("알 수 없는 타입");
 	case TUNNEL_DROP_IO_ERROR:	return _T("전달 실패");
+	case TUNNEL_DROP_DENIED:	return _T("접근 거부");
 	default:			return _T("?");
 	}
 }
@@ -767,6 +768,10 @@ void CMainDlg::SetUiState(tunnel_state_t state)
 		break;
 	case TUNNEL_STATE_RECONNECTING:
 		text = _T("재연결 중");
+		m_state_color = RGB(176, 32, 32);
+		break;
+	case TUNNEL_STATE_DENIED:
+		text = _T("접근 거부됨");
 		m_state_color = RGB(176, 32, 32);
 		break;
 	case TUNNEL_STATE_STOPPED:

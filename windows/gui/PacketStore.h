@@ -26,7 +26,7 @@ struct PacketStats {
 	ULONGLONG ka_recv;
 	ULONGLONG rehandshakes;
 	ULONGLONG lost;			/* 링버퍼가 꽉 차서 UI 가 못 받은 수 */
-	ULONGLONG drops[TUNNEL_DROP_IO_ERROR + 1];
+	ULONGLONG drops[TUNNEL_VERDICT_COUNT];
 };
 
 class CPacketStore

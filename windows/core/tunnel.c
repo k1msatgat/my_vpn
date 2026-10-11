@@ -48,6 +48,7 @@ typedef struct session {
 	uint64_t last_tx_ms;
 	uint64_t last_ka_ms;	/* 마지막 keepalive 송신 */
 	posture_report_t posture;	/* 서버에 마지막으로 보고한 포스처 */
+	int denied;		/* 서버가 접근을 거절한 상태. 다시 받아 줄 때까지 보내지 않는다 */
 	uint64_t last_posture_ms;	/* 포스처를 마지막으로 읽은 시각 */
 } session_t;
 
@@ -318,6 +319,7 @@ const char *tunnel_verdict_name(int verdict)
 	case TUNNEL_DROP_WRONG_SESSION:	return "wrong session";
 	case TUNNEL_DROP_UNKNOWN_TYPE:	return "unknown type";
 	case TUNNEL_DROP_IO_ERROR:	return "io error";
+	case TUNNEL_DROP_DENIED:	return "access denied";
 	default:			return "?";
 	}
 }
@@ -770,6 +772,18 @@ static int pump_tun(tunnel_t *t)
 			pkt_snap(&pkt, ip, n);
 			pkt_emit(t, &pkt);
 		}
+		else if (session->denied) {
+			/* 서버는 이 세션을 이미 내렸으므로 보내도 버려진다. 여기서 막고 이유를
+			 * 올려야 사용자가 "왜 안 통하는지"를 패킷 목록에서 볼 수 있다. */
+			if (pkt_log_text(t)) {
+				tlog(t, "[skip] access denied (%lu bytes, proto=%d)", n, ip[IP_PROTO_OFF]);
+			}
+			pkt_init(t, &pkt, TUNNEL_DIR_TX, TUNNEL_DROP_DENIED);
+			pkt.wire_len = n;
+			pkt_inner(&pkt, ip, n);
+			pkt_snap(&pkt, ip, n);
+			pkt_emit(t, &pkt);
+		}
 		else {
 			if (pkt_log_text(t)) {
 				tlog(t, "[tun->udp] %lu bytes, proto=%d", n, ip[IP_PROTO_OFF]);
@@ -861,6 +875,20 @@ static int pump_udp(tunnel_t *t)
 				if (pkt_log_text(t)) {
 					tlog(t, "[keepalive] recv");
 				}
+				pkt_emit(t, &pkt);
+				continue;
+			case MSG_TYPE_DENY:
+				/* 세션 중의 거절. 방금 보낸 keepalive 의 포스처가 정책에 못 미쳤거나
+				 * 서버 쪽 정책이 바뀌었다. 터널은 닫지 않는다 — 어댑터를 없애면 사용자가
+				 * 방화벽을 다시 켰을 때 스스로 돌아올 수 없다. */
+				if (wire - off < 1) {
+					pkt.verdict = TUNNEL_DROP_BAD_HEADER;
+					pkt_emit(t, &pkt);
+					continue;
+				}
+				tlog(t, "[deny] %s", deny_reason_name(packet[off]));
+				session->denied = 1;
+				set_state(t, TUNNEL_STATE_DENIED);
 				pkt_emit(t, &pkt);
 				continue;
 			case MSG_TYPE_DATA:
@@ -1015,15 +1043,36 @@ int tunnel_run(const tunnel_config_t *cfg, HANDLE stop_event)
 		}
 
 		now = GetTickCount64();
-		if (now - session->last_rx_ms > SERVER_TIMEOUT_MSEC) {
-			tlog(t, "[HS] no rx from server for %ds, re-handshake", SERVER_TIMEOUT_SEC);
-			set_state(t, TUNNEL_STATE_RECONNECTING);
-			if (do_handshake(t) != HS_OK) {
-				tlog(t, "[HS] failed re-handshake[%s][%u], retry in %ds",
-						server_str, cfg->server_port, SERVER_TIMEOUT_SEC);
+
+		/* 다시 핸드셰이크하는 경우는 둘이다.
+		 *  - 서버가 30초 동안 조용하다 (재시작했거나 세션이 만료됐다).
+		 *  - 거절된 상태에서 포스처가 바뀌었다. 사용자가 방화벽을 다시 켠 것일 수
+		 *    있으니 30초를 기다리지 않고 바로 다시 물어본다.
+		 * 거절된 상태에서도 첫 번째 조건이 그대로 걸려, 포스처가 그대로여도 30초마다
+		 * 다시 물어본다. 서버 쪽 정책이 풀렸을 수 있다. */
+		if (now - session->last_rx_ms > SERVER_TIMEOUT_MSEC ||
+				(session->denied && posture_changed(t, now))) {
+			if (session->denied) {
+				tlog(t, "[HS] retry after deny");
 			}
 			else {
+				tlog(t, "[HS] no rx from server for %ds, re-handshake", SERVER_TIMEOUT_SEC);
+				set_state(t, TUNNEL_STATE_RECONNECTING);
+			}
+
+			switch (do_handshake(t)) {
+			case HS_OK:
+				session->denied = 0;
 				set_state(t, TUNNEL_STATE_CONNECTED);
+				break;
+			case HS_DENIED:
+				session->denied = 1;
+				set_state(t, TUNNEL_STATE_DENIED);
+				break;
+			default:
+				tlog(t, "[HS] failed re-handshake[%s][%u], retry in %ds",
+						server_str, cfg->server_port, SERVER_TIMEOUT_SEC);
+				break;
 			}
 			now = GetTickCount64();
 			session->last_rx_ms = now;
@@ -1036,9 +1085,11 @@ int tunnel_run(const tunnel_config_t *cfg, HANDLE stop_event)
 		 *  - 포스처 재보고
 		 * 앞의 둘만 있을 때는 "10초 동안 보낸 것 / 받은 것이 없을 때"만 보내면 됐다.
 		 * 포스처는 트래픽이 흐르는 중에도 보고돼야 하므로 유휴 여부와 관계없이 10초마다
-		 * 보낸다. 그러면 앞의 두 조건은 저절로 채워진다. */
-		if (posture_changed(t, now) ||
-				now - session->last_ka_ms > KEEPALIVE_INTERVAL_MSEC) {
+		 * 보낸다. 그러면 앞의 두 조건은 저절로 채워진다.
+		 *
+		 * 거절된 상태에서는 보내지 않는다. 서버에 세션이 없어 받아 줄 곳이 없다. */
+		if (!session->denied && (posture_changed(t, now) ||
+				now - session->last_ka_ms > KEEPALIVE_INTERVAL_MSEC)) {
 			send_keepalive(t);
 		}
 

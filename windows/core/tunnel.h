@@ -17,7 +17,8 @@ typedef enum tunnel_state {
 	TUNNEL_STATE_STOPPED = 0,
 	TUNNEL_STATE_CONNECTING,	/* 어댑터 생성 ~ 첫 핸드셰이크 */
 	TUNNEL_STATE_CONNECTED,
-	TUNNEL_STATE_RECONNECTING	/* 서버 무응답으로 재핸드셰이크 중 */
+	TUNNEL_STATE_RECONNECTING,	/* 서버 무응답으로 재핸드셰이크 중 */
+	TUNNEL_STATE_DENIED		/* 세션 중 서버가 접근을 거절했다. 터널은 열려 있지만 통하지 않는다 */
 } tunnel_state_t;
 
 typedef enum tunnel_dir {
@@ -35,7 +36,9 @@ typedef enum tunnel_verdict {
 	TUNNEL_DROP_BAD_HEADER,		/* 길이 부족 / 버전 불일치 */
 	TUNNEL_DROP_WRONG_SESSION,
 	TUNNEL_DROP_UNKNOWN_TYPE,
-	TUNNEL_DROP_IO_ERROR		/* 검증은 통과했지만 전달 자체가 실패 */
+	TUNNEL_DROP_IO_ERROR,		/* 검증은 통과했지만 전달 자체가 실패 */
+	TUNNEL_DROP_DENIED,		/* 서버가 접근을 거절한 상태라 보내지 않았다 */
+	TUNNEL_VERDICT_COUNT		/* 항목 수. 집계 배열의 크기로 쓴다 */
 } tunnel_verdict_t;
 
 /* 상세창 hex 덤프용으로 와이어 앞부분만 떠 둔다 (16B 헤더 + inner 헤더가 보일 정도). */

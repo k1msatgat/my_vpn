@@ -40,7 +40,7 @@ void CPacketStore::Add(const tunnel_packet_t &p)
 
 	/* 집계는 필터와 무관하게 전부 센다. 필터는 보기만 바꾼다. */
 	if (p.verdict != TUNNEL_PASS) {
-		if (p.verdict <= TUNNEL_DROP_IO_ERROR) {
+		if (p.verdict < TUNNEL_VERDICT_COUNT) {
 			m_stats.drops[p.verdict]++;
 		}
 	}
@@ -123,7 +123,7 @@ ULONGLONG CPacketStore::TotalDrops() const
 {
 	ULONGLONG n = 0;
 
-	for (int i = 1; i <= TUNNEL_DROP_IO_ERROR; i++) {
+	for (int i = 1; i < TUNNEL_VERDICT_COUNT; i++) {
 		n += m_stats.drops[i];
 	}
 
