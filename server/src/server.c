@@ -27,6 +27,16 @@ static void on_signal(int sig)
 	running = 0;
 }
 
+/* 시그널 핸들러 안에서는 파일을 읽을 수 없다 (fopen / printf 는 핸들러에서 불러도
+ * 안전한 함수가 아니다). 표시만 해 두고 메인 루프가 읽는다. */
+static volatile sig_atomic_t reload_requested = 0;
+
+static void on_reload(int sig)
+{
+	(void)sig;
+	reload_requested = 1;
+}
+
 /* 벽시계(time)는 관리자가 시간을 고치거나 NTP 가 맞추면 뛴다. nonce 의 수명처럼
  * "몇 초가 지났는가"만 필요한 곳에는 뒤로 가지 않는 시계를 쓴다. */
 static time_t mono_now(void)
@@ -366,6 +376,7 @@ int main(int argc, char *argv[])
 
 	signal(SIGINT, on_signal);
 	signal(SIGTERM, on_signal);
+	signal(SIGHUP, on_reload);
 
 	ifname[0] = '\0';
 	tun_fd = tun_alloc(ifname);
@@ -421,6 +432,23 @@ int main(int argc, char *argv[])
 		}
 
 		peer_check_expired();
+
+		/* kill -HUP 으로 기기 목록을 다시 읽는다. 서버를 내렸다 올리면 모든 세션이
+		 * 끊기지만, 이렇게 하면 정책을 바꾸거나 기기 하나를 지우는 동안 나머지는
+		 * 그대로 붙어 있다. 열려 있는 세션은 건드리지 않는다 — 다음 keepalive 가
+		 * 새 목록에 대 보고 걸러진다. epoll_wait 의 타임아웃이 1초라 시그널을 받고
+		 * 늦어도 1초 안에 여기에 온다. */
+		if (reload_requested) {
+			reload_requested = 0;
+			nd = device_load(argv[2]);
+			if (nd < 0) {
+				printf("device: reload failed, keeping the previous list\n");
+			}
+			else {
+				printf("device: reloaded, %d devices\n", nd);
+				device_dump();
+			}
+		}
 
 		for (i = 0; i < nev; i++) {
 			fd = events[i].data.fd;

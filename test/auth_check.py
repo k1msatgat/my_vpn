@@ -13,6 +13,7 @@ TUN 을 만들어야 해서 root 로 돌린다.
 import hashlib
 import hmac
 import os
+import signal
 import socket
 import struct
 import subprocess
@@ -226,6 +227,45 @@ def keepalive_tests():
     check("strict device can come back once the posture is fine", sk(0), "KEEPALIVE")
 
 
+LINE1 = "%s %s 10.0.0.3" % (DEV_ID.hex(), DEV_KEY.hex())
+LINE2 = "%s %s 10.0.0.4 firewall=on antivirus=on min-build=22000  # strict" % (DEV2_ID.hex(), DEV2_KEY.hex())
+
+
+def write_devices(path, *lines):
+    with open(path, "w") as f:
+        f.write("\n".join(lines) + "\n")
+
+
+def reload_tests(srv, path):
+    """서버를 끄지 않고 기기 목록을 바꾼다 (kill -HUP)."""
+    c = Client()
+    ka = lambda pkt: (c.send(pkt), c.recv())[1]
+
+    def reload(*lines):
+        write_devices(path, *lines)
+        srv.send_signal(signal.SIGHUP)
+        time.sleep(1.5)
+
+    idx = session(c)
+    check("before reload", ka(keepalive(idx, 0)), "KEEPALIVE")
+    reload(LINE1 + " min-build=99999", LINE2)
+    check("policy tightened: next keepalive of the open session", ka(keepalive(idx, 1)), "DENY(4)")
+    check("policy tightened: new handshake", c.handshake(), "DENY(4)")
+
+    reload(LINE1, LINE2)
+    idx = session(c)
+    check("policy relaxed: device is accepted again", ka(keepalive(idx, 0)), "KEEPALIVE")
+
+    reload(LINE2)
+    check("device removed: next keepalive of the open session", ka(keepalive(idx, 1)), "DENY(1)")
+    check("device removed: new handshake", c.request(), "DENY(1)")
+
+    reload(LINE1, LINE2)
+    idx = session(c)
+    reload(LINE1 + " firewal=on", LINE2)
+    check("broken file: previous list stays in effect", ka(keepalive(idx, 0)), "KEEPALIVE")
+
+
 def loader_tests():
     """오타가 난 조건을 조용히 넘기지 않는지."""
     global failed
@@ -246,9 +286,7 @@ def main():
 
     fd, path = tempfile.mkstemp(prefix="devices.", suffix=".conf")
     with os.fdopen(fd, "w") as f:      # mkstemp 는 0600 으로 만든다
-        f.write("%s %s 10.0.0.3\n" % (DEV_ID.hex(), DEV_KEY.hex()))
-        f.write("%s %s 10.0.0.4 firewall=on antivirus=on min-build=22000  # strict\n"
-                % (DEV2_ID.hex(), DEV2_KEY.hex()))
+        f.write(LINE1 + "\n" + LINE2 + "\n")
 
     loader_tests()
 
@@ -262,6 +300,7 @@ def main():
         handshake_tests()
         posture_tests()
         keepalive_tests()
+        reload_tests(srv, path)
     finally:
         srv.terminate()
         srv.wait()

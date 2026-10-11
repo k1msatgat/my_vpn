@@ -10,6 +10,11 @@
 static device_t devices[MAX_DEVICES];
 static int ndevices;
 
+/* 파일은 여기에 먼저 읽고, 끝까지 문제없을 때만 위의 표로 옮긴다. 서버가 도는 중에
+ * 다시 읽다가 중간 줄에서 실패했을 때 쓰던 목록이 반쯤 바뀐 채 남으면 안 된다. */
+static device_t staged[MAX_DEVICES];
+static int nstaged;
+
 void device_init(void)
 {
 	memset(devices, 0, sizeof(devices));
@@ -136,7 +141,7 @@ int device_load(const char *path)
 		return -1;
 	}
 
-	device_init();
+	nstaged = 0;
 
 	while (fgets(line, sizeof(line), fp) != NULL) {
 		device_t *d;
@@ -159,12 +164,12 @@ int device_load(const char *path)
 			goto fail;
 		}
 
-		if (ndevices >= MAX_DEVICES) {
+		if (nstaged >= MAX_DEVICES) {
 			fprintf(stderr, "device: too many devices (max %d)\n", MAX_DEVICES);
 			goto fail;
 		}
 
-		d = &devices[ndevices];
+		d = &staged[nstaged];
 		memset(d, 0, sizeof(*d));
 
 		/* 터널 IP 뒤에 남은 단어들이 포스처 조건이다. */
@@ -190,26 +195,29 @@ int device_load(const char *path)
 
 		/* 같은 ID 가 두 번 나오면 어느 키가 맞는지 정할 수 없고, 같은 터널 IP 를 두
 		 * 기기에 주면 서로의 세션을 밀어낸다. 조용히 한쪽을 고르지 않고 거부한다. */
-		for (i = 0; i < ndevices; i++) {
-			if (memcmp(devices[i].id, d->id, DEVICE_ID_LEN) == 0) {
+		for (i = 0; i < nstaged; i++) {
+			if (memcmp(staged[i].id, d->id, DEVICE_ID_LEN) == 0) {
 				fprintf(stderr, "device: line %d: duplicate id\n", lineno);
 				goto fail;
 			}
-			if (devices[i].tun_ip.s_addr == d->tun_ip.s_addr) {
+			if (staged[i].tun_ip.s_addr == d->tun_ip.s_addr) {
 				fprintf(stderr, "device: line %d: tunnel ip %s already assigned\n", lineno, s_ip);
 				goto fail;
 			}
 		}
 
-		ndevices++;
+		nstaged++;
 	}
 
 	fclose(fp);
+
+	memcpy(devices, staged, sizeof(devices));
+	ndevices = nstaged;
+
 	return ndevices;
 
 fail:
 	fclose(fp);
-	device_init();
 	return -1;
 }
 

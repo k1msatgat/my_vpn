@@ -47,7 +47,8 @@ typedef struct device {
 
 void device_init(void);
 
-/* 읽은 기기 수를 돌려준다. 파일을 못 읽거나 형식이 틀리면 -1. */
+/* 읽은 기기 수를 돌려준다. 파일을 못 읽거나 형식이 틀리면 -1 이고, 그때는 이전에
+ * 읽어 둔 목록이 그대로 남는다. 진행 중이던 핸드셰이크의 nonce 는 사라진다. */
 int device_load(const char *path);
 
 device_t *device_find(const uint8_t id[DEVICE_ID_LEN]);
