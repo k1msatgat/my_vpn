@@ -66,7 +66,7 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>ws2_32.lib;iphlpapi.lib;wscapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>ws2_32.lib;iphlpapi.lib;wscapi.lib;bcrypt.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
       <Command>copy /Y "$(WindowsRoot)\third_party\wintun\bin\amd64\wintun.dll" "$(OutDir)"</Command>
@@ -95,11 +95,13 @@
     <ClCompile Include="main.c" />
     <ClCompile Include="..\core\tunnel.c" />
     <ClCompile Include="..\core\posture.c" />
+    <ClCompile Include="..\core\hmac.c" />
     <ClCompile Include="..\..\lib\common\src\proto.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\core\tunnel.h" />
     <ClInclude Include="..\core\posture.h" />
+    <ClInclude Include="..\core\hmac.h" />
     <ClInclude Include="..\..\lib\common\include\proto.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
