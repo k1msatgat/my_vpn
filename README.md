@@ -1,6 +1,6 @@
 # my_vpn
 
-> C로 처음부터 만드는 L3 VPN — TUN 인터페이스 + UDP 터널 + 세션 기반 피어 관리 + ACL
+> C로 처음부터 만드는 L3 VPN — TUN 인터페이스 + UDP 터널 + 기기 인증 + 포스처 기반 접근 제어 + ACL
 
 리눅스 TUN 디바이스로 IP 패킷을 가로채고, 직접 설계한 헤더를 붙여 UDP로 터널링하는 VPN입니다.
 외부 VPN 라이브러리 없이 **패킷 포맷, 핸드셰이크, 세션 관리, 접근 제어**를 단계별로 구현하며
@@ -35,6 +35,10 @@ Zero Trust Network Access(ZTNA)의 기반 구조를 학습하는 것을 목표�
 - **TUN 기반 L3 터널링** — `IFF_TUN | IFF_NO_PI`로 순수 IPv4 패킷만 송수신
 - **자체 와이어 프로토콜** — 버전/타입/세션 idx를 담은 고정 길이 헤더, 빅엔디언 직렬화
 - **핸드셰이크 & 세션 idx** — 서버가 클라이언트별로 추측하기 어려운 32bit 세션 식별자 발급
+- **기기 인증** — 등록된 기기만 세션을 받는다. 기기별 키로 서버의 nonce에 HMAC-SHA256 서명 (챌린지-응답)
+- **포스처 기반 접근 제어** — 클라이언트가 OS 빌드 / 방화벽 / 백신 상태를 보고하고, 서버가 기기별 정책에 대 본다
+- **지속 검증** — keepalive마다 포스처를 다시 보고·평가하고, 정책에 못 미치면 세션 중에도 차단
+- **정책 무중단 변경** — `kill -HUP`으로 기기 목록과 정책을 다시 읽는다. 지워진 기기는 다음 keepalive에서 끊긴다
 - **피어 테이블** — O(1) 세션 조회, 테이블이 가득 차면 LRU 방식으로 교체
 - **ACL** — `src / dst / proto / dport` 기반 first-match 정책, 기본 거부(default deny)
 - **위조 방어** — 서버는 inner src가 세션에 등록된 터널 IP와 같은지, 클라이언트는 출발지가 서버인지 확인
@@ -65,10 +69,16 @@ Zero Trust Network Access(ZTNA)의 기반 구조를 학습하는 것을 목표�
 
 | type | 값 | 페이로드 |
 |---|---|---|
-| `MSG_TYPE_REQ_HANDSHAKE` | 1 | `msg_header` + 클라이언트 터널 IP (4B) |
+| `MSG_TYPE_REQ_HANDSHAKE` | 1 | `msg_header` + 터널 IP (4B) + 기기 ID (16B) |
 | `MSG_TYPE_RES_HANDSHAKE` | 2 | `msg_header` (발급된 `session_idx` 포함) |
 | `MSG_TYPE_DATA` | 3 | `msg_header` + `data_header` + IP 패킷 |
-| `MSG_TYPE_KEEPALIVE` | 4 | `msg_header`만 (8B) |
+| `MSG_TYPE_KEEPALIVE` | 4 | C→S: `msg_header` + counter (8B) + 포스처 (8B) + mac (32B) / S→C: `msg_header`만 |
+| `MSG_TYPE_CHALLENGE` | 5 | `msg_header` + nonce (16B) |
+| `MSG_TYPE_AUTH` | 6 | `msg_header` + 터널 IP (4B) + 기기 ID (16B) + nonce (16B) + 포스처 (8B) + mac (32B) |
+| `MSG_TYPE_DENY` | 7 | `msg_header` + 사유 (1B) |
+
+포스처 보고는 8바이트 고정입니다: `os_build`(4B, BE) + `firewall`(1B) + `antivirus`(1B) + 예약(2B).
+상태 값은 0 = 모름, 1 = 꺼짐, 2 = 켜짐이며, 채우지 않은 필드가 통과로 읽히지 않도록 0을 "모름"으로 뒀습니다.
 
 - 헤더 크기는 `_Static_assert`로 컴파일 타임에 8바이트임을 보장합니다.
 - 정수 필드는 `msg_encode` / `data_encode`에서 네트워크 바이트 순서로 변환합니다.
@@ -79,16 +89,36 @@ Zero Trust Network Access(ZTNA)의 기반 구조를 학습하는 것을 목표�
 sequenceDiagram
     participant C as Client
     participant S as Server
-    C->>S: REQ_HANDSHAKE (idx=0, tun_ip=10.0.0.2)
-    Note over S: peer_register()<br/>slot 할당 + session_idx 생성
+    C->>S: REQ_HANDSHAKE (tun_ip, device_id)
+    Note over S: 등록된 기기인가<br/>nonce 발급 (1회용, 5초)
+    S->>C: CHALLENGE (nonce)
+    Note over C: 포스처 수집<br/>mac = HMAC(기기 키, tun_ip|id|nonce|posture)
+    C->>S: AUTH (tun_ip, device_id, nonce, posture, mac)
+    Note over S: nonce / mac → 터널 IP → 포스처 정책<br/>통과하면 peer_register()
     S->>C: RES_HANDSHAKE (idx=0x5F3A9C02)
     Note over C: session.idx 저장
     C->>S: DATA (idx=0x5F3A9C02, counter=0, IP...)
     S->>C: DATA (idx=0x5F3A9C02, counter=0, IP...)
 ```
 
-- 클라이언트는 1초 타임아웃으로 최대 5회 재전송하며, 서버 주소에서 온 응답만 받습니다.
-- 같은 터널 IP가 같은 외부 주소에서 다시 요청하면 서버는 기존 세션의 idx를 그대로 돌려줍니다.
+어느 단계에서든 서버는 `RES_HANDSHAKE` 대신 `DENY`(사유)로 답할 수 있습니다.
+
+| 사유 | 값 | 뜻 |
+|---|---|---|
+| `DENY_UNKNOWN_DEVICE` | 1 | 기기 목록에 없는 ID |
+| `DENY_BAD_AUTH` | 2 | nonce가 다르거나 만료됐거나 mac이 틀림 |
+| `DENY_TUN_IP` | 3 | 그 기기에 배정된 터널 IP가 아님 |
+| `DENY_POSTURE` | 4 | 인증은 됐지만 포스처가 그 기기의 정책에 못 미침 |
+
+- **챌린지-응답**이라 키 자체는 와이어에 나오지 않습니다. 서버가 매번 새 nonce를 주므로 엿들은 `AUTH`를 다시 보내도 통과하지 못하고, nonce는 맞든 틀리든 `AUTH`를 받는 순간 버립니다.
+- **포스처는 mac의 서명 범위 안**이라 전달 도중에 "방화벽 꺼짐"을 "켜짐"으로 고칠 수 없습니다.
+- **검사 순서**는 기기 → nonce / mac → 터널 IP → 포스처입니다. 키를 가졌다는 것을 확인하기 전에는 구체적인 거절 이유를 알려 주지 않습니다.
+- 클라이언트는 `AUTH`를 보내기 전에 온 `RES_HANDSHAKE`를 받지 않습니다. 받아 주면 서버인 척하는 쪽이 `REQ`에 곧바로 `RES`를 돌려주는 것만으로 인증 단계가 건너뛰어집니다.
+- 클라이언트는 1초 타임아웃으로 최대 5회 `REQ`부터 다시 하며, 서버 주소에서 온 응답만 받습니다. `DENY`를 받으면 재시도하지 않습니다.
+- 새로 인증하면 새 세션입니다. 서버는 그 터널 IP의 기존 세션을 내리고 새 idx를 발급합니다.
+- HMAC-SHA256은 직접 구현하지 않았습니다. 서버는 OpenSSL, Windows 클라이언트는 CNG를 쓰고, 양쪽 모두 `selftest`로 RFC 4231 벡터를 확인합니다.
+
+> **Linux 클라이언트(`client/`)는 아직 이 흐름을 구현하지 않았습니다.** 예전 형식의 `REQ_HANDSHAKE`를 보내므로 지금 서버에는 붙지 못합니다. 인증 핸드셰이크는 Windows 클라이언트와 `test/auth_check.py`로 확인됩니다.
 
 ### Keepalive & session lifetime
 
@@ -96,11 +126,13 @@ sequenceDiagram
 sequenceDiagram
     participant C as Client
     participant S as Server
-    Note over C: 10초간 송신 없음
-    C->>S: KEEPALIVE (idx)
-    Note over S: last_seen 갱신
+    Note over C: 10초마다, 포스처가 바뀌면 즉시
+    C->>S: KEEPALIVE (idx, counter, posture, mac)
+    Note over S: mac / counter 검증<br/>포스처를 정책에 다시 대 봄
     S->>C: KEEPALIVE (idx)
     Note over C: last_rx 갱신
+    Note over S: 포스처가 못 미치면
+    S->>C: DENY (posture) — 세션을 내린다
     Note over S: 60초간 수신 없음 → 세션 만료
     Note over C: 30초간 수신 없음 → 재핸드셰이크
     C->>S: REQ_HANDSHAKE
@@ -109,11 +141,15 @@ sequenceDiagram
 
 | 상수 (`proto.h`) | 값 | 의미 |
 |---|---|---|
-| `KEEPALIVE_INTERVAL_SEC` | 10 | 클라이언트가 이 시간 동안 아무것도 보내지 않았으면 keepalive 전송 |
+| `KEEPALIVE_INTERVAL_SEC` | 10 | 클라이언트의 keepalive(포스처 보고) 주기 |
 | `SERVER_TIMEOUT_SEC` | 30 | 클라이언트가 이 시간 동안 서버에서 아무것도 받지 못하면 재핸드셰이크 |
 | `SESSION_TIMEOUT_SEC` | 60 | 서버가 이 시간 동안 수신이 없는 세션을 만료 |
 
-- keepalive는 NAT 매핑 유지와 생존 확인을 겸합니다. 서버는 받은 keepalive에 같은 형식으로 응답합니다.
+- keepalive는 NAT 매핑 유지, 생존 확인, **포스처 재보고**를 겸합니다. 핸드셰이크에서 한 번 통과했다고 세션이 끝날 때까지 믿지 않습니다.
+- 클라이언트의 keepalive는 mac이 헤더부터 포스처까지를 덮습니다. 헤더의 `session_idx`가 들어가 다른 세션의 keepalive를 끼워 넣을 수 없고, `counter`가 직전 값보다 커야 해서 방화벽이 켜져 있던 때의 keepalive를 녹화했다가 다시 보낼 수 없습니다.
+- 서버는 **버리는 것과 끊는 것을 구분**합니다. mac이 틀렸거나 counter가 예전 값이면 조용히 버리고 세션은 그대로 둡니다 (위조 패킷 하나로 남의 세션을 끊을 수 있어서는 안 됩니다). mac이 맞는데 포스처가 못 미치면 `DENY`로 알리고 세션을 내립니다.
+- 거절된 클라이언트는 터널을 닫지 않고 통과만 막은 채, 포스처가 바뀌면 바로, 그렇지 않아도 30초마다 다시 핸드셰이크합니다.
+- `kill -HUP`으로 서버가 기기 목록을 다시 읽으면, 조건이 강해졌거나 목록에서 지워진 기기는 다음 keepalive에서 걸러집니다.
 - 서버가 재시작했거나 세션이 만료된 경우 서버는 옛 idx의 패킷을 버리고, 클라이언트는 응답이 끊긴 것을 감지해 새 세션을 받습니다.
 - 재핸드셰이크로 idx가 바뀌면 클라이언트는 `tx_counter`를 0으로 되돌립니다. idx가 그대로면 세션이 이어지는 것이므로 유지합니다.
 
@@ -189,10 +225,12 @@ my_vpn/
 ├── client/
 │   └── src/client.c       # 핸드셰이크, keepalive, 재핸드셰이크 + epoll 터널 루프
 ├── server/
-│   ├── include/{peer,acl}.h
+│   ├── include/{peer,acl,device,auth}.h
 │   └── src/
-│       ├── server.c       # epoll 루프, 핸드셰이크/keepalive 처리, 패킷 검증
+│       ├── server.c       # epoll 루프, 인증 핸드셰이크 / keepalive 검증, 패킷 검증
 │       ├── peer.c         # 피어 테이블, 세션 idx 발급/조회, 세션 만료
+│       ├── device.c       # 등록된 기기 목록, 기기별 포스처 정책
+│       ├── auth.c         # HMAC-SHA256 (OpenSSL), 상수 시간 비교, 난수
 │       └── alc.c          # ACL 파싱 및 매칭
 ├── windows/               # Windows 클라이언트 (Visual Studio 솔루션)
 │   ├── README.md          #   Windows 클라이언트, GUI, 패킷 분석기
@@ -215,7 +253,9 @@ my_vpn/
 ├── test/
 │   ├── common.sh          # 공용 설정 및 함수
 │   ├── server.sh          # 서버 실행 / 재시작 시나리오
-│   └── client.sh          # 클라이언트 실행 / idle·stop·restart 시나리오
+│   ├── client.sh          # 클라이언트 실행 / idle·stop·restart 시나리오
+│   ├── auth_check.py      # 서버의 기기 인증 / 포스처 / 지속 검증을 패킷 수준에서 확인
+│   └── devices.conf.example  # 기기 목록 형식 (실제 devices.conf 는 커밋하지 않는다)
 ├── docs/
 │   └── linux.md           # Linux 빌드·실행·테스트, ACL
 └── Makefile               # 컴포넌트별 bin/ 분리 빌드, 의존성 자동 추적
@@ -235,9 +275,18 @@ my_vpn/
 | 세션 내 inner src IP 위조 | 방어 | inner src가 피어의 터널 IP와 다르면 폐기 |
 | 클라이언트의 비서버 출발지 패킷 수신 | 방어 | 출발지 주소/포트가 서버와 다르면 폐기 |
 | 죽은 세션이 테이블을 계속 점유 | 방어 | 60초 무응답 세션 만료 |
-| 도청 / idx 탈취 | **미방어** | 평문 프로토콜 — idx를 아는 공격자는 패킷 주입과 외부 주소 변경이 가능. 암호화 단계에서 해결 |
-| 핸드셰이크 위장 (세션 탈취) | **미방어** | 터널 IP만 알면 누구나 세션을 받을 수 있음. 인증 단계에서 해결 |
-| 재전송 공격 | **미방어** | `counter`는 송신만 하고 수신 측 검증 없음. 인증 없이는 값 변조가 가능해 암호화와 함께 추가 예정 |
+| 핸드셰이크 위장 (세션 탈취) | 방어 | 등록된 기기의 키로 서버의 nonce에 서명해야 세션을 받음 |
+| 엿들은 `AUTH` 재전송 | 방어 | nonce는 1회용이고 5초 뒤 만료 |
+| 전달 중 포스처 변조 | 방어 | 포스처가 mac의 서명 범위 안 |
+| 예전 포스처 보고 재전송 | 방어 | keepalive의 `counter`가 직전 값보다 커야 하고, mac이 `session_idx`에 묶임 |
+| 위조 keepalive로 남의 세션 끊기 / 주소 돌리기 | 방어 | mac 검증을 통과한 뒤에만 세션을 내리거나 외부 주소를 갱신 |
+| 정책에 못 미치는 단말의 접근 | 방어 | 핸드셰이크와 매 keepalive에서 기기별 포스처 정책 평가 |
+| 분실 / 폐기된 기기의 접근 | 방어 | 목록에서 지우고 `kill -HUP` — 다음 keepalive에서 차단 |
+| 도청 / idx 탈취 | **미방어** | 데이터 패킷은 평문이고 인증되지 않음 — idx를 아는 공격자는 패킷 주입과 외부 주소 변경이 가능. 암호화 단계에서 해결 |
+| 데이터 패킷 재전송 | **미방어** | 데이터의 `counter`는 송신만 하고 수신 측 검증 없음 |
+| 서버 위장 | **미방어** | 서버는 클라이언트에게 자신을 증명하지 않음. 서버 주소를 위조할 수 있으면 가짜 `RES` / `DENY`를 보낼 수 있음 |
+| 포스처 거짓 보고 | **미방어** | 포스처는 클라이언트의 자기 보고. 키를 가진 변조된 클라이언트는 거짓으로 보고할 수 있음 (막으려면 TPM 기반 원격 증명 필요) |
+| 핸드셰이크 방해 | **미방어** | 기기 ID를 아는 공격자가 `REQ`를 계속 보내 그 기기의 nonce를 덮어쓸 수 있음. 인증은 뚫리지 않음 |
 
 > 학습 목적의 프로젝트이며, 프로덕션 환경에서 사용하기 위한 보안 수준이 아닙니다.
 
@@ -246,6 +295,8 @@ my_vpn/
 - **재핸드셰이크는 블로킹입니다.** 메인 루프 안에서 응답을 최대 5초 기다리며, 그동안 터널 패킷은 처리되지 않습니다. 실패하면 30초 뒤에 다시 시도합니다.
 - **종료 통지가 없습니다.** 클라이언트가 종료해도 서버는 알지 못하고, 세션은 60초 뒤 만료로 정리됩니다.
 - **세션 만료와 재핸드셰이크 판정은 벽시계(`time()`) 기준입니다.** 시스템 시간이 크게 바뀌면 만료나 재핸드셰이크가 일찍 일어날 수 있습니다.
+- **Linux 클라이언트는 인증 핸드셰이크를 구현하지 않았습니다.** 지금 서버에 붙지 못하며, `test/client.sh`의 시나리오도 통과하지 못합니다. 포스처 수집은 Windows 전용입니다.
+- **기기 키는 서버에 평문으로 있습니다.** 기기 목록 파일의 권한(600)에 기대며, 서버가 뚫리면 모든 기기의 키가 드러납니다. 공개키 방식이면 서버에는 공개키만 두면 됩니다.
 - **IPv4만 터널링합니다.** IPv6 패킷은 건너뜁니다.
 - **멀티캐스트 / 브로드캐스트는 터널을 통과하지 못합니다.** 서버가 inner dst로 피어를 1:1로 찾는 구조라
   전달할 상대가 없습니다. Windows 클라이언트는 이를 송신 경로에서 명시적으로 버립니다.
@@ -265,11 +316,14 @@ my_vpn/
 - [ ] 암호화 & 키 교환 — X25519 + ChaCha20-Poly1305, `counter`를 nonce 및 재전송 방지에 사용
 - [ ] 신원 기반 인증 — 기기 키 챌린지-응답, 포스처 기반 정책 (ZTNA)
   - [x] 와이어 포맷 정의 (`CHALLENGE` / `AUTH` / `DENY`, 포스처 보고)
-  - [x] Windows 클라이언트 — 포스처 수집, 기기 등록, 인증 핸드셰이크 (모의 서버로 확인)
-  - [ ] 서버 — 기기 목록, nonce 발급과 mac 검증, 포스처 조건이 붙은 ACL
+  - [x] Windows 클라이언트 — 포스처 수집, 기기 등록, 인증 핸드셰이크
+  - [x] 서버 — 기기 목록, nonce 발급과 mac 검증, 기기별 포스처 정책 (`test/auth_check.py` 53개 통과, 실제 Windows 클라이언트로 수락 / 거절 확인)
   - [x] 지속 검증 (Windows 클라이언트) — keepalive 로 포스처 재보고, 세션 중 거절 처리와 복구 (모의 서버로 확인)
-  - [ ] 지속 검증 (서버) — keepalive 의 mac / counter 검증, 위반 시 `DENY` 와 세션 차단
+  - [x] 지속 검증 (서버) — keepalive 의 mac / counter 검증, 위반 시 `DENY` 와 세션 차단, `SIGHUP` 으로 정책 변경 / 기기 폐기
   - [x] Windows GUI — 포스처 탭, 거부 사유 표시, 기기 등록 (모의 서버로 허용 / 세션 중 거부 / 복구 확인)
+  - [ ] Windows 클라이언트와 실제 서버의 전체 경로 확인 — 터널을 열고 ping 왕복, 세션 중 정책 변경
+  - [ ] Linux 클라이언트 — 인증 핸드셰이크 (지금은 서버에 붙지 못함)
+  - [ ] 리소스별 포스처 조건 — ACL 규칙에 포스처 조건을 붙여 접근 대상마다 요구 수준을 다르게
 - [ ] 비블로킹 재핸드셰이크 (상태 머신), 종료 통지 메시지
 - [x] Windows 클라이언트 — Wintun 콘솔 클라이언트 (ping 왕복 / 유휴 120초 / 서버 재시작 복구 확인)
 - [x] Windows 클라이언트 — MFC GUI (연결·해제 상태 전이 / 패킷 분석 탭 / 필터·통계 / ping 왕복 확인)
@@ -292,4 +346,5 @@ my_vpn/
 | AI 분석 | Windows 유휴 시 비유니캐스트 송신이 keepalive를 억제해 불필요한 재핸드셰이크가 생기는 문제를 테스트로 재현하고 `windows/` 쪽을 수정 |
 | AI 초안 | 이 README의 keepalive/재핸드셰이크 이후 갱신분 |
 | AI 작성 | ZTNA 확장의 Windows 쪽 — `core/posture.c`(포스처 수집), `core/device.c`(기기 신원), `core/hmac.c`, `core/tunnel.c`의 인증 핸드셰이크와 지속 검증, GUI의 포스처 탭과 기기 등록 창, `windows/test/mock_server.py` |
+| AI 작성 | ZTNA 확장의 서버 쪽 — `server/src/auth.c`, `server/src/device.c`, `server.c`의 `handle_request` / `handle_auth` / `handle_keepalive` / `send_deny`와 SIGHUP 처리, `peer.c`의 `peer_drop`, `test/auth_check.py`. 목표 직무가 Windows 클라이언트라 서버 쪽 확장은 AI에게 맡겼고, 기존 서버 로직(피어 테이블, 데이터 경로, ACL)은 그대로 직접 구현한 것 |
 | AI 작성 | `proto.h` / `proto.c`의 인증·포스처 메시지 정의와 `posture_encode` / `posture_decode`. 메시지 흐름은 AI가 제안하고 검토 후 채택 |

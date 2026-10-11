@@ -146,8 +146,9 @@ MFC 래퍼만 얹지 않고 Win32 수준에서 처리한 부분입니다.
 터널 IP만 대면 세션이 열리던 핸드셰이크를 기기 인증으로 바꾸는 중입니다. 와이어 포맷은
 [`proto.h`](../lib/common/include/proto.h)의 주석에 있습니다.
 
-> **현재 상태**: Windows 클라이언트는 인증 핸드셰이크와 지속 검증을 구현했고, 서버(Linux)는 아직입니다.
-> 서버가 구현되기 전까지 Windows 클라이언트는 `test/mock_server.py`로만 핸드셰이크를 확인할 수 있습니다.
+> **현재 상태**: Windows 클라이언트와 서버(Linux) 모두 구현됐습니다. 실제 서버를 상대로는 핸드셰이크의
+> 수락과 거절까지 확인했고, 터널을 연 뒤의 구간(지속 검증, 세션 중 거부와 복구)은 `test/mock_server.py`를
+> 상대로 확인했습니다. 실제 서버와 터널을 열어 전체 경로를 돌려 보는 일이 남아 있습니다.
 
 ```
 C -> S  REQ_HANDSHAKE   tun_ip | device_id         "나는 이 기기다"
@@ -218,6 +219,7 @@ vpn_client.exe posture
 :: HMAC-SHA256 이 RFC 4231 테스트 벡터와 맞는지
 vpn_client.exe selftest
 
+:: 실제 서버에 등록하는 방법은 docs/linux.md 의 "기기 등록과 포스처 정책"
 :: 서버 없이 핸드셰이크 확인 (다른 창에서 클라이언트를 127.0.0.1 로 실행)
 python windows\test\mock_server.py --device <id>:<key>:10.0.0.3 --require-firewall
 ```
