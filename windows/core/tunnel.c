@@ -10,10 +10,16 @@
 
 #include "wintun.h"
 #include "proto.h"
+#include "posture.h"
+#include "hmac.h"
 #include "tunnel.h"
 
 #define HS_TIMEOUT_MSEC 1000
 #define HS_RETRY 5
+
+#define HS_OK		0
+#define HS_FAIL		(-1)	/* 응답 없음 / 오류 / 중지 요청 */
+#define HS_DENIED	(-2)	/* 서버가 거절했다. 다시 보내도 같은 답이 온다 */
 
 #define LOOP_TICK_MSEC 1000
 #define SERVER_TIMEOUT_MSEC (SERVER_TIMEOUT_SEC * 1000)
@@ -388,97 +394,245 @@ static int pkt_log_text(const tunnel_t *t)
 	return t->cfg->log_packets && !t->cfg->on_packet;
 }
 
+static const char *deny_reason_name(uint8_t reason)
+{
+	switch (reason) {
+	case DENY_UNKNOWN_DEVICE:	return "unknown device";
+	case DENY_BAD_AUTH:		return "bad auth";
+	case DENY_TUN_IP:		return "tunnel ip not assigned to this device";
+	case DENY_POSTURE:		return "posture does not meet policy";
+	default:			return "?";
+	}
+}
+
+/* 수집한 포스처를 와이어 형식으로 옮긴다. 지금은 값이 같지만 수집 쪽 enum 과
+ * 와이어 값을 캐스팅으로 잇지 않는다. 한쪽 순서를 바꾸면 조용히 어긋난다. */
+static uint8_t posture_wire_state(uint8_t state)
+{
+	switch (state) {
+	case POSTURE_ON:	return POSTURE_STATE_ON;
+	case POSTURE_OFF:	return POSTURE_STATE_OFF;
+	default:		return POSTURE_STATE_UNKNOWN;
+	}
+}
+
+static void posture_report_now(posture_report_t *report)
+{
+	posture_t p;
+
+	posture_collect(&p);
+
+	memset(report, 0, sizeof(*report));
+	report->os_build = p.os_build;
+	report->firewall = posture_wire_state(p.firewall);
+	report->antivirus = posture_wire_state(p.antivirus);
+}
+
+/* 핸드셰이크 패킷 하나를 UI 로 올린다. */
+static void hs_emit(tunnel_t *t, int dir, const msg_header_t *h, const uint8_t *wire, int len)
+{
+	tunnel_packet_t pkt;
+
+	pkt_init(t, &pkt, dir, TUNNEL_PASS);
+	pkt.msg_type = h->type;
+	pkt.session_idx = h->session_idx;
+	pkt.wire_len = (uint32_t)len;
+	pkt_snap(&pkt, wire, (uint32_t)len);
+	pkt_emit(t, &pkt);
+}
+
+/* deadline 까지 서버가 보낸 우리 버전의 패킷 하나를 기다린다.
+ * 받은 길이(>= 헤더 길이)를 돌려주고, 시간이 다 되면 0, 오류나 중지 요청은 HS_FAIL. */
+static int hs_recv(tunnel_t *t, uint64_t deadline, uint8_t *buf, int cap, msg_header_t *h)
+{
+	HANDLE waits[2] = { t->stop_event, t->sock_event };
+	struct sockaddr_in from;
+	uint64_t now;
+	DWORD w;
+	int n;
+
+	for (;;) {
+		while ((n = udp_recv(t, buf, cap, &from)) >= 0) {
+			if (!from_server(&t->session, &from)) {
+				continue;
+			}
+			if (msg_decode(buf, (size_t)n, h) < 0 || h->version != PROTOCOL_VERSION) {
+				continue;
+			}
+			return n;
+		}
+		if (n == RECV_ERROR) {
+			return HS_FAIL;
+		}
+
+		now = GetTickCount64();
+		if (now >= deadline) {
+			return 0;
+		}
+
+		w = WaitForMultipleObjects(2, waits, FALSE, (DWORD)(deadline - now));
+		if (w == WAIT_OBJECT_0) {
+			return HS_FAIL;
+		}
+		if (w == WAIT_FAILED) {
+			tlog(t, "WaitForMultipleObjects failed: %lu", GetLastError());
+			return HS_FAIL;
+		}
+	}
+}
+
+/* REQ_HANDSHAKE: tun_ip(4) | device_id(16) */
+static void send_hs_request(tunnel_t *t)
+{
+	uint8_t req[sizeof(msg_header_t) + REQ_HS_PAYLOAD_LEN];
+	msg_header_t h;
+	int off;
+
+	memset(&h, 0, sizeof(h));
+	h.version = PROTOCOL_VERSION;
+	h.type = MSG_TYPE_REQ_HANDSHAKE;
+
+	off = msg_encode(req, sizeof(req), &h);
+	memcpy(req + off, &t->session.tun_ip, IP_ADDR_LEN);
+	off += IP_ADDR_LEN;
+	memcpy(req + off, t->cfg->device_id, DEVICE_ID_LEN);
+	off += DEVICE_ID_LEN;
+
+	udp_send(t, req, off);
+	hs_emit(t, TUNNEL_DIR_TX, &h, req, off);
+}
+
+/* AUTH: tun_ip(4) | device_id(16) | nonce(16) | posture(8) | mac(32)
+ *
+ * mac 은 그 앞의 44바이트 전체를 덮는다. 서버가 방금 준 nonce 가 들어가므로 이
+ * 패킷은 이번 핸드셰이크에만 유효하고, 포스처도 서명 범위 안이라 전달 도중에
+ * "방화벽 꺼짐"을 "켜짐"으로 고칠 수 없다. 포스처는 핸드셰이크를 시작할 때가
+ * 아니라 AUTH 를 만드는 지금 읽는다. */
+static int send_hs_auth(tunnel_t *t, const uint8_t *nonce)
+{
+	uint8_t auth[sizeof(msg_header_t) + AUTH_PAYLOAD_LEN];
+	posture_report_t report;
+	msg_header_t h;
+	uint8_t *signed_part;
+	int off;
+
+	memset(&h, 0, sizeof(h));
+	h.version = PROTOCOL_VERSION;
+	h.type = MSG_TYPE_AUTH;
+
+	off = msg_encode(auth, sizeof(auth), &h);
+	signed_part = auth + off;
+
+	memcpy(auth + off, &t->session.tun_ip, IP_ADDR_LEN);
+	off += IP_ADDR_LEN;
+	memcpy(auth + off, t->cfg->device_id, DEVICE_ID_LEN);
+	off += DEVICE_ID_LEN;
+	memcpy(auth + off, nonce, AUTH_NONCE_LEN);
+	off += AUTH_NONCE_LEN;
+
+	posture_report_now(&report);
+	off += posture_encode(auth + off, sizeof(auth) - (size_t)off, &report);
+
+	if (hmac_sha256(t->cfg->device_key, AUTH_KEY_LEN,
+			signed_part, AUTH_SIGNED_LEN, auth + off) < 0) {
+		tlog(t, "[HS] hmac failed");
+		return -1;
+	}
+	off += AUTH_MAC_LEN;
+
+	tlog(t, "[HS] auth: build=%u firewall=%u antivirus=%u",
+			report.os_build, report.firewall, report.antivirus);
+
+	udp_send(t, auth, off);
+	hs_emit(t, TUNNEL_DIR_TX, &h, auth, off);
+
+	return 0;
+}
+
 /* ---- protocol ------------------------------------------------------------ */
-/* 0: 세션 수립, -1: 응답 없음 / 오류 / 중지 요청 */
+/*   C -> S  REQ_HANDSHAKE     "나는 이 기기다"
+ *   S -> C  CHALLENGE         "그렇다면 이 nonce 에 서명해 봐라"
+ *   C -> S  AUTH              nonce + 포스처 + mac
+ *   S -> C  RES_HANDSHAKE     세션 idx     (또는 DENY 와 사유)
+ *
+ * HS_OK / HS_FAIL / HS_DENIED 를 돌려준다. */
 static int do_handshake(tunnel_t *t)
 {
 	session_t *session = &t->session;
-	HANDLE waits[2] = { t->stop_event, t->sock_event };
-	uint8_t req[sizeof(msg_header_t) + sizeof(struct in_addr)];
 	uint8_t res[BUF_SIZE];
-	msg_header_t msg_header;
-	tunnel_packet_t pkt;
-	struct sockaddr_in from;
+	const uint8_t *body;
+	msg_header_t h;
 	uint64_t deadline;
-	uint64_t now;
-	DWORD w;
-	int off;
-	int n;
+	int auth_sent;
+	int body_len;
 	int tries;
-
-	memset(&msg_header, 0, sizeof(msg_header_t));
-	msg_header.version = PROTOCOL_VERSION;
-	msg_header.type = MSG_TYPE_REQ_HANDSHAKE;
-	msg_header.session_idx = 0;
-
-	off = msg_encode(req, sizeof(req), &msg_header);
-
-	memcpy(req + off, &session->tun_ip, sizeof(session->tun_ip));
-	off += (int)sizeof(session->tun_ip);
+	int n;
 
 	for (tries = 1; tries <= HS_RETRY; tries++) {
 		tlog(t, "[HS] request %d/%d", tries, HS_RETRY);
-		udp_send(t, req, off);
-
-		pkt_init(t, &pkt, TUNNEL_DIR_TX, TUNNEL_PASS);
-		pkt.msg_type = MSG_TYPE_REQ_HANDSHAKE;
-		pkt.wire_len = (uint32_t)off;
-		pkt_snap(&pkt, req, (uint32_t)off);
-		pkt_emit(t, &pkt);
+		send_hs_request(t);
+		auth_sent = 0;
 
 		deadline = GetTickCount64() + HS_TIMEOUT_MSEC;
 		for (;;) {
-			while ((n = udp_recv(t, res, (int)sizeof(res), &from)) >= 0) {
-				if (!from_server(session, &from)) {
+			n = hs_recv(t, deadline, res, (int)sizeof(res), &h);
+			if (n == HS_FAIL) {
+				return HS_FAIL;
+			}
+			if (n == 0) {
+				break;	/* 응답이 없다. REQ 부터 다시 */
+			}
+
+			body = res + sizeof(msg_header_t);
+			body_len = n - (int)sizeof(msg_header_t);
+
+			switch (h.type) {
+			case MSG_TYPE_CHALLENGE:
+				if (body_len < AUTH_NONCE_LEN) {
 					continue;
 				}
+				hs_emit(t, TUNNEL_DIR_RX, &h, res, n);
 
-				if (msg_decode(res, (size_t)n, &msg_header) < 0) {
+				if (send_hs_auth(t, body) < 0) {
+					return HS_FAIL;
+				}
+				auth_sent = 1;
+				deadline = GetTickCount64() + HS_TIMEOUT_MSEC;
+				continue;
+
+			case MSG_TYPE_DENY:
+				if (body_len < 1) {
 					continue;
 				}
+				hs_emit(t, TUNNEL_DIR_RX, &h, res, n);
+				tlog(t, "[HS] denied: %s", deny_reason_name(body[0]));
+				return HS_DENIED;
 
-				if (msg_header.version != PROTOCOL_VERSION || msg_header.type != MSG_TYPE_RES_HANDSHAKE ||
-						msg_header.session_idx == 0) {
+			case MSG_TYPE_RES_HANDSHAKE:
+				/* AUTH 를 보내기 전에 온 수락은 받지 않는다. 받아 주면 인증을
+				 * 구현하지 않은 서버(또는 서버인 척하는 쪽)가 REQ 에 곧바로 RES 를
+				 * 돌려주는 것만으로 인증 단계를 건너뛰게 된다. */
+				if (!auth_sent || h.session_idx == 0) {
 					continue;
 				}
+				hs_emit(t, TUNNEL_DIR_RX, &h, res, n);
 
-				if (session->idx != msg_header.session_idx) {
-					session->idx = msg_header.session_idx;
+				if (session->idx != h.session_idx) {
+					session->idx = h.session_idx;
 					session->tx_counter = 0;
 				}
 
-				pkt_init(t, &pkt, TUNNEL_DIR_RX, TUNNEL_PASS);
-				pkt.msg_type = MSG_TYPE_RES_HANDSHAKE;
-				pkt.session_idx = msg_header.session_idx;
-				pkt.wire_len = (uint32_t)n;
-				pkt_snap(&pkt, res, (uint32_t)n);
-				pkt_emit(t, &pkt);
-
 				tlog(t, "[HS] established idx=%08x", session->idx);
-				return 0;
-			}
-			if (n == RECV_ERROR) {
-				return -1;
-			}
+				return HS_OK;
 
-			now = GetTickCount64();
-			if (now >= deadline) {
-				break;
-			}
-
-			w = WaitForMultipleObjects(2, waits, FALSE, (DWORD)(deadline - now));
-			if (w == WAIT_OBJECT_0) {
-				return -1;
-			}
-			if (w == WAIT_FAILED) {
-				tlog(t, "WaitForMultipleObjects failed: %lu", GetLastError());
-				return -1;
+			default:
+				continue;
 			}
 		}
 	}
 
 	tlog(t, "[HS] no response from server");
-	return -1;
+	return HS_FAIL;
 }
 
 static void send_keepalive(tunnel_t *t)
@@ -756,7 +910,7 @@ int tunnel_run(const tunnel_config_t *cfg, HANDLE stop_event)
 
 	tlog(t, "[%ls] tunneling to %s:%u", cfg->adapter_name, server_str, cfg->server_port);
 
-	if (do_handshake(t) < 0) {
+	if (do_handshake(t) != HS_OK) {
 		goto out;
 	}
 
@@ -810,7 +964,7 @@ int tunnel_run(const tunnel_config_t *cfg, HANDLE stop_event)
 		if (now - session->last_rx_ms > SERVER_TIMEOUT_MSEC) {
 			tlog(t, "[HS] no rx from server for %ds, re-handshake", SERVER_TIMEOUT_SEC);
 			set_state(t, TUNNEL_STATE_RECONNECTING);
-			if (do_handshake(t) < 0) {
+			if (do_handshake(t) != HS_OK) {
 				tlog(t, "[HS] failed re-handshake[%s][%u], retry in %ds",
 						server_str, cfg->server_port, SERVER_TIMEOUT_SEC);
 			}

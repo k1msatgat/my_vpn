@@ -1,6 +1,7 @@
 #include "framework.h"
 #include "resource.h"
 #include "MainDlg.h"
+#include "device.h"
 
 #define TUN_PREFIX_LEN 24
 
@@ -202,6 +203,24 @@ bool CMainDlg::BuildConfig(tunnel_config_t &cfg)
 		AfxMessageBox(_T("터널 IP 를 확인하세요."), MB_ICONWARNING);
 		return false;
 	}
+
+	/* 기기 신원. 등록은 아직 콘솔에서만 할 수 있다. */
+	device_t dev;
+	int enrolled = device_load(&dev);
+
+	if (enrolled == DEVICE_NOT_ENROLLED) {
+		AfxMessageBox(_T("등록되지 않은 기기입니다.\n\n")
+				_T("명령 프롬프트에서 vpn_client enroll 을 실행하고,\n")
+				_T("출력된 device id 와 key 를 서버에 등록하세요."), MB_ICONWARNING);
+		return false;
+	}
+	if (enrolled != DEVICE_OK) {
+		AfxMessageBox(_T("기기 신원을 읽지 못했습니다."), MB_ICONWARNING);
+		return false;
+	}
+	memcpy(cfg.device_id, dev.id, sizeof(cfg.device_id));
+	memcpy(cfg.device_key, dev.key, sizeof(cfg.device_key));
+	SecureZeroMemory(&dev, sizeof(dev));
 
 	return true;
 }

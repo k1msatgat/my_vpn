@@ -155,6 +155,30 @@ static int enroll(int force)
 	return 0;
 }
 
+/* 저장된 기기 신원을 설정에 싣는다. 등록하지 않은 기기는 서버가 어차피 거절하므로
+ * 패킷을 보내기 전에 여기서 멈추고 무엇을 해야 하는지 알려 준다. */
+static int load_identity(tunnel_config_t *cfg)
+{
+	device_t dev;
+	int ret;
+
+	ret = device_load(&dev);
+	if (ret == DEVICE_NOT_ENROLLED) {
+		fprintf(stderr, "this device is not enrolled. run: vpn_client enroll\n");
+		return -1;
+	}
+	if (ret != DEVICE_OK) {
+		fprintf(stderr, "device identity is unreadable\n");
+		return -1;
+	}
+
+	memcpy(cfg->device_id, dev.id, sizeof(cfg->device_id));
+	memcpy(cfg->device_key, dev.key, sizeof(cfg->device_key));
+	SecureZeroMemory(&dev, sizeof(dev));
+
+	return 0;
+}
+
 int main(int argc, char *argv[])
 {
 	tunnel_config_t cfg;
@@ -219,6 +243,10 @@ int main(int argc, char *argv[])
 
 	if (inet_pton(AF_INET, argv[4], &cfg.tun_ip) != 1) {
 		fprintf(stderr, "invalid tun ip : %s\n", argv[4]);
+		goto out;
+	}
+
+	if (load_identity(&cfg) < 0) {
 		goto out;
 	}
 

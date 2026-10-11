@@ -85,6 +85,11 @@ typedef struct tunnel_config {
 	uint16_t server_port;		/* host byte order */
 	struct in_addr tun_ip;
 	uint8_t prefix_len;		/* 터널 대역 prefix, 예) 24 */
+
+	/* 기기 신원. 호출자가 device_load() 로 읽어 채운다. 포인터가 아니라 배열로 둬서
+	 * cfg 를 구조체째 복사해도 그대로 따라온다. */
+	uint8_t device_id[DEVICE_ID_LEN];
+	uint8_t device_key[AUTH_KEY_LEN];
 	int log_packets;		/* 0이 아니면 패킷마다 on_log 로 한 줄 */
 
 	void (*on_log)(void *ctx, const char *line);

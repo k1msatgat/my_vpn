@@ -71,7 +71,7 @@
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>ws2_32.lib;iphlpapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>ws2_32.lib;iphlpapi.lib;wscapi.lib;bcrypt.lib;crypt32.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <!-- Wintun 어댑터 생성과 IP / MTU 설정에 관리자 권한이 필요하다.
            매니페스트에 박아 두면 실행할 때 Windows 가 권한 상승을 먼저 묻는다. -->
       <EnableUAC>true</EnableUAC>
@@ -112,6 +112,9 @@
     <ClCompile Include="PacketStore.cpp" />
     <ClCompile Include="..\core\vpn_session.c" />
     <ClCompile Include="..\core\tunnel.c" />
+    <ClCompile Include="..\core\posture.c" />
+    <ClCompile Include="..\core\hmac.c" />
+    <ClCompile Include="..\core\device.c" />
     <ClCompile Include="..\..\lib\common\src\proto.c" />
   </ItemGroup>
   <ItemGroup>
@@ -122,6 +125,9 @@
     <ClInclude Include="PacketStore.h" />
     <ClInclude Include="..\core\vpn_session.h" />
     <ClInclude Include="..\core\tunnel.h" />
+    <ClInclude Include="..\core\posture.h" />
+    <ClInclude Include="..\core\hmac.h" />
+    <ClInclude Include="..\core\device.h" />
     <ClInclude Include="..\..\lib\common\include\proto.h" />
   </ItemGroup>
   <ItemGroup>

@@ -14,7 +14,7 @@ extern "C" {
 #define PROTO_STATIC_ASSERT _Static_assert
 #endif
 
-#define PROTOCOL_VERSION 1 //우선 common 에서 서버와 클라이언트 모두 동일 버전사용하도록 설정.
+#define PROTOCOL_VERSION 2 //우선 common 에서 서버와 클라이언트 모두 동일 버전사용하도록 설정. 2: 기기 인증 핸드셰이크
 
 #define TUN_MTU		1400
 #define BUF_SIZE	2048
