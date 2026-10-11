@@ -199,13 +199,18 @@ my_vpn/
 │   ├── my_vpn.sln
 │   ├── core/              #   UI 프레임워크에 의존하지 않는 순수 Win32/C
 │   │   ├── tunnel.{h,c}       # Wintun + Winsock 터널 루프 (블로킹 tunnel_run)
+│   │   ├── posture.{h,c}      # 단말 포스처 수집 (OS 빌드 / 방화벽 / 백신)
+│   │   ├── device.{h,c}       # 기기 ID · 키 생성, DPAPI 보관
+│   │   ├── hmac.{h,c}         # HMAC-SHA256 (CNG)
 │   │   └── vpn_session.{h,c}  # 워커 스레드 + 패킷 링버퍼 + PostMessage 마셜링
 │   ├── cli/               #   콘솔 클라이언트 (main.c) — 자동 테스트 대상
 │   ├── gui/               #   MFC 다이얼로그
 │   │   ├── MainDlg.{h,cpp}      # 가상 리스트, 상세창, 레이아웃
 │   │   ├── PacketStore.{h,cpp}  # 패킷 보관 / 필터 / 집계
 │   │   └── vpn_gui.rc
-│   └── test/client.ps1    #   Windows 시나리오 테스트 (run / idle / restart)
+│   └── test/
+│       ├── client.ps1         # Windows 시나리오 테스트 (run / idle / restart)
+│       └── mock_server.py     # 인증 핸드셰이크 모의 서버 (서버 구현 전 확인용)
 ├── test/
 │   ├── common.sh          # 공용 설정 및 함수
 │   ├── server.sh          # 서버 실행 / 재시작 시나리오
@@ -257,7 +262,12 @@ my_vpn/
 - [x] 클라이언트 재핸드셰이크 (서버 재시작 / 세션 만료 복구)
 - [x] 시나리오 테스트 스크립트
 - [ ] 암호화 & 키 교환 — X25519 + ChaCha20-Poly1305, `counter`를 nonce 및 재전송 방지에 사용
-- [ ] 신원 기반 인증 — 클라이언트 키 인증, 사용자/기기 단위 정책 (ZTNA)
+- [ ] 신원 기반 인증 — 기기 키 챌린지-응답, 포스처 기반 정책 (ZTNA)
+  - [x] 와이어 포맷 정의 (`CHALLENGE` / `AUTH` / `DENY`, 포스처 보고)
+  - [x] Windows 클라이언트 — 포스처 수집, 기기 등록, 인증 핸드셰이크 (모의 서버로 확인)
+  - [ ] 서버 — 기기 목록, nonce 발급과 mac 검증, 포스처 조건이 붙은 ACL
+  - [ ] 지속 검증 — keepalive 로 포스처 재보고, 위반 시 세션 차단
+  - [ ] Windows GUI — 포스처 탭, 거부 사유 표시
 - [ ] 비블로킹 재핸드셰이크 (상태 머신), 종료 통지 메시지
 - [x] Windows 클라이언트 — Wintun 콘솔 클라이언트 (ping 왕복 / 유휴 120초 / 서버 재시작 복구 확인)
 - [x] Windows 클라이언트 — MFC GUI (연결·해제 상태 전이 / 패킷 분석 탭 / 필터·통계 / ping 왕복 확인)
@@ -279,3 +289,5 @@ my_vpn/
 | AI 작성 | `proto.h` / `proto.c` 분리 (기존 코드 이동) |
 | AI 분석 | Windows 유휴 시 비유니캐스트 송신이 keepalive를 억제해 불필요한 재핸드셰이크가 생기는 문제를 테스트로 재현하고 `windows/` 쪽을 수정 |
 | AI 초안 | 이 README의 keepalive/재핸드셰이크 이후 갱신분 |
+| AI 작성 | ZTNA 확장의 Windows 쪽 — `core/posture.c`(포스처 수집), `core/device.c`(기기 신원), `core/hmac.c`, `core/tunnel.c`의 인증 핸드셰이크, `windows/test/mock_server.py` |
+| AI 작성 | `proto.h` / `proto.c`의 인증·포스처 메시지 정의와 `posture_encode` / `posture_decode`. 메시지 흐름은 AI가 제안하고 검토 후 채택 |

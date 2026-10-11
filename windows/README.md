@@ -137,6 +137,53 @@ MFC 래퍼만 얹지 않고 Win32 수준에서 처리한 부분입니다.
 - 연결 설정은 `HKCU\Software\my_vpn`에 저장해 다음 실행에 복원합니다.
 - CSV 저장은 UTF-8 BOM을 앞에 써서 엑셀이 한글을 알아보게 합니다.
 
+## 기기 인증과 포스처 (ZTNA, 진행 중)
+
+터널 IP만 대면 세션이 열리던 핸드셰이크를 기기 인증으로 바꾸는 중입니다. 와이어 포맷은
+[`proto.h`](../lib/common/include/proto.h)의 주석에 있습니다.
+
+> **현재 상태**: Windows 클라이언트는 인증 핸드셰이크를 구현했고, 서버(Linux)는 아직입니다.
+> 서버가 구현되기 전까지 Windows 클라이언트는 `test/mock_server.py`로만 핸드셰이크를 확인할 수 있습니다.
+
+```
+C -> S  REQ_HANDSHAKE   tun_ip | device_id         "나는 이 기기다"
+S -> C  CHALLENGE       nonce                      "그렇다면 이 nonce 에 서명해 봐라"
+C -> S  AUTH            ... | nonce | posture | mac
+S -> C  RES_HANDSHAKE   또는 DENY(reason)
+```
+
+| 파일 | 역할 |
+|---|---|
+| `core/posture.c` | 단말 상태를 읽습니다. OS 빌드는 `RtlGetVersion`, 방화벽은 COM `INetFwPolicy2`(활성 프로필 기준), 백신은 Windows 보안 센터(`WscGetSecurityProviderHealth`). 읽기만 하고 통과 여부는 서버 정책이 정합니다. |
+| `core/device.c` | 기기 ID(16B)와 키(32B)를 `BCryptGenRandom`으로 만들고, 키는 DPAPI로 감싸 `HKCU\Software\my_vpn\device`에 둡니다. |
+| `core/hmac.c` | HMAC-SHA256. 직접 구현하지 않고 CNG(`BCrypt`)를 씁니다. |
+| `core/tunnel.c` | `do_handshake()`가 위 네 메시지를 주고받습니다. 인증(`AUTH`)을 보내기 전에 온 `RES_HANDSHAKE`는 받지 않습니다. |
+
+핸드셰이크는 어댑터를 만들기 **전에** 합니다. 서버가 받아 주기 전에는 PC에 터널 어댑터와 경로가 생기지 않고,
+인증이 통과하는지까지는 관리자 권한 없이 확인할 수 있습니다.
+
+```
+:: 이 기기의 ID 와 키를 만든다 (한 번). 출력된 값을 서버에 등록한다
+vpn_client.exe enroll
+
+:: 지금 서버에 보고될 포스처
+vpn_client.exe posture
+
+:: HMAC-SHA256 이 RFC 4231 테스트 벡터와 맞는지
+vpn_client.exe selftest
+
+:: 서버 없이 핸드셰이크 확인 (다른 창에서 클라이언트를 127.0.0.1 로 실행)
+python windows\test\mock_server.py --device <id>:<key>:10.0.0.3 --require-firewall
+```
+
+막지 못하는 것:
+- 데이터 패킷은 여전히 평문이고 인증되지 않습니다. 인증은 세션을 여는 시점과 포스처 보고에만 걸립니다.
+- 서버는 클라이언트에게 자신을 증명하지 않습니다. 서버 주소를 위조할 수 있는 공격자는 가짜 `DENY`로 접속을 방해할 수 있습니다.
+- DPAPI는 다른 사용자와 다른 PC로부터 키를 지키지만, 같은 사용자로 도는 다른 프로세스는 키를 풀 수 있습니다.
+- 포스처는 클라이언트의 자기 보고입니다. 키를 가진 변조된 클라이언트는 거짓으로 보고할 수 있습니다.
+
+---
+
 ## 빌드와 실행
 
 1. [wintun.net](https://www.wintun.net/)에서 Wintun zip을 받아 `windows/third_party/`에 풉니다.
