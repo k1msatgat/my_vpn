@@ -168,6 +168,64 @@ def posture_tests():
           c.handshake(post=posture(firewall=STATE_OFF, antivirus=STATE_OFF, build=0)), "RES_HANDSHAKE")
 
 
+def keepalive(idx, counter, key=DEV_KEY, post=None, tamper=None):
+    """KEEPALIVE: header | counter(8) | posture(8) | mac(32). mac 은 헤더부터 포스처까지."""
+    signed = header(KEEPALIVE, idx) + struct.pack("!Q", counter) + (post or posture())
+    tag = mac(key, signed)
+    if tamper:
+        signed = tamper(signed)
+    return signed + tag
+
+
+def session(c, strict_dev=False):
+    r = strict(c) if strict_dev else c.handshake()
+    assert r and r[0] == RES_HANDSHAKE, "handshake failed: %s" % describe(r)
+    return r[1]
+
+
+def keepalive_tests():
+    c = Client()
+    ka = lambda pkt: (c.send(pkt), c.recv())[1]
+
+    idx = session(c)
+    check("keepalive, counter 0", ka(keepalive(idx, 0)), "KEEPALIVE")
+    check("keepalive, counter 5", ka(keepalive(idx, 5)), "KEEPALIVE")
+    good = keepalive(idx, 6)
+    check("keepalive, counter 6", ka(good), "KEEPALIVE")
+    check("the same packet again (replay)", ka(good), "no response")
+    check("older counter (3), properly signed", ka(keepalive(idx, 3)), "no response")
+    check("old-style keepalive (header only)", ka(header(KEEPALIVE, idx)), "no response")
+    check("signed with the wrong key", ka(keepalive(idx, 7, key=bytes(32))), "no response")
+    check("signed with another device's key", ka(keepalive(idx, 7, key=DEV2_KEY)), "no response")
+    flip = lambda s: s[:-8] + posture(build=99999)
+    check("posture changed after signing", ka(keepalive(idx, 7, tamper=flip)), "no response")
+    check("session survives the forged packets", ka(keepalive(idx, 7)), "KEEPALIVE")
+
+    # 다른 세션의 keepalive 를 끼워 넣기: mac 이 헤더의 idx 까지 덮으므로 통하지 않는다.
+    other = keepalive(idx, 8)
+    swapped = header(KEEPALIVE, idx ^ 0x100) + other[8:]
+    check("keepalive replayed under another session idx", ka(swapped), "no response")
+
+    # 다시 인증하면 새 세션이다. idx 가 바뀌고 counter 는 0 부터 다시 받는다.
+    idx2 = session(c)
+    global failed
+    ok = idx2 != idx
+    print("%-4s %-52s %s" % ("ok" if ok else "FAIL", "re-authentication opens a new session",
+                             "idx %08x -> %08x" % (idx, idx2)))
+    failed += not ok
+    check("new session accepts counter 0", ka(keepalive(idx2, 0)), "KEEPALIVE")
+    check("old session idx no longer answers", ka(keepalive(idx, 9)), "no response")
+
+    # 세션 중에 포스처가 나빠진 경우 (포스처 조건이 걸린 기기)
+    sidx = session(c, strict_dev=True)
+    sk = lambda n, **post: ka(keepalive(sidx, n, key=DEV2_KEY, post=posture(**post)))
+    check("strict device, keepalive with everything on", sk(0), "KEEPALIVE")
+    check("strict device, keepalive reports firewall off", sk(1, firewall=STATE_OFF), "DENY(4)")
+    check("that session is gone", sk(2), "no response")
+    sidx = session(c, strict_dev=True)
+    check("strict device can come back once the posture is fine", sk(0), "KEEPALIVE")
+
+
 def loader_tests():
     """오타가 난 조건을 조용히 넘기지 않는지."""
     global failed
@@ -203,6 +261,7 @@ def main():
             sys.exit("server failed to start:\n" + log.read().decode())
         handshake_tests()
         posture_tests()
+        keepalive_tests()
     finally:
         srv.terminate()
         srv.wait()

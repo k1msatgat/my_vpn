@@ -175,11 +175,23 @@ static void handle_auth(int32_t sock, const uint8_t *packet, int32_t n,
 		return;
 	}
 
+	/* 새로 인증하면 새 세션이다. peer_register 는 같은 주소에서 다시 온 요청에 기존
+	 * 세션(같은 idx)을 그대로 돌려주는데, 그러면 keepalive counter 도 이어져서
+	 * 재시작한 클라이언트가 0 부터 보내는 keepalive 가 전부 "예전 값"으로 버려진다.
+	 * 먼저 내리고 등록해 idx 와 counter 를 함께 새로 시작한다. idx 가 바뀌므로 예전
+	 * 세션에서 엿들은 keepalive 도 새 세션에는 쓸 수 없다. */
+	peer = peer_lookup(tun_ip);
+	if (peer != NULL) {
+		peer_drop(peer);
+	}
+
 	peer = peer_register(tun_ip, src, srclen);
 	if (peer == NULL) {
 		printf("[HS] register failed for %s\n", ip_str(tun_ip, ib));
 		return;
 	}
+
+	memcpy(peer->device_id, dev->id, DEVICE_ID_LEN);
 
 	printf("[HS] device %s authenticated as %s (build=%u firewall=%u antivirus=%u)\n",
 			ids, ip_str(tun_ip, ib), posture.os_build, posture.firewall, posture.antivirus);
@@ -212,6 +224,76 @@ static void send_keepalive(int32_t sock, const peer_t *peer){
 	if (sent < 0) {
 		perror("sendto");
 	}
+}
+
+/* KEEPALIVE (C -> S): counter(8) | posture(8) | mac(32)
+ *
+ * 핸드셰이크에서 한 번 통과했다고 세션이 끝날 때까지 믿지 않는다. 클라이언트는
+ * keepalive 마다 지금의 포스처를 다시 싣고, 서버는 받을 때마다 정책에 다시 대 본다.
+ *
+ * 버리는 것과 끊는 것을 구분한다.
+ *   mac 이 틀렸거나 counter 가 예전 값이면  -> 조용히 버린다. 세션은 그대로다.
+ *     이 패킷은 그 기기가 보낸 것이 아닐 수 있다. 위조 패킷 하나로 남의 세션을
+ *     끊을 수 있어서는 안 된다.
+ *   mac 이 맞는데 포스처가 못 미치면         -> DENY 로 알리고 세션을 내린다.
+ *     기기 스스로 "지금 방화벽이 꺼져 있다"고 서명해서 말한 것이다. */
+static void handle_keepalive(int32_t sock, peer_t *peer, const uint8_t *packet, int32_t n,
+		const struct sockaddr_in *src, socklen_t srclen)
+{
+	char ids[DEVICE_ID_STRLEN];
+	uint8_t mac[AUTH_MAC_LEN];
+	data_header_t data_header;
+	posture_report_t posture;
+	device_t *dev;
+
+	if (n < (int32_t)(KA_SIGNED_LEN + AUTH_MAC_LEN)) {
+		printf("[drop] keepalive without posture (%d bytes)\n", n);
+		return;
+	}
+
+	device_id_str(peer->device_id, ids);
+
+	/* 세션이 열린 뒤 기기가 목록에서 지워졌다. 검증할 키가 없으므로 더 볼 것 없이 끊는다. */
+	dev = device_find(peer->device_id);
+	if (dev == NULL) {
+		printf("[ka] device %s is no longer registered\n", ids);
+		send_deny(sock, src, srclen, peer->session_idx, DENY_UNKNOWN_DEVICE);
+		peer_drop(peer);
+		return;
+	}
+
+	/* mac 은 헤더부터 포스처까지를 덮는다. 헤더의 session_idx 가 들어가 있어 다른
+	 * 세션에서 엿들은 keepalive 를 여기에 끼워 넣을 수 없다. */
+	if (auth_hmac(dev->key, packet, KA_SIGNED_LEN, mac) < 0 ||
+			!auth_mac_equal(mac, packet + KA_SIGNED_LEN)) {
+		printf("[drop] keepalive bad mac idx=%08x\n", peer->session_idx);
+		return;
+	}
+
+	/* 방화벽이 켜져 있던 때의 keepalive 를 녹화해 두었다가 끈 뒤에 다시 보내는 것을
+	 * 막는다. mac 은 맞으므로 이 검사가 없으면 통과한다. */
+	data_decode(packet + sizeof(msg_header_t), sizeof(data_header_t), &data_header);
+	if (peer->ka_seen && data_header.counter <= peer->ka_counter) {
+		printf("[drop] keepalive replayed counter %llu idx=%08x\n",
+				(unsigned long long)data_header.counter, peer->session_idx);
+		return;
+	}
+	peer->ka_counter = data_header.counter;
+	peer->ka_seen = 1;
+
+	posture_decode(packet + sizeof(msg_header_t) + sizeof(data_header_t), sizeof(posture), &posture);
+	if (!device_posture_ok(dev, &posture)) {
+		printf("[ka] device %s posture rejected (build=%u firewall=%u antivirus=%u)\n",
+				ids, posture.os_build, posture.firewall, posture.antivirus);
+		send_deny(sock, src, srclen, peer->session_idx, DENY_POSTURE);
+		peer_drop(peer);
+		return;
+	}
+
+	/* 검증을 통과한 뒤에야 외부 주소를 갱신한다. 순서가 반대면 위조 패킷이 세션의
+	 * 주소를 자기 쪽으로 돌려놓을 수 있다. */
+	peer_touch(peer, src, srclen);
+	send_keepalive(sock, peer);
 }
 
 int main(int argc, char *argv[])
@@ -383,8 +465,7 @@ int main(int argc, char *argv[])
 					case MSG_TYPE_DATA:
 						break;
 					case MSG_TYPE_KEEPALIVE:
-						peer_touch(peer, &src, srclen);
-						send_keepalive(sock, peer);
+						handle_keepalive(sock, peer, packet, n, &src, srclen);
 						continue;
 					default:
 						printf("[drop] unknown type %u\n", msg_header.type);

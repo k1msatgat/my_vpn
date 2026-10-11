@@ -132,6 +132,16 @@ peer_t *peer_register(struct in_addr inner, const struct sockaddr_in *outer, soc
 	return peer;
 }
 
+/* 만료를 기다리지 않고 세션을 바로 내린다. 포스처가 정책에 못 미치게 됐거나 기기가
+ * 목록에서 지워졌을 때 쓴다. 이후 이 idx 로 오는 패킷은 unknown session 으로 버려진다. */
+void peer_drop(peer_t *peer)
+{
+	char ib[INET_ADDRSTRLEN];
+
+	printf("[peer] drop %s idx=%08x\n", ip4(peer->inner, ib), peer->session_idx);
+	peer->used = 0;
+}
+
 void peer_init(void)
 {
 	memset(peers, 0, sizeof(peers));
