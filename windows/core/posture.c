@@ -1,6 +1,7 @@
 #include <windows.h>
 #include <objbase.h>
 #include <netfw.h>
+#include <wscapi.h>
 #include <string.h>
 
 #include "posture.h"
@@ -118,10 +119,37 @@ out:
 	return state;
 }
 
+/* ---- antivirus ----------------------------------------------------------- */
+/* 백신은 제품마다 상태를 읽는 방법이 다르다. 제품별 코드를 두는 대신 Windows 보안
+ * 센터(WSC)에 묻는다. 백신은 설치될 때 WSC 에 자신을 등록하고 실시간 감시 여부와
+ * 정의 파일이 최신인지를 계속 보고하므로, WSC 한 곳만 보면 Defender 든 서드파티든
+ * 같은 답을 얻는다.
+ *
+ * 방화벽도 WSC 로 물을 수 있지만 그쪽은 INetFwPolicy2 를 썼다. WSC 는 정상 / 불량
+ * 한 값만 주고, 어느 프로필이 꺼졌는지와 그 프로필이 지금 쓰이는지는 알려주지 않는다.
+ *
+ * WSC 는 클라이언트 Windows 에만 있다. 서비스가 없거나 멈춰 있으면 S_FALSE 가
+ * 오고 health 는 믿을 수 없으므로 UNKNOWN 으로 둔다. */
+static uint8_t collect_antivirus(void)
+{
+	WSC_SECURITY_PROVIDER_HEALTH health;
+	HRESULT hr;
+
+	hr = WscGetSecurityProviderHealth(WSC_SECURITY_PROVIDER_ANTIVIRUS, &health);
+	if (hr != S_OK) {
+		return POSTURE_UNKNOWN;
+	}
+
+	/* GOOD 이 아닌 값은 POOR(꺼짐 / 정의 파일 만료), NOTMONITORED(등록된 제품 없음),
+	 * SNOOZE(일시 중지) 다. 이유는 달라도 지금 보호받지 못한다는 점은 같다. */
+	return health == WSC_SECURITY_PROVIDER_HEALTH_GOOD ? POSTURE_ON : POSTURE_OFF;
+}
+
 void posture_collect(posture_t *out)
 {
 	memset(out, 0, sizeof(*out));
 
 	collect_os(out);
 	out->firewall = collect_firewall();
+	out->antivirus = collect_antivirus();
 }

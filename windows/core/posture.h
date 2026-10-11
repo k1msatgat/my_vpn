@@ -35,6 +35,9 @@ typedef struct posture {
 
 	/* Windows 방화벽. 지금 적용 중인 프로필이 모두 켜져 있어야 ON 이다. */
 	uint8_t firewall;		/* posture_state_t */
+
+	/* 백신. Windows 보안 센터가 "정상"으로 보는 제품이 있어야 ON 이다. */
+	uint8_t antivirus;		/* posture_state_t */
 } posture_t;
 
 /* 현재 상태를 읽어 out 을 채운다. 항목별로 실패할 수 있고, 실패한 항목은

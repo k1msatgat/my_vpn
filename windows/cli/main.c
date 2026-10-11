@@ -49,6 +49,7 @@ static int print_posture(void)
 		printf("os         unknown\n");
 	}
 	printf("firewall   %s\n", state_name(p.firewall));
+	printf("antivirus  %s\n", state_name(p.antivirus));
 
 	return 0;
 }
