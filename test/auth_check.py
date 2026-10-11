@@ -33,6 +33,11 @@ DEV_ID = bytes(range(0x10, 0x20))
 DEV_KEY = bytes(range(0x40, 0x60))
 TUN_IP = socket.inet_aton("10.0.0.3")
 
+# 포스처 조건이 걸린 기기
+DEV2_ID = bytes(range(0x20, 0x30))
+DEV2_KEY = bytes(range(0x60, 0x80))
+TUN2_IP = socket.inet_aton("10.0.0.4")
+
 failed = 0
 
 
@@ -139,6 +144,44 @@ def handshake_tests():
     check("AUTH too short", c.recv(), "no response")
 
 
+def strict(c, **post):
+    """포스처 조건이 걸린 두 번째 기기로 핸드셰이크한다."""
+    r = c.request(dev_id=DEV2_ID, tun_ip=TUN2_IP)
+    assert r and r[0] == CHALLENGE, "no challenge: %r" % (r,)
+    return c.auth(r[2], key=DEV2_KEY, dev_id=DEV2_ID, tun_ip=TUN2_IP, post=posture(**post))
+
+
+def posture_tests():
+    c = Client()
+
+    # 두 번째 기기: firewall=on antivirus=on min-build=22000
+    check("strict device, everything on", strict(c), "RES_HANDSHAKE")
+    check("strict device, firewall off", strict(c, firewall=STATE_OFF), "DENY(4)")
+    check("strict device, firewall unknown", strict(c, firewall=STATE_UNKNOWN), "DENY(4)")
+    check("strict device, antivirus off", strict(c, antivirus=STATE_OFF), "DENY(4)")
+    check("strict device, build below minimum", strict(c, build=19045), "DENY(4)")
+    check("strict device, build exactly minimum", strict(c, build=22000), "RES_HANDSHAKE")
+    check("strict device, build unknown (0)", strict(c, build=0), "DENY(4)")
+
+    # 첫 번째 기기에는 조건이 없다. 정책은 기기마다 따로다.
+    check("device without requirements, firewall off",
+          c.handshake(post=posture(firewall=STATE_OFF, antivirus=STATE_OFF, build=0)), "RES_HANDSHAKE")
+
+
+def loader_tests():
+    """오타가 난 조건을 조용히 넘기지 않는지."""
+    global failed
+    fd, path = tempfile.mkstemp(prefix="devices.", suffix=".conf")
+    with os.fdopen(fd, "w") as f:
+        f.write("%s %s 10.0.0.3 firewal=on\n" % (DEV_ID.hex(), DEV_KEY.hex()))
+    p = subprocess.run([SERVER, str(PORT), path], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    os.unlink(path)
+    ok = p.returncode != 0 and b"unknown requirement 'firewal=on'" in p.stdout
+    print("%-4s %-52s %s" % ("ok" if ok else "FAIL", "misspelled requirement in the device file",
+                             "refused to start" if ok else "exit=%d" % p.returncode))
+    failed += not ok
+
+
 def main():
     if os.geteuid() != 0:
         sys.exit("run as root: sudo python3 test/auth_check.py")
@@ -146,6 +189,10 @@ def main():
     fd, path = tempfile.mkstemp(prefix="devices.", suffix=".conf")
     with os.fdopen(fd, "w") as f:      # mkstemp 는 0600 으로 만든다
         f.write("%s %s 10.0.0.3\n" % (DEV_ID.hex(), DEV_KEY.hex()))
+        f.write("%s %s 10.0.0.4 firewall=on antivirus=on min-build=22000  # strict\n"
+                % (DEV2_ID.hex(), DEV2_KEY.hex()))
+
+    loader_tests()
 
     log = tempfile.TemporaryFile()
     srv = subprocess.Popen(["stdbuf", "-oL", SERVER, str(PORT), path], stdout=log, stderr=subprocess.STDOUT)
@@ -155,6 +202,7 @@ def main():
             log.seek(0)
             sys.exit("server failed to start:\n" + log.read().decode())
         handshake_tests()
+        posture_tests()
     finally:
         srv.terminate()
         srv.wait()

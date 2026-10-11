@@ -122,6 +122,7 @@ static void handle_auth(int32_t sock, const uint8_t *packet, int32_t n,
 	const uint8_t *body = packet + sizeof(msg_header_t);
 	const uint8_t *nonce = body + IP_ADDR_LEN + DEVICE_ID_LEN;
 	msg_header_t msg_header;
+	posture_report_t posture;
 	struct in_addr tun_ip;
 	device_t *dev;
 	peer_t *peer;
@@ -164,13 +165,24 @@ static void handle_auth(int32_t sock, const uint8_t *packet, int32_t n,
 		return;
 	}
 
+	/* 누구인지는 확인됐다. 이제 그 기기가 지금 믿을 만한 상태인지 본다. 포스처는
+	 * mac 의 서명 범위 안이라 전달 도중에 고쳐지지 않았다. */
+	posture_decode(body + AUTH_SIGNED_LEN - sizeof(posture), sizeof(posture), &posture);
+	if (!device_posture_ok(dev, &posture)) {
+		printf("[HS] device %s posture rejected (build=%u firewall=%u antivirus=%u)\n",
+				ids, posture.os_build, posture.firewall, posture.antivirus);
+		send_deny(sock, src, srclen, 0, DENY_POSTURE);
+		return;
+	}
+
 	peer = peer_register(tun_ip, src, srclen);
 	if (peer == NULL) {
 		printf("[HS] register failed for %s\n", ip_str(tun_ip, ib));
 		return;
 	}
 
-	printf("[HS] device %s authenticated as %s\n", ids, ip_str(tun_ip, ib));
+	printf("[HS] device %s authenticated as %s (build=%u firewall=%u antivirus=%u)\n",
+			ids, ip_str(tun_ip, ib), posture.os_build, posture.firewall, posture.antivirus);
 
 	memset(&msg_header, 0, sizeof(msg_header));
 	msg_header.version = PROTOCOL_VERSION;

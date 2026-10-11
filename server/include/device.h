@@ -8,8 +8,11 @@
  * 배정된 터널 IP 를 가진다. 값은 기기에서 `vpn_client enroll` (또는 GUI 의
  * [기기 등록...])로 만들고 관리자가 이 파일에 옮겨 적는다.
  *
- *   # id(32 hex)                      key(64 hex)   tunnel-ip
- *   2bd5d6e0610d2b7c07f884d0c5afb043  a24d4c3d...   10.0.0.3
+ *   # id(32 hex)                      key(64 hex)   tunnel-ip   [요구하는 포스처 ...]
+ *   2bd5d6e0610d2b7c07f884d0c5afb043  a24d4c3d...   10.0.0.3    firewall=on antivirus=on min-build=22000
+ *
+ * 포스처 조건은 생략할 수 있고, 적은 것만 검사한다. 기기마다 따로 둘 수 있다 —
+ * "누구인가"에 따라 요구 수준이 달라지는 것이 신원 기반 정책이다.
  */
 
 #include <stdint.h>
@@ -29,6 +32,11 @@ typedef struct device {
 	uint8_t key[AUTH_KEY_LEN];
 	struct in_addr tun_ip;
 
+	/* 이 기기에 요구하는 포스처. 0 이면 그 항목은 보지 않는다. */
+	uint8_t need_firewall;
+	uint8_t need_antivirus;
+	uint32_t min_build;
+
 	/* 진행 중인 핸드셰이크. CHALLENGE 로 내준 nonce 를 AUTH 가 올 때까지 기억한다.
 	 * 출발지 주소가 아니라 기기에 매달아 둔다 — NAT 뒤에서는 REQ 와 AUTH 사이에
 	 * 출발지 포트가 바뀔 수 있다. */
@@ -43,6 +51,9 @@ void device_init(void);
 int device_load(const char *path);
 
 device_t *device_find(const uint8_t id[DEVICE_ID_LEN]);
+
+/* 보고된 포스처가 이 기기의 정책을 채우면 1. */
+int device_posture_ok(const device_t *dev, const posture_report_t *posture);
 
 /* 로그에 쓸 ID 문자열. dst 는 DEVICE_ID_STRLEN 이상이어야 한다. */
 #define DEVICE_ID_STRLEN (DEVICE_ID_LEN * 2 + 1)

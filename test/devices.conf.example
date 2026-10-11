@@ -5,5 +5,11 @@
 #   Windows 콘솔   vpn_client.exe enroll
 #   Windows GUI    [포스처] 탭 -> [기기 등록...] -> [복사]
 #
-# id (32 hex)                      key (64 hex)                                                      tunnel-ip
-00112233445566778899aabbccddeeff   000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f   10.0.0.3
+# 터널 IP 뒤에는 그 기기에 요구할 포스처를 적는다. 생략하면 검사하지 않는다.
+#   firewall=on     Windows 방화벽이 켜져 있어야 한다
+#   antivirus=on    Windows 보안 센터가 백신을 정상으로 봐야 한다
+#   min-build=N     OS 빌드가 N 이상이어야 한다 (Windows 11 은 22000 부터)
+# 값을 읽지 못해 "모름"으로 보고된 항목은 통과로 치지 않는다.
+#
+# id (32 hex)                      key (64 hex)                                                      tunnel-ip  requirements
+00112233445566778899aabbccddeeff   000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f   10.0.0.3   firewall=on antivirus=on min-build=22000
