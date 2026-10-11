@@ -64,3 +64,30 @@ int data_decode(const unsigned char *buf, size_t len, struct data_header *d)
 
 	return (int)sizeof(v);
 }
+
+int posture_encode(unsigned char *buf, size_t cap, const struct posture_report *p)
+{
+	struct posture_report w = *p;
+
+	if (cap < sizeof(w)){
+		return -1;
+	}
+
+	w.reserved[0] = w.reserved[1] = 0;
+	w.os_build = htonl(p->os_build);
+	memcpy(buf, &w, sizeof(w));
+
+	return (int)sizeof(w);
+}
+
+int posture_decode(const unsigned char *buf, size_t len, struct posture_report *p)
+{
+	if (len < sizeof(*p)){
+		return -1;
+	}
+
+	memcpy(p, buf, sizeof(*p));
+	p->os_build = ntohl(p->os_build);
+
+	return (int)sizeof(*p);
+}
