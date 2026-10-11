@@ -13,16 +13,28 @@
  */
 
 #include <stdint.h>
+#include <time.h>
 #include <netinet/in.h>
 
 #include "proto.h"
 
 #define MAX_DEVICES 16
 
+/* 서버가 준 nonce 에 클라이언트가 답해야 하는 시간. 같은 PC 에서 서명 한 번이면
+ * 되는 일이라 길 이유가 없고, 짧을수록 엿들은 값을 써먹을 틈이 줄어든다. */
+#define NONCE_TTL_SEC 5
+
 typedef struct device {
 	uint8_t id[DEVICE_ID_LEN];
 	uint8_t key[AUTH_KEY_LEN];
 	struct in_addr tun_ip;
+
+	/* 진행 중인 핸드셰이크. CHALLENGE 로 내준 nonce 를 AUTH 가 올 때까지 기억한다.
+	 * 출발지 주소가 아니라 기기에 매달아 둔다 — NAT 뒤에서는 REQ 와 AUTH 사이에
+	 * 출발지 포트가 바뀔 수 있다. */
+	uint8_t nonce[AUTH_NONCE_LEN];
+	time_t nonce_at;	/* CLOCK_MONOTONIC 초 */
+	int nonce_valid;
 } device_t;
 
 void device_init(void);
