@@ -26,6 +26,15 @@ static void on_log(void *ctx, const char *line)
 	fflush(stdout);
 }
 
+static const char *state_name(uint8_t state)
+{
+	switch (state) {
+	case POSTURE_ON:	return "on";
+	case POSTURE_OFF:	return "off";
+	default:		return "unknown";
+	}
+}
+
 /* 서버에 접속하지 않고 이 단말의 포스처만 읽어 찍는다. 어댑터를 만들지 않으므로
  * 관리자 권한이 필요 없다. */
 static int print_posture(void)
@@ -39,6 +48,7 @@ static int print_posture(void)
 	} else {
 		printf("os         unknown\n");
 	}
+	printf("firewall   %s\n", state_name(p.firewall));
 
 	return 0;
 }

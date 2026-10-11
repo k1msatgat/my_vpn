@@ -17,11 +17,24 @@
 extern "C" {
 #endif
 
+/* 켜짐 / 꺼짐 두 값으로는 부족하다. 조회 자체가 실패한 경우를 "꺼짐"으로
+ * 보고하면 서버는 멀쩡한 단말을 막고, "켜짐"으로 보고하면 확인하지 못한 것을
+ * 통과시킨다. 모른다는 사실을 그대로 올려 서버 정책이 어떻게 다룰지 정하게 한다.
+ * 0 이 UNKNOWN 이라 memset 으로 초기화한 구조체는 전부 "모름"에서 시작한다. */
+typedef enum posture_state {
+	POSTURE_UNKNOWN = 0,
+	POSTURE_OFF,
+	POSTURE_ON
+} posture_state_t;
+
 typedef struct posture {
 	/* OS 버전. 읽지 못하면 셋 다 0 이다. */
 	uint32_t os_major;
 	uint32_t os_minor;
 	uint32_t os_build;
+
+	/* Windows 방화벽. 지금 적용 중인 프로필이 모두 켜져 있어야 ON 이다. */
+	uint8_t firewall;		/* posture_state_t */
 } posture_t;
 
 /* 현재 상태를 읽어 out 을 채운다. 항목별로 실패할 수 있고, 실패한 항목은
