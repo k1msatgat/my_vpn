@@ -13,6 +13,7 @@
 #include "common.h"
 #include "peer.h"
 #include "acl.h"
+#include "auth.h"
 
 #define MAX_EVENTS 8
 
@@ -97,8 +98,15 @@ int main(int argc, char *argv[])
 	int ret = 1;
 	int fd = 0;
 
+	/* 서버를 띄우지 않고 암호 도구만 확인한다. Windows 클라이언트의
+	 * `vpn_client selftest` 와 같은 벡터를 쓴다. */
+	if (argc == 2 && strcmp(argv[1], "selftest") == 0) {
+		return auth_selftest();
+	}
+
 	if (argc != 2 && argc != 3) {
 		fprintf(stderr, "usage: %s <port> [acl-file]\n", argv[0]);
+		fprintf(stderr, "       %s selftest\n", argv[0]);
 		return 1;
 	}
 	port = strtol(argv[1], &end, 10);

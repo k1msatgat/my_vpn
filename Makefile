@@ -12,6 +12,10 @@ CPPFLAGS	+= -I$(LIB_DIR)/include -I$(CLIENT_DIR)/include -I$(SERVER_DIR)/include
 LDFLAGS		+=
 LDLIBS		+=
 
+# The server authenticates devices with HMAC-SHA256 from OpenSSL (openssl-devel).
+# Only the server links it; the client does not need it.
+SERVER_LDLIBS	= -lcrypto
+
 # ---- sources / objects ----------------------------------------------------
 LIB_SRCS	= $(wildcard $(LIB_DIR)/src/*.c)
 CLIENT_SRCS	= $(wildcard $(CLIENT_DIR)/src/*.c)
@@ -65,7 +69,7 @@ $(CLIENT_BIN): $(CLIENT_OBJS) $(LIB)
 
 $(SERVER_BIN): $(SERVER_OBJS) $(LIB)
 	@mkdir -p $(@D)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(SERVER_OBJS) $(LIB) $(LDLIBS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(SERVER_OBJS) $(LIB) $(LDLIBS) $(SERVER_LDLIBS)
 
 # ---- compile --------------------------------------------------------------
 # <component>/src/foo.c -> <component>/bin/foo.o (+ foo.d for header tracking)
