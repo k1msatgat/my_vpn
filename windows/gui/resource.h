@@ -18,6 +18,13 @@
 #define IDC_LOG			1012
 #define IDC_DETAIL		1013
 #define IDC_POSTURE		1014
+#define IDC_ENROLL		1015
+
+/* 기기 등록 창 */
+#define IDD_ENROLL		101
+#define IDC_ENROLL_ID		1050
+#define IDC_ENROLL_KEY		1051
+#define IDC_ENROLL_COPY		1052
 
 /* 필터와 도구 */
 #define IDC_FILTER_DIR		1020

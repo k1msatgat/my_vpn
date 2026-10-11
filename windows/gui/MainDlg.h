@@ -52,6 +52,7 @@ protected:
 	afx_msg void OnClear();
 	afx_msg void OnSave();
 	afx_msg void OnFilterChanged();
+	afx_msg void OnEnroll();
 	afx_msg void OnDestroy();
 	afx_msg void OnSize(UINT type, int cx, int cy);
 	afx_msg void OnGetMinMaxInfo(MINMAXINFO *mmi);

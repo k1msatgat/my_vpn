@@ -64,6 +64,26 @@ BEGIN
                     ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL |
                     NOT WS_TABSTOP
 
+    PUSHBUTTON      "기기 등록...", IDC_ENROLL, 12, 252, 70, 16, NOT WS_VISIBLE
+
     LTEXT           "", IDC_STATS1, 10, 377, 543, 9
     LTEXT           "", IDC_STATS2, 10, 388, 543, 9
+END
+
+IDD_ENROLL DIALOGEX 0, 0, 340, 116
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "기기 등록"
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    LTEXT           "이 기기의 ID 와 키를 만들었습니다. 아래 값을 서버의 기기 목록에 등록하세요.",
+                    IDC_STATIC, 10, 8, 320, 9
+    LTEXT           "키는 이 창을 닫으면 다시 볼 수 없습니다.", IDC_STATIC, 10, 20, 320, 9
+
+    LTEXT           "기기 ID", IDC_STATIC, 10, 42, 36, 9
+    EDITTEXT        IDC_ENROLL_ID, 48, 40, 282, 14, ES_AUTOHSCROLL | ES_READONLY
+    LTEXT           "키", IDC_STATIC, 10, 62, 36, 9
+    EDITTEXT        IDC_ENROLL_KEY, 48, 60, 282, 14, ES_AUTOHSCROLL | ES_READONLY
+
+    PUSHBUTTON      "복사", IDC_ENROLL_COPY, 10, 92, 60, 16
+    DEFPUSHBUTTON   "닫기", IDOK, 270, 92, 60, 16
 END

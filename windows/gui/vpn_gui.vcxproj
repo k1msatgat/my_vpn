@@ -109,6 +109,7 @@
   <ItemGroup>
     <ClCompile Include="VpnGuiApp.cpp" />
     <ClCompile Include="MainDlg.cpp" />
+    <ClCompile Include="EnrollDlg.cpp" />
     <ClCompile Include="PacketStore.cpp" />
     <ClCompile Include="..\core\vpn_session.c" />
     <ClCompile Include="..\core\tunnel.c" />
@@ -122,6 +123,7 @@
     <ClInclude Include="resource.h" />
     <ClInclude Include="VpnGuiApp.h" />
     <ClInclude Include="MainDlg.h" />
+    <ClInclude Include="EnrollDlg.h" />
     <ClInclude Include="PacketStore.h" />
     <ClInclude Include="..\core\vpn_session.h" />
     <ClInclude Include="..\core\tunnel.h" />

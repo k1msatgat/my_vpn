@@ -1,7 +1,7 @@
 #include "framework.h"
 #include "resource.h"
 #include "MainDlg.h"
-#include "device.h"
+#include "EnrollDlg.h"
 
 #define TUN_PREFIX_LEN 24
 
@@ -61,6 +61,7 @@ BEGIN_MESSAGE_MAP(CMainDlg, CDialogEx)
 	ON_BN_CLICKED(IDC_DISCONNECT, &CMainDlg::OnDisconnect)
 	ON_BN_CLICKED(IDC_CLEAR, &CMainDlg::OnClear)
 	ON_BN_CLICKED(IDC_SAVE, &CMainDlg::OnSave)
+	ON_BN_CLICKED(IDC_ENROLL, &CMainDlg::OnEnroll)
 	ON_BN_CLICKED(IDC_HIDE_KA, &CMainDlg::OnFilterChanged)
 	ON_BN_CLICKED(IDC_ONLY_DROPS, &CMainDlg::OnFilterChanged)
 	ON_CBN_SELCHANGE(IDC_FILTER_DIR, &CMainDlg::OnFilterChanged)
@@ -217,14 +218,14 @@ bool CMainDlg::BuildConfig(tunnel_config_t &cfg)
 		return false;
 	}
 
-	/* 기기 신원. 등록은 아직 콘솔에서만 할 수 있다. */
+	/* 기기 신원 */
 	device_t dev;
 	int enrolled = device_load(&dev);
 
 	if (enrolled == DEVICE_NOT_ENROLLED) {
 		AfxMessageBox(_T("등록되지 않은 기기입니다.\n\n")
-				_T("명령 프롬프트에서 vpn_client enroll 을 실행하고,\n")
-				_T("출력된 device id 와 key 를 서버에 등록하세요."), MB_ICONWARNING);
+				_T("[포스처] 탭의 [기기 등록...] 으로 ID 와 키를 만들고\n")
+				_T("그 값을 서버에 등록하세요."), MB_ICONWARNING);
 		return false;
 	}
 	if (enrolled != DEVICE_OK) {
@@ -353,6 +354,43 @@ void CMainDlg::OnSave()
 void CMainDlg::OnFilterChanged()
 {
 	ApplyFilter();
+}
+
+/* 이 기기의 ID 와 키를 새로 만든다. */
+void CMainDlg::OnEnroll()
+{
+	device_t dev;
+
+	/* 워커가 설정의 사본에 예전 키를 들고 돌고 있다. 지금 키를 바꾸면 화면의
+	 * 기기 ID 와 실제로 쓰이는 키가 어긋난다. */
+	if (vpn_session_active(m_session)) {
+		AfxMessageBox(_T("연결을 해제한 뒤에 등록하세요."), MB_ICONINFORMATION);
+		return;
+	}
+
+	if (!m_device_id.IsEmpty()) {
+		if (AfxMessageBox(_T("이미 등록된 기기입니다.\n\n")
+				_T("새 키를 만들면 서버에 등록해 둔 지금의 키로는 접속할 수 없게 됩니다.\n")
+				_T("새로 만들까요?"), MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
+			return;
+		}
+	}
+
+	if (device_enroll(&dev) != DEVICE_OK) {
+		AfxMessageBox(_T("기기 등록에 실패했습니다."), MB_ICONERROR);
+		return;
+	}
+
+	{
+		CEnrollDlg dlg(dev, this);
+
+		SecureZeroMemory(&dev, sizeof(dev));
+		dlg.DoModal();
+	}
+
+	LoadDeviceId();
+	RefreshPosture(false);
+	AppendLog(_T("[gui] 기기 등록: ") + m_device_id);
 }
 
 void CMainDlg::ApplyFilter()
@@ -531,6 +569,7 @@ void CMainDlg::OnTabChanged(NMHDR *, LRESULT *pResult)
 	m_packets.ShowWindow(sel == TAB_PACKETS ? SW_SHOW : SW_HIDE);
 	m_log.ShowWindow(sel == TAB_LOG ? SW_SHOW : SW_HIDE);
 	m_posture.ShowWindow(sel == TAB_POSTURE ? SW_SHOW : SW_HIDE);
+	GetDlgItem(IDC_ENROLL)->ShowWindow(sel == TAB_POSTURE ? SW_SHOW : SW_HIDE);
 
 	if (sel == TAB_POSTURE) {
 		RefreshPosture(true);
@@ -1232,7 +1271,11 @@ void CMainDlg::LayoutChildren(int cx, int cy)
 	inner.DeflateRect(DX(2), DY(1));
 	Place(IDC_PACKETS, inner.left, inner.top, inner.Width(), inner.Height());
 	Place(IDC_LOG, inner.left, inner.top, inner.Width(), inner.Height());
-	Place(IDC_POSTURE, inner.left, inner.top, inner.Width(), inner.Height());
+
+	/* 포스처 탭은 아래에 버튼 한 줄을 남긴다. */
+	const int enrollH = DY(16);
+	Place(IDC_POSTURE, inner.left, inner.top, inner.Width(), inner.Height() - enrollH - DY(4));
+	Place(IDC_ENROLL, inner.left, inner.bottom - enrollH, DX(70), enrollH);
 
 	/* 상세창 */
 	Place(IDC_GRP_DETAIL, m, detailTop, cx - 2 * m, detailH);
