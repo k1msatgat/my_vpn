@@ -1,0 +1,41 @@
+#ifndef DEVICE_H
+#define DEVICE_H
+
+/* 기기 신원.
+ *
+ * 지금까지 서버는 "터널 IP 를 자칭한 누군가"만 알았다. 기기마다 고유한 ID 와
+ * 비밀 키를 하나씩 주고 서버에 등록해 두면, 서버는 접속한 쪽이 등록된 그 기기인지
+ * 확인할 수 있다. ID 는 이름표라 공개돼도 되고, 키는 이 기기와 서버만 안다.
+ *
+ * 등록(enroll)은 기기에서 한 번 한다. 여기서 만든 ID 와 키를 관리자가 서버의
+ * 기기 목록에 옮겨 적는다. */
+
+#include <stdint.h>
+
+#include "proto.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef struct device {
+	uint8_t id[DEVICE_ID_LEN];
+	uint8_t key[AUTH_KEY_LEN];
+} device_t;
+
+#define DEVICE_OK		0
+#define DEVICE_NOT_ENROLLED	1
+#define DEVICE_ERROR		(-1)
+
+/* 저장된 신원을 읽는다. */
+int device_load(device_t *out);
+
+/* 새 ID 와 키를 만들어 저장한다. 이미 있으면 덮어쓴다 — 서버에 등록된 예전 키는
+ * 더 이상 맞지 않게 되므로 호출자가 사용자에게 확인받아야 한다. */
+int device_enroll(device_t *out);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif

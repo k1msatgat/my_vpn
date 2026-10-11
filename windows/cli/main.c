@@ -8,6 +8,7 @@
 #include "tunnel.h"
 #include "posture.h"
 #include "hmac.h"
+#include "device.h"
 
 #define TUN_PREFIX_LEN 24
 
@@ -96,6 +97,64 @@ static int selftest(void)
 	return failed;
 }
 
+static void print_hex(const char *label, const uint8_t *buf, size_t len)
+{
+	size_t i;
+
+	printf("%s", label);
+	for (i = 0; i < len; i++) {
+		printf("%02x", buf[i]);
+	}
+	printf("\n");
+}
+
+static int show_device(void)
+{
+	device_t dev;
+	int ret;
+
+	ret = device_load(&dev);
+	if (ret == DEVICE_NOT_ENROLLED) {
+		printf("not enrolled (run: vpn_client enroll)\n");
+		return 1;
+	}
+	if (ret != DEVICE_OK) {
+		fprintf(stderr, "device identity is unreadable\n");
+		return 1;
+	}
+
+	/* 키는 등록할 때 한 번만 보여 준다. */
+	print_hex("device id  ", dev.id, sizeof(dev.id));
+	SecureZeroMemory(&dev, sizeof(dev));
+
+	return 0;
+}
+
+/* 이 기기의 ID 와 키를 만들고 서버에 등록할 값을 찍는다. */
+static int enroll(int force)
+{
+	device_t dev;
+
+	if (!force && device_load(&dev) != DEVICE_NOT_ENROLLED) {
+		SecureZeroMemory(&dev, sizeof(dev));
+		fprintf(stderr, "already enrolled. a new key invalidates the one registered on the server.\n");
+		fprintf(stderr, "to replace it anyway: vpn_client enroll --force\n");
+		return 1;
+	}
+
+	if (device_enroll(&dev) != DEVICE_OK) {
+		fprintf(stderr, "enroll failed: %lu\n", GetLastError());
+		return 1;
+	}
+
+	printf("enrolled. register these on the server (the key is shown only once):\n");
+	print_hex("device id  ", dev.id, sizeof(dev.id));
+	print_hex("key        ", dev.key, sizeof(dev.key));
+	SecureZeroMemory(&dev, sizeof(dev));
+
+	return 0;
+}
+
 int main(int argc, char *argv[])
 {
 	tunnel_config_t cfg;
@@ -110,11 +169,23 @@ int main(int argc, char *argv[])
 	if (argc == 2 && strcmp(argv[1], "selftest") == 0) {
 		return selftest();
 	}
+	if (argc == 2 && strcmp(argv[1], "device") == 0) {
+		return show_device();
+	}
+	if ((argc == 2 || argc == 3) && strcmp(argv[1], "enroll") == 0) {
+		if (argc == 3 && strcmp(argv[2], "--force") != 0) {
+			fprintf(stderr, "usage: %s enroll [--force]\n", argv[0]);
+			return 1;
+		}
+		return enroll(argc == 3);
+	}
 
 	if (argc != 5) {
 		fprintf(stderr, "usage: %s <adapter-name> <server-ip> <port> <tunnel-ip>\n", argv[0]);
 		fprintf(stderr, "       %s posture\n", argv[0]);
 		fprintf(stderr, "       %s selftest\n", argv[0]);
+		fprintf(stderr, "       %s enroll [--force]\n", argv[0]);
+		fprintf(stderr, "       %s device\n", argv[0]);
 		fprintf(stderr, " e.g. %s my_vpn 49.247.139.39 9000 10.0.0.3\n", argv[0]);
 		return 1;
 	}
