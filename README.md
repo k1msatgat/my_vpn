@@ -23,7 +23,7 @@ Zero Trust Network Access(ZTNA)의 기반 구조를 학습하는 것을 목표�
 |---|---|
 | 이 문서 | 설계 — 와이어 프로토콜, 패킷 흐름, 보안 모델, 로드맵 |
 | [docs/linux.md](docs/linux.md) | Linux 서버·클라이언트 빌드와 실행, 시나리오 테스트, ACL |
-| [docs/windows.md](docs/windows.md) | Windows 클라이언트 — Wintun, 이벤트 루프, MFC GUI와 패킷 분석기 |
+| [windows/README.md](windows/README.md) | Windows 클라이언트 — Wintun, 이벤트 루프, MFC GUI와 패킷 분석기 |
 
 프로토콜 코드(`lib/common`의 `proto.h` / `proto.c`)는 Linux와 Windows가 같은 소스를 빌드합니다.
 플랫폼별로 갈라지는 것만 위 두 문서로 내렸습니다.
@@ -195,6 +195,7 @@ my_vpn/
 │       ├── peer.c         # 피어 테이블, 세션 idx 발급/조회, 세션 만료
 │       └── alc.c          # ACL 파싱 및 매칭
 ├── windows/               # Windows 클라이언트 (Visual Studio 솔루션)
+│   ├── README.md          #   Windows 클라이언트, GUI, 패킷 분석기
 │   ├── my_vpn.sln
 │   ├── core/              #   UI 프레임워크에 의존하지 않는 순수 Win32/C
 │   │   ├── tunnel.{h,c}       # Wintun + Winsock 터널 루프 (블로킹 tunnel_run)
@@ -210,8 +211,7 @@ my_vpn/
 │   ├── server.sh          # 서버 실행 / 재시작 시나리오
 │   └── client.sh          # 클라이언트 실행 / idle·stop·restart 시나리오
 ├── docs/
-│   ├── linux.md           # Linux 빌드·실행·테스트, ACL
-│   └── windows.md         # Windows 클라이언트, GUI, 패킷 분석기
+│   └── linux.md           # Linux 빌드·실행·테스트, ACL
 └── Makefile               # 컴포넌트별 bin/ 분리 빌드, 의존성 자동 추적
 ```
 
