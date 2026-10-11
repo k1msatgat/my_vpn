@@ -6,6 +6,7 @@
 #endif
 
 #include "vpn_session.h"
+#include "posture.h"
 #include "PacketStore.h"
 
 /* 텍스트 로그가 무한히 쌓이지 않게 자른다. */
@@ -16,6 +17,26 @@
 
 #define TIMER_TICK_ID 1
 #define TIMER_TICK_MS 500
+
+/* 포스처 탭이 이 PC 의 상태를 다시 읽는 주기 (틱 수). 코어의 보고 주기와 같은 2초. */
+#define POSTURE_REFRESH_TICKS 4
+
+/* 탭 순서 */
+enum {
+	TAB_PACKETS = 0,
+	TAB_LOG,
+	TAB_POSTURE
+};
+
+/* 포스처 탭의 행 */
+enum {
+	POSTURE_ROW_DEVICE = 0,
+	POSTURE_ROW_OS,
+	POSTURE_ROW_FIREWALL,
+	POSTURE_ROW_ANTIVIRUS,
+	POSTURE_ROW_VERDICT,
+	POSTURE_ROW_COUNT
+};
 
 class CMainDlg : public CDialogEx
 {
@@ -42,6 +63,7 @@ protected:
 	afx_msg void OnPacketCustomDraw(NMHDR *pNMHDR, LRESULT *pResult);
 	afx_msg void OnPacketSelChanged(NMHDR *pNMHDR, LRESULT *pResult);
 	afx_msg void OnTabChanged(NMHDR *pNMHDR, LRESULT *pResult);
+	afx_msg void OnPostureCustomDraw(NMHDR *pNMHDR, LRESULT *pResult);
 
 	/* 워커 스레드가 PostMessage 로 보낸 것들. 모두 UI 스레드에서 처리된다. */
 	afx_msg LRESULT OnVpnLog(WPARAM wParam, LPARAM lParam);
@@ -64,6 +86,15 @@ private:
 	void LoadSettings();
 	void SaveSettings();
 
+	/* 포스처 탭 */
+	void SetupPostureList();
+	void LoadDeviceId();
+	void TrackAuth(const tunnel_packet_t &p);
+	void RefreshPosture(bool collect);
+	void SetPostureCell(int row, int col, const CString &text);
+	CString ServerVerdictText() const;
+	static CString LocalStateName(int state);
+
 	/* 표시 문자열은 UI 가 만든다 — 코어는 enum 만 올린다. */
 	CString ColumnText(const tunnel_packet_t &p, int col) const;
 	static CString DirName(const tunnel_packet_t &p);
@@ -81,7 +112,20 @@ private:
 	tunnel_state_t m_state;
 	ULONGLONG m_connected_at;	/* GetTickCount64, 0 이면 미연결 */
 
+	/* 포스처 탭에 보여 줄 것들.
+	 *   m_local     이 PC 의 지금 상태. UI 가 직접 읽는다 (연결하지 않아도 보인다).
+	 *   m_reported  서버에 마지막으로 보고한 값. 패킷 이벤트에서 얻는다.
+	 * 둘을 나란히 보여 주면 "바뀌었는데 아직 보고되지 않은" 순간이 보인다. */
+	posture_t m_local;
+	posture_report_t m_reported;
+	bool m_has_reported;
+	int m_deny_reason;		/* 마지막 거부 사유, 없으면 0 */
+	CString m_device_id;		/* 비어 있으면 미등록 */
+	bool m_posture_bad[POSTURE_ROW_COUNT];
+	int m_posture_ticks;
+
 	CListCtrl m_packets;
+	CListCtrl m_posture;
 	CListBox m_log;
 	CTabCtrl m_tab;
 	CEdit m_detail;

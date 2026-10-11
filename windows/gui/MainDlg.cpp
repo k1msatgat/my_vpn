@@ -36,14 +36,21 @@ CMainDlg::CMainDlg(CWnd *parent)
 	, m_session(nullptr)
 	, m_state(TUNNEL_STATE_STOPPED)
 	, m_connected_at(0)
+	, m_has_reported(false)
+	, m_deny_reason(0)
+	, m_posture_ticks(0)
 	, m_state_color(GetSysColor(COLOR_WINDOWTEXT))
 {
+	ZeroMemory(&m_local, sizeof(m_local));
+	ZeroMemory(&m_reported, sizeof(m_reported));
+	ZeroMemory(m_posture_bad, sizeof(m_posture_bad));
 }
 
 void CMainDlg::DoDataExchange(CDataExchange *pDX)
 {
 	CDialogEx::DoDataExchange(pDX);
 	DDX_Control(pDX, IDC_PACKETS, m_packets);
+	DDX_Control(pDX, IDC_POSTURE, m_posture);
 	DDX_Control(pDX, IDC_LOG, m_log);
 	DDX_Control(pDX, IDC_TAB, m_tab);
 	DDX_Control(pDX, IDC_DETAIL, m_detail);
@@ -65,6 +72,7 @@ BEGIN_MESSAGE_MAP(CMainDlg, CDialogEx)
 	ON_NOTIFY(LVN_GETDISPINFO, IDC_PACKETS, &CMainDlg::OnGetDispInfo)
 	ON_NOTIFY(NM_CUSTOMDRAW, IDC_PACKETS, &CMainDlg::OnPacketCustomDraw)
 	ON_NOTIFY(LVN_ITEMCHANGED, IDC_PACKETS, &CMainDlg::OnPacketSelChanged)
+	ON_NOTIFY(NM_CUSTOMDRAW, IDC_POSTURE, &CMainDlg::OnPostureCustomDraw)
 	ON_NOTIFY(TCN_SELCHANGE, IDC_TAB, &CMainDlg::OnTabChanged)
 	ON_MESSAGE(WM_VPN_LOG, &CMainDlg::OnVpnLog)
 	ON_MESSAGE(WM_VPN_STATE, &CMainDlg::OnVpnState)
@@ -76,8 +84,9 @@ BOOL CMainDlg::OnInitDialog()
 {
 	CDialogEx::OnInitDialog();
 
-	m_tab.InsertItem(0, _T("패킷"));
-	m_tab.InsertItem(1, _T("로그"));
+	m_tab.InsertItem(TAB_PACKETS, _T("패킷"));
+	m_tab.InsertItem(TAB_LOG, _T("로그"));
+	m_tab.InsertItem(TAB_POSTURE, _T("포스처"));
 
 	CComboBox *filter = (CComboBox *)GetDlgItem(IDC_FILTER_DIR);
 	filter->AddString(_T("전체"));
@@ -95,6 +104,10 @@ BOOL CMainDlg::OnInitDialog()
 
 	m_mono.CreatePointFont(90, _T("Consolas"));
 	m_detail.SetFont(&m_mono);
+
+	SetupPostureList();
+	LoadDeviceId();
+	RefreshPosture(true);
 
 	LoadSettings();
 
@@ -239,6 +252,11 @@ void CMainDlg::OnConnect()
 	}
 
 	SaveSettings();
+
+	/* 지난 연결의 판정과 보고 값은 새 연결과 무관하다. */
+	m_deny_reason = 0;
+	m_has_reported = false;
+	SetDlgItemText(IDC_ELAPSED, _T(""));
 
 	if (vpn_session_start(m_session, &cfg) < 0) {
 		AppendLog(_T("[gui] 워커 스레드를 만들 수 없습니다"));
@@ -425,11 +443,20 @@ LRESULT CMainDlg::OnVpnPackets(WPARAM, LPARAM)
 		n = vpn_session_drain_packets(m_session, batch, PACKET_DRAIN_BATCH);
 		for (int i = 0; i < n; i++) {
 			m_store.Add(batch[i]);
+			TrackAuth(batch[i]);
 		}
 	} while (n == PACKET_DRAIN_BATCH);
 
 	m_store.SetLost(vpn_session_lost_packets(m_session));
 	RefreshPacketCount();
+
+	/* 상태 변화(WM_VPN_STATE)와 패킷(WM_VPN_PACKETS)은 따로 오는 메시지라, "거부됨"
+	 * 상태가 DENY 패킷보다 먼저 처리될 수 있다. 그때는 SetUiState 가 사유를 아직
+	 * 모르므로 사유를 알게 된 여기서도 한 번 더 쓴다. */
+	if (m_deny_reason != 0) {
+		SetDlgItemText(IDC_ELAPSED, DenyReasonName(m_deny_reason));
+	}
+	RefreshPosture(false);
 
 	return 0;
 }
@@ -500,13 +527,191 @@ void CMainDlg::OnPacketSelChanged(NMHDR *pNMHDR, LRESULT *pResult)
 void CMainDlg::OnTabChanged(NMHDR *, LRESULT *pResult)
 {
 	int sel = m_tab.GetCurSel();
-	BOOL showPackets = (sel != 1);
 
-	m_packets.ShowWindow(showPackets ? SW_SHOW : SW_HIDE);
-	m_log.ShowWindow(showPackets ? SW_HIDE : SW_SHOW);
+	m_packets.ShowWindow(sel == TAB_PACKETS ? SW_SHOW : SW_HIDE);
+	m_log.ShowWindow(sel == TAB_LOG ? SW_SHOW : SW_HIDE);
+	m_posture.ShowWindow(sel == TAB_POSTURE ? SW_SHOW : SW_HIDE);
+
+	if (sel == TAB_POSTURE) {
+		RefreshPosture(true);
+	}
 
 	if (pResult) {
 		*pResult = 0;
+	}
+}
+
+/* ---- 포스처 탭 --------------------------------------------------------- */
+/* 패킷 리스트와 달리 행이 다섯 개로 고정이라 가상 리스트를 쓰지 않는다. 행을 미리
+ * 넣어 두고 값이 바뀐 칸만 고친다. */
+void CMainDlg::SetupPostureList()
+{
+	static const struct {
+		LPCTSTR title;
+		int du_width;
+	} cols[] = {
+		{ _T("항목"),               70 },
+		{ _T("이 PC (지금)"),       190 },
+		{ _T("서버에 보고한 값"),   190 },
+	};
+	static const LPCTSTR rows[POSTURE_ROW_COUNT] = {
+		_T("기기 ID"), _T("OS 빌드"), _T("방화벽"), _T("백신"), _T("서버 판정"),
+	};
+	CRect unit(0, 0, 4, 8);
+
+	MapDialogRect(&unit);
+	m_posture.SetExtendedStyle(LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_GRIDLINES);
+
+	for (int i = 0; i < (int)(sizeof(cols) / sizeof(cols[0])); i++) {
+		m_posture.InsertColumn(i, cols[i].title, LVCFMT_LEFT, cols[i].du_width * unit.Width() / 4);
+	}
+	for (int i = 0; i < POSTURE_ROW_COUNT; i++) {
+		m_posture.InsertItem(i, rows[i]);
+	}
+}
+
+/* 기기 ID 만 보여 준다. device_load 는 키까지 풀어 주므로 쓰지 않을 키는 바로 지운다. */
+void CMainDlg::LoadDeviceId()
+{
+	device_t dev;
+
+	m_device_id.Empty();
+
+	if (device_load(&dev) == DEVICE_OK) {
+		CString t;
+		for (int i = 0; i < DEVICE_ID_LEN; i++) {
+			t.Format(_T("%02x"), dev.id[i]);
+			m_device_id += t;
+		}
+	}
+	SecureZeroMemory(&dev, sizeof(dev));
+}
+
+/* 패킷 이벤트에서 "무엇을 보고했고 서버가 뭐라고 했는지"를 주워 둔다.
+ * 코어에 콜백을 더 만들지 않았다. 필요한 사실이 이미 패킷으로 올라온다. */
+void CMainDlg::TrackAuth(const tunnel_packet_t &p)
+{
+	if (p.dir == TUNNEL_DIR_TX && p.has_posture) {
+		m_reported = p.posture;
+		m_has_reported = true;
+	}
+
+	if (p.dir != TUNNEL_DIR_RX || p.verdict != TUNNEL_PASS) {
+		return;
+	}
+	if (p.msg_type == MSG_TYPE_DENY) {
+		m_deny_reason = p.deny_reason;
+	}
+	else if (p.msg_type == MSG_TYPE_RES_HANDSHAKE) {
+		m_deny_reason = 0;
+	}
+}
+
+CString CMainDlg::LocalStateName(int state)
+{
+	switch (state) {
+	case POSTURE_ON:	return _T("켜짐");
+	case POSTURE_OFF:	return _T("꺼짐");
+	default:		return _T("확인 불가");
+	}
+}
+
+CString CMainDlg::ServerVerdictText() const
+{
+	if (m_deny_reason != 0) {
+		CString s = _T("거부 — ") + DenyReasonName(m_deny_reason);
+
+		if (m_state == TUNNEL_STATE_STOPPED) {
+			s += _T(" (연결 종료)");
+		}
+		return s;
+	}
+
+	switch (m_state) {
+	case TUNNEL_STATE_CONNECTED:	return _T("허용");
+	case TUNNEL_STATE_CONNECTING:	return _T("확인 중");
+	case TUNNEL_STATE_RECONNECTING:	return _T("재연결 중");
+	case TUNNEL_STATE_DENIED:	return _T("거부");
+	default:			return _T("연결 안 됨");
+	}
+}
+
+/* 값이 그대로면 건드리지 않는다. 2초마다 같은 글자를 다시 쓰면 선택 표시가 깜빡인다. */
+void CMainDlg::SetPostureCell(int row, int col, const CString &text)
+{
+	if (m_posture.GetItemText(row, col) != text) {
+		m_posture.SetItemText(row, col, text);
+	}
+}
+
+/* collect 가 true 면 이 PC 의 상태를 다시 읽는다. 수십 ms 걸리는 호출이라 패킷이
+ * 올 때마다 하지 않고 타이머와 탭 전환에서만 한다. */
+void CMainDlg::RefreshPosture(bool collect)
+{
+	bool bad[POSTURE_ROW_COUNT] = { false };
+	CString s;
+
+	if (!m_posture.GetSafeHwnd()) {
+		return;
+	}
+
+	if (collect) {
+		posture_collect(&m_local);
+	}
+
+	SetPostureCell(POSTURE_ROW_DEVICE, 1,
+			m_device_id.IsEmpty() ? CString(_T("등록되지 않음")) : m_device_id);
+	bad[POSTURE_ROW_DEVICE] = m_device_id.IsEmpty();
+
+	if (m_local.os_build != 0) {
+		s.Format(_T("%u.%u.%u"), m_local.os_major, m_local.os_minor, m_local.os_build);
+	}
+	else {
+		s = _T("확인 불가");
+	}
+	SetPostureCell(POSTURE_ROW_OS, 1, s);
+	SetPostureCell(POSTURE_ROW_FIREWALL, 1, LocalStateName(m_local.firewall));
+	SetPostureCell(POSTURE_ROW_ANTIVIRUS, 1, LocalStateName(m_local.antivirus));
+	bad[POSTURE_ROW_FIREWALL] = (m_local.firewall != POSTURE_ON);
+	bad[POSTURE_ROW_ANTIVIRUS] = (m_local.antivirus != POSTURE_ON);
+
+	if (m_has_reported) {
+		s.Format(_T("%u"), m_reported.os_build);
+		SetPostureCell(POSTURE_ROW_OS, 2, s);
+		SetPostureCell(POSTURE_ROW_FIREWALL, 2, PostureStateName(m_reported.firewall));
+		SetPostureCell(POSTURE_ROW_ANTIVIRUS, 2, PostureStateName(m_reported.antivirus));
+	}
+	else {
+		SetPostureCell(POSTURE_ROW_OS, 2, _T("-"));
+		SetPostureCell(POSTURE_ROW_FIREWALL, 2, _T("-"));
+		SetPostureCell(POSTURE_ROW_ANTIVIRUS, 2, _T("-"));
+	}
+
+	SetPostureCell(POSTURE_ROW_VERDICT, 1, ServerVerdictText());
+	bad[POSTURE_ROW_VERDICT] = (m_deny_reason != 0 || m_state == TUNNEL_STATE_DENIED);
+
+	if (memcmp(bad, m_posture_bad, sizeof(bad)) != 0) {
+		memcpy(m_posture_bad, bad, sizeof(bad));
+		m_posture.Invalidate(FALSE);
+	}
+}
+
+void CMainDlg::OnPostureCustomDraw(NMHDR *pNMHDR, LRESULT *pResult)
+{
+	LPNMLVCUSTOMDRAW cd = reinterpret_cast<LPNMLVCUSTOMDRAW>(pNMHDR);
+
+	*pResult = CDRF_DODEFAULT;
+
+	if (cd->nmcd.dwDrawStage == CDDS_PREPAINT) {
+		*pResult = CDRF_NOTIFYITEMDRAW;
+	}
+	else if (cd->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
+		int row = (int)cd->nmcd.dwItemSpec;
+
+		if (row >= 0 && row < POSTURE_ROW_COUNT && m_posture_bad[row]) {
+			cd->clrTextBk = COLOR_DROP_BG;
+			cd->clrText = COLOR_DROP_FG;
+		}
 	}
 }
 
@@ -849,6 +1054,14 @@ void CMainDlg::SetUiState(tunnel_state_t state)
 	SetDlgItemText(IDC_STATE, text);
 	GetDlgItem(IDC_STATE)->Invalidate();
 
+	/* 거부됐으면 상태 아래 줄에 사유를 둔다. 탭을 옮기지 않아도 왜 막혔는지 보인다.
+	 * 연결이 끊긴 뒤에도 남겨 둔다 — 첫 핸드셰이크에서 거부되면 곧바로 "중지됨"이
+	 * 되므로, 지우면 사유를 볼 틈이 없다. */
+	if (m_deny_reason != 0) {
+		SetDlgItemText(IDC_ELAPSED, DenyReasonName(m_deny_reason));
+	}
+	RefreshPosture(false);
+
 	stopped = (state == TUNNEL_STATE_STOPPED) ? TRUE : FALSE;
 
 	GetDlgItem(IDC_CONNECT)->EnableWindow(stopped);
@@ -891,13 +1104,19 @@ void CMainDlg::UpdateStats()
 void CMainDlg::OnTimer(UINT_PTR id)
 {
 	if (id == TIMER_TICK_ID) {
-		if (m_connected_at) {
+		/* 거부 중에는 그 줄에 사유가 떠 있으므로 경과 시간으로 덮지 않는다. */
+		if (m_connected_at && m_deny_reason == 0) {
 			ULONGLONG sec = (GetTickCount64() - m_connected_at) / 1000;
 			CString s;
 			s.Format(_T("%02llu:%02llu:%02llu"), sec / 3600, (sec / 60) % 60, sec % 60);
 			SetDlgItemText(IDC_ELAPSED, s);
 		}
 		UpdateStats();
+
+		if (++m_posture_ticks >= POSTURE_REFRESH_TICKS) {
+			m_posture_ticks = 0;
+			RefreshPosture(true);
+		}
 	}
 
 	CDialogEx::OnTimer(id);
@@ -1013,6 +1232,7 @@ void CMainDlg::LayoutChildren(int cx, int cy)
 	inner.DeflateRect(DX(2), DY(1));
 	Place(IDC_PACKETS, inner.left, inner.top, inner.Width(), inner.Height());
 	Place(IDC_LOG, inner.left, inner.top, inner.Width(), inner.Height());
+	Place(IDC_POSTURE, inner.left, inner.top, inner.Width(), inner.Height());
 
 	/* 상세창 */
 	Place(IDC_GRP_DETAIL, m, detailTop, cx - 2 * m, detailH);

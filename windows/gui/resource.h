@@ -17,6 +17,7 @@
 #define IDC_PACKETS		1011
 #define IDC_LOG			1012
 #define IDC_DETAIL		1013
+#define IDC_POSTURE		1014
 
 /* 필터와 도구 */
 #define IDC_FILTER_DIR		1020
