@@ -541,6 +541,21 @@ void CMainDlg::ShowDetail(int viewIndex)
 		s += t;
 	}
 
+	if (p->has_posture) {
+		t.Format(_T("posture      os_build=%u  firewall=%u (%s)  antivirus=%u (%s)\r\n"),
+				p->posture.os_build,
+				(unsigned)p->posture.firewall, (LPCTSTR)PostureStateName(p->posture.firewall),
+				(unsigned)p->posture.antivirus, (LPCTSTR)PostureStateName(p->posture.antivirus));
+		s += t;
+		s += _T("             (뒤의 32바이트는 HMAC-SHA256)\r\n");
+	}
+
+	if (p->msg_type == MSG_TYPE_DENY && p->deny_reason != 0) {
+		t.Format(_T("deny         reason=%u (%s)\r\n"),
+				(unsigned)p->deny_reason, (LPCTSTR)DenyReasonName(p->deny_reason));
+		s += t;
+	}
+
 	if (p->has_inner) {
 		TCHAR src[64] = { 0 };
 		TCHAR dst[64] = { 0 };
@@ -623,8 +638,41 @@ CString CMainDlg::TypeName(const tunnel_packet_t &p)
 	case MSG_TYPE_RES_HANDSHAKE:	return _T("RES_HS");
 	case MSG_TYPE_DATA:		return _T("DATA");
 	case MSG_TYPE_KEEPALIVE:	return _T("KEEPALIVE");
+	case MSG_TYPE_CHALLENGE:	return _T("CHALLENGE");
+	case MSG_TYPE_AUTH:		return _T("AUTH");
+	case MSG_TYPE_DENY:		return _T("DENY");
 	default:			return _T("-");
 	}
+}
+
+CString CMainDlg::PostureStateName(int state)
+{
+	switch (state) {
+	case POSTURE_STATE_ON:		return _T("켜짐");
+	case POSTURE_STATE_OFF:		return _T("꺼짐");
+	default:			return _T("확인 불가");
+	}
+}
+
+CString CMainDlg::DenyReasonName(int reason)
+{
+	switch (reason) {
+	case DENY_UNKNOWN_DEVICE:	return _T("등록되지 않은 기기");
+	case DENY_BAD_AUTH:		return _T("인증 실패");
+	case DENY_TUN_IP:		return _T("이 기기에 배정되지 않은 터널 IP");
+	case DENY_POSTURE:		return _T("포스처가 정책에 못 미침");
+	default:			return _T("알 수 없는 사유");
+	}
+}
+
+CString CMainDlg::PostureText(const posture_report_t &r)
+{
+	CString s;
+
+	s.Format(_T("빌드 %u  방화벽 %s  백신 %s"), r.os_build,
+			(LPCTSTR)PostureStateName(r.firewall), (LPCTSTR)PostureStateName(r.antivirus));
+
+	return s;
 }
 
 CString CMainDlg::VerdictName(int verdict)
@@ -662,6 +710,14 @@ CString CMainDlg::ProtoName(const tunnel_packet_t &p)
 
 CString CMainDlg::Summary(const tunnel_packet_t &p)
 {
+	/* 인증 메시지는 inner 패킷이 없다. 대신 실어 온 내용을 요약한다. */
+	if (p.msg_type == MSG_TYPE_DENY && p.deny_reason != 0) {
+		return _T("거부: ") + DenyReasonName(p.deny_reason);
+	}
+	if (p.has_posture) {
+		return PostureText(p.posture);
+	}
+
 	if (!p.has_inner) {
 		return _T("");
 	}

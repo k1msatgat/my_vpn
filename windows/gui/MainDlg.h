@@ -69,6 +69,9 @@ private:
 	static CString DirName(const tunnel_packet_t &p);
 	static CString TypeName(const tunnel_packet_t &p);
 	static CString VerdictName(int verdict);
+	static CString PostureStateName(int state);
+	static CString DenyReasonName(int reason);
+	static CString PostureText(const posture_report_t &r);
 	static CString Summary(const tunnel_packet_t &p);
 	static CString ProtoName(const tunnel_packet_t &p);
 	static CString TimeText(ULONGLONG t_ms);

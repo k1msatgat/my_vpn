@@ -76,6 +76,12 @@ typedef struct tunnel_packet {
 	uint16_t sport;			/* proto == 6 / 17 */
 	uint16_t dport;
 
+	/* 인증 / 포스처 메시지에서만 채워진다. 스냅샷의 바이트를 UI 가 다시 해석하게
+	 * 두지 않고 여기서도 필드로 올린다 (와이어 배치를 아는 쪽은 코어 하나여야 한다). */
+	uint8_t has_posture;		/* AUTH, 내가 보낸 KEEPALIVE */
+	uint8_t deny_reason;		/* DENY 의 deny_reason_t, 아니면 0 */
+	posture_report_t posture;
+
 	uint8_t snap[TUNNEL_SNAP_LEN];
 	uint8_t snap_len;
 } tunnel_packet_t;

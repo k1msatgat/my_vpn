@@ -434,13 +434,19 @@ static void posture_report_now(posture_report_t *report)
 }
 
 /* 핸드셰이크 패킷 하나를 UI 로 올린다. */
-static void hs_emit(tunnel_t *t, int dir, const msg_header_t *h, const uint8_t *wire, int len)
+static void hs_emit(tunnel_t *t, int dir, const msg_header_t *h, const uint8_t *wire, int len,
+		const posture_report_t *posture, uint8_t deny_reason)
 {
 	tunnel_packet_t pkt;
 
 	pkt_init(t, &pkt, dir, TUNNEL_PASS);
 	pkt.msg_type = h->type;
 	pkt.session_idx = h->session_idx;
+	pkt.deny_reason = deny_reason;
+	if (posture) {
+		pkt.has_posture = 1;
+		pkt.posture = *posture;
+	}
 	pkt.wire_len = (uint32_t)len;
 	pkt_snap(&pkt, wire, (uint32_t)len);
 	pkt_emit(t, &pkt);
@@ -504,7 +510,7 @@ static void send_hs_request(tunnel_t *t)
 	off += DEVICE_ID_LEN;
 
 	udp_send(t, req, off);
-	hs_emit(t, TUNNEL_DIR_TX, &h, req, off);
+	hs_emit(t, TUNNEL_DIR_TX, &h, req, off, NULL, 0);
 }
 
 /* AUTH: tun_ip(4) | device_id(16) | nonce(16) | posture(8) | mac(32)
@@ -551,7 +557,7 @@ static int send_hs_auth(tunnel_t *t, const uint8_t *nonce)
 			report->os_build, report->firewall, report->antivirus);
 
 	udp_send(t, auth, off);
-	hs_emit(t, TUNNEL_DIR_TX, &h, auth, off);
+	hs_emit(t, TUNNEL_DIR_TX, &h, auth, off, report, 0);
 
 	return 0;
 }
@@ -598,7 +604,7 @@ static int do_handshake(tunnel_t *t)
 				if (body_len < AUTH_NONCE_LEN) {
 					continue;
 				}
-				hs_emit(t, TUNNEL_DIR_RX, &h, res, n);
+				hs_emit(t, TUNNEL_DIR_RX, &h, res, n, NULL, 0);
 
 				if (send_hs_auth(t, body) < 0) {
 					return HS_FAIL;
@@ -611,7 +617,7 @@ static int do_handshake(tunnel_t *t)
 				if (body_len < 1) {
 					continue;
 				}
-				hs_emit(t, TUNNEL_DIR_RX, &h, res, n);
+				hs_emit(t, TUNNEL_DIR_RX, &h, res, n, NULL, body[0]);
 				tlog(t, "[HS] denied: %s", deny_reason_name(body[0]));
 				return HS_DENIED;
 
@@ -622,7 +628,7 @@ static int do_handshake(tunnel_t *t)
 				if (!auth_sent || h.session_idx == 0) {
 					continue;
 				}
-				hs_emit(t, TUNNEL_DIR_RX, &h, res, n);
+				hs_emit(t, TUNNEL_DIR_RX, &h, res, n, NULL, 0);
 
 				if (session->idx != h.session_idx) {
 					session->idx = h.session_idx;
@@ -687,6 +693,8 @@ static void send_keepalive(tunnel_t *t)
 	pkt.session_idx = msg_header.session_idx;
 	pkt.has_counter = 1;
 	pkt.counter = data_header.counter;
+	pkt.has_posture = 1;
+	pkt.posture = session->posture;
 	pkt.wire_len = (uint32_t)off;
 	pkt_snap(&pkt, packet, (uint32_t)off);
 	pkt_emit(t, &pkt);
@@ -887,6 +895,7 @@ static int pump_udp(tunnel_t *t)
 					continue;
 				}
 				tlog(t, "[deny] %s", deny_reason_name(packet[off]));
+				pkt.deny_reason = packet[off];
 				session->denied = 1;
 				set_state(t, TUNNEL_STATE_DENIED);
 				pkt_emit(t, &pkt);
