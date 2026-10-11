@@ -260,7 +260,7 @@ my_vpn/
 - [ ] 신원 기반 인증 — 클라이언트 키 인증, 사용자/기기 단위 정책 (ZTNA)
 - [ ] 비블로킹 재핸드셰이크 (상태 머신), 종료 통지 메시지
 - [x] Windows 클라이언트 — Wintun 콘솔 클라이언트 (ping 왕복 / 유휴 120초 / 서버 재시작 복구 확인)
-- [ ] Windows 클라이언트 — MFC GUI (구현, x64 Debug/Release 빌드 확인, 실행 검증 남음)
+- [x] Windows 클라이언트 — MFC GUI (연결·해제 상태 전이 / 패킷 분석 탭 / 필터·통계 / ping 왕복 확인)
 - [ ] Windows 클라이언트 — Windows 서비스 + Named Pipe IPC
 
 ---
