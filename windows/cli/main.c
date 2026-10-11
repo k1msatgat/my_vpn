@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "tunnel.h"
+#include "posture.h"
 
 #define TUN_PREFIX_LEN 24
 
@@ -25,6 +26,23 @@ static void on_log(void *ctx, const char *line)
 	fflush(stdout);
 }
 
+/* 서버에 접속하지 않고 이 단말의 포스처만 읽어 찍는다. 어댑터를 만들지 않으므로
+ * 관리자 권한이 필요 없다. */
+static int print_posture(void)
+{
+	posture_t p;
+
+	posture_collect(&p);
+
+	if (p.os_build != 0) {
+		printf("os         %u.%u.%u\n", p.os_major, p.os_minor, p.os_build);
+	} else {
+		printf("os         unknown\n");
+	}
+
+	return 0;
+}
+
 int main(int argc, char *argv[])
 {
 	tunnel_config_t cfg;
@@ -33,8 +51,13 @@ int main(int argc, char *argv[])
 	long server_port;
 	int ret = 1;
 
+	if (argc == 2 && strcmp(argv[1], "posture") == 0) {
+		return print_posture();
+	}
+
 	if (argc != 5) {
 		fprintf(stderr, "usage: %s <adapter-name> <server-ip> <port> <tunnel-ip>\n", argv[0]);
+		fprintf(stderr, "       %s posture\n", argv[0]);
 		fprintf(stderr, " e.g. %s my_vpn 49.247.139.39 9000 10.0.0.3\n", argv[0]);
 		return 1;
 	}
