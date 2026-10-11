@@ -205,7 +205,8 @@ my_vpn/
 │   │   └── vpn_session.{h,c}  # 워커 스레드 + 패킷 링버퍼 + PostMessage 마셜링
 │   ├── cli/               #   콘솔 클라이언트 (main.c) — 자동 테스트 대상
 │   ├── gui/               #   MFC 다이얼로그
-│   │   ├── MainDlg.{h,cpp}      # 가상 리스트, 상세창, 레이아웃
+│   │   ├── MainDlg.{h,cpp}      # 가상 리스트, 상세창, 포스처 탭, 레이아웃
+│   │   ├── EnrollDlg.{h,cpp}    # 기기 등록 창 (ID · 키 1회 표시)
 │   │   ├── PacketStore.{h,cpp}  # 패킷 보관 / 필터 / 집계
 │   │   └── vpn_gui.rc
 │   └── test/
@@ -268,7 +269,7 @@ my_vpn/
   - [ ] 서버 — 기기 목록, nonce 발급과 mac 검증, 포스처 조건이 붙은 ACL
   - [x] 지속 검증 (Windows 클라이언트) — keepalive 로 포스처 재보고, 세션 중 거절 처리와 복구 (모의 서버로 확인)
   - [ ] 지속 검증 (서버) — keepalive 의 mac / counter 검증, 위반 시 `DENY` 와 세션 차단
-  - [ ] Windows GUI — 포스처 탭, 거부 사유 표시
+  - [x] Windows GUI — 포스처 탭, 거부 사유 표시, 기기 등록 (모의 서버로 허용 / 세션 중 거부 / 복구 확인)
 - [ ] 비블로킹 재핸드셰이크 (상태 머신), 종료 통지 메시지
 - [x] Windows 클라이언트 — Wintun 콘솔 클라이언트 (ping 왕복 / 유휴 120초 / 서버 재시작 복구 확인)
 - [x] Windows 클라이언트 — MFC GUI (연결·해제 상태 전이 / 패킷 분석 탭 / 필터·통계 / ping 왕복 확인)
@@ -290,5 +291,5 @@ my_vpn/
 | AI 작성 | `proto.h` / `proto.c` 분리 (기존 코드 이동) |
 | AI 분석 | Windows 유휴 시 비유니캐스트 송신이 keepalive를 억제해 불필요한 재핸드셰이크가 생기는 문제를 테스트로 재현하고 `windows/` 쪽을 수정 |
 | AI 초안 | 이 README의 keepalive/재핸드셰이크 이후 갱신분 |
-| AI 작성 | ZTNA 확장의 Windows 쪽 — `core/posture.c`(포스처 수집), `core/device.c`(기기 신원), `core/hmac.c`, `core/tunnel.c`의 인증 핸드셰이크, `windows/test/mock_server.py` |
+| AI 작성 | ZTNA 확장의 Windows 쪽 — `core/posture.c`(포스처 수집), `core/device.c`(기기 신원), `core/hmac.c`, `core/tunnel.c`의 인증 핸드셰이크와 지속 검증, GUI의 포스처 탭과 기기 등록 창, `windows/test/mock_server.py` |
 | AI 작성 | `proto.h` / `proto.c`의 인증·포스처 메시지 정의와 `posture_encode` / `posture_decode`. 메시지 흐름은 AI가 제안하고 검토 후 채택 |
