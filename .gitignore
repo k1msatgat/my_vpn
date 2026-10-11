@@ -8,6 +8,8 @@ compile_commands.json
 *.swp
 
 test/logs/
+# 기기 키가 들어 있다. 예시는 test/devices.conf.example
+test/devices.conf
 
 # Windows (Visual Studio)
 windows/.vs/

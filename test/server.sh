@@ -22,7 +22,7 @@ log_open server.log
 
 start_server() {
 	local started dev
-	local args=("$PORT")
+	local args=("$PORT" "$DEVICE_FILE")
 
 	started=$(log_count "listening on UDP")
 	if [ -n "$ACL_FILE" ]; then
@@ -42,7 +42,11 @@ if [ -n "$STALE_IF" ]; then
 	die "client tunnel ip $CLIENT_TUN_IP is assigned locally on $STALE_IF; remove it first: sudo ip tuntap del dev $STALE_IF mode tun"
 fi
 
-say "server: udp port $PORT, tunnel ip $SERVER_TUN_IP, acl ${ACL_FILE:-off}"
+if [ ! -f "$DEVICE_FILE" ]; then
+	die "device file $DEVICE_FILE not found; copy test/devices.conf.example, fill in the values from 'vpn_client enroll', then chmod 600"
+fi
+
+say "server: udp port $PORT, tunnel ip $SERVER_TUN_IP, devices $DEVICE_FILE, acl ${ACL_FILE:-off}"
 start_server
 
 if [ "$MODE" = restart ]; then

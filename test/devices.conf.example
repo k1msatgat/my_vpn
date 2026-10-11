@@ -1,0 +1,9 @@
+# 등록된 기기 목록. 이 파일을 devices.conf 로 복사해 값을 채우고 chmod 600 한다.
+# (devices.conf 는 키가 들어 있어 .gitignore 에 있다. 권한이 열려 있으면 서버가 읽지 않는다.)
+#
+# id 와 key 는 기기에서 만든다.
+#   Windows 콘솔   vpn_client.exe enroll
+#   Windows GUI    [포스처] 탭 -> [기기 등록...] -> [복사]
+#
+# id (32 hex)                      key (64 hex)                                                      tunnel-ip
+00112233445566778899aabbccddeeff   000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f   10.0.0.3

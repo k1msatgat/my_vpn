@@ -14,6 +14,7 @@
 #include "peer.h"
 #include "acl.h"
 #include "auth.h"
+#include "device.h"
 
 #define MAX_EVENTS 8
 
@@ -82,6 +83,7 @@ int main(int argc, char *argv[])
 	int tun_fd, sock, n, sent, port;
 	int epfd = -1, nev, i;
 	int acl_enabled = 0;
+	int nd;
 	struct epoll_event ev, events[MAX_EVENTS];
 	struct sockaddr_in local_addr;
 	struct sockaddr_in src;
@@ -104,8 +106,8 @@ int main(int argc, char *argv[])
 		return auth_selftest();
 	}
 
-	if (argc != 2 && argc != 3) {
-		fprintf(stderr, "usage: %s <port> [acl-file]\n", argv[0]);
+	if (argc != 3 && argc != 4) {
+		fprintf(stderr, "usage: %s <port> <device-file> [acl-file]\n", argv[0]);
 		fprintf(stderr, "       %s selftest\n", argv[0]);
 		return 1;
 	}
@@ -117,14 +119,25 @@ int main(int argc, char *argv[])
 
 	peer_init();
 	acl_init();
+	device_init();
 
-	if (argc == 3) {
-		int nr = acl_load(argv[2]);
+	/* 기기 목록은 ACL 과 달리 생략할 수 없다. 없으면 누구도 받아 줄 수 없고,
+	 * "목록이 없으면 모두 허용"으로 두면 설정 실수가 곧 무인증 서버가 된다. */
+	nd = device_load(argv[2]);
+	if (nd < 0) {
+		fprintf(stderr, "device_load failed: %s\n", argv[2]);
+		return 1;
+	}
+	printf("device: %d devices loaded from %s\n", nd, argv[2]);
+	device_dump();
+
+	if (argc == 4) {
+		int nr = acl_load(argv[3]);
 		if (nr < 0) {
-			fprintf(stderr, "acl_load failed: %s\n", argv[2]);
+			fprintf(stderr, "acl_load failed: %s\n", argv[3]);
 			return 1;
 		}
-		printf("acl: %d rules loaded from %s\n", nr, argv[2]);
+		printf("acl: %d rules loaded from %s\n", nr, argv[3]);
 		acl_dump();
 		acl_enabled = 1;
 	} else {
