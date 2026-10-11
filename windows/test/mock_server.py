@@ -7,8 +7,13 @@
 
     python mock_server.py --device <id-hex>:<key-hex>:<tunnel-ip> [--port 9000]
                           [--require-firewall] [--require-antivirus] [--min-build N]
+                          [--policy-file PATH]
 
 <id-hex> 와 <key-hex> 는 `vpn_client enroll` 이 찍어 주는 값이다.
+
+--policy-file 을 주면 정책을 그 파일에서 읽는다. 포스처를 평가할 때마다 다시 읽으므로
+서버를 띄워 둔 채 파일을 고쳐 "관리자가 정책을 바꿨다"를 흉내 낼 수 있다.
+한 줄에 하나씩: require-firewall / require-antivirus / min-build=N
 """
 
 import argparse
@@ -56,6 +61,7 @@ def main():
     ap.add_argument("--require-firewall", action="store_true")
     ap.add_argument("--require-antivirus", action="store_true")
     ap.add_argument("--min-build", type=int, default=0)
+    ap.add_argument("--policy-file")
     args = ap.parse_args()
 
     devices = {}
@@ -68,15 +74,32 @@ def main():
             "nonce_at": 0.0,
         }
 
-    def posture_ok(raw):
-        build, firewall, antivirus, _ = posture_text(raw)
-        if args.require_firewall and firewall != 2:
-            return False
-        if args.require_antivirus and antivirus != 2:
-            return False
-        return build >= args.min_build
+    def policy():
+        need_fw, need_av, min_build = args.require_firewall, args.require_antivirus, args.min_build
+        if args.policy_file:
+            need_fw = need_av = False
+            min_build = 0
+            with open(args.policy_file, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line == "require-firewall":
+                        need_fw = True
+                    elif line == "require-antivirus":
+                        need_av = True
+                    elif line.startswith("min-build="):
+                        min_build = int(line.split("=", 1)[1])
+        return need_fw, need_av, min_build
 
-    sessions = {}  # session_idx -> device
+    def posture_ok(raw):
+        need_fw, need_av, min_build = policy()
+        build, firewall, antivirus, _ = posture_text(raw)
+        if need_fw and firewall != 2:
+            return False
+        if need_av and antivirus != 2:
+            return False
+        return build >= min_build
+
+    sessions = {}  # session_idx -> {"dev": 기기, "counter": 마지막으로 받아들인 keepalive counter}
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind((args.bind, args.port))
     log("mock server on %s:%d, %d device(s)" % (args.bind, args.port, len(devices)))
@@ -140,15 +163,38 @@ def main():
                 continue
 
             idx = struct.unpack("!I", os.urandom(4))[0] or 1
-            sessions[idx] = dev
+            sessions[idx] = {"dev": dev, "counter": -1}
             log("  -> RES_HS idx=%08x" % idx)
             sock.sendto(header(RES_HANDSHAKE, idx), addr)
 
         elif msg_type == KEEPALIVE:
-            if session_idx not in sessions:
+            sess = sessions.get(session_idx)
+            if sess is None:
                 log("drop: KEEPALIVE for unknown session %08x" % session_idx)
                 continue
-            log("KEEPALIVE idx=%08x" % session_idx)
+            if len(body) < 8 + POSTURE_LEN + MAC_LEN:
+                log("drop: KEEPALIVE without posture (%d bytes)" % len(pkt))
+                continue
+            # mac 은 헤더부터 포스처까지를 덮는다.
+            signed_len = HDR_LEN + 8 + POSTURE_LEN
+            want = hmac.new(sess["dev"]["key"], pkt[:signed_len], hashlib.sha256).digest()
+            if not hmac.compare_digest(pkt[signed_len:signed_len + MAC_LEN], want):
+                log("drop: KEEPALIVE bad mac")
+                continue
+            # 예전 keepalive 를 다시 보내 "방화벽 켜짐"이던 때의 보고를 되살리는 것을 막는다.
+            counter = struct.unpack("!Q", body[:8])[0]
+            if counter <= sess["counter"]:
+                log("drop: KEEPALIVE replayed counter %d" % counter)
+                continue
+            sess["counter"] = counter
+
+            posture = body[8:8 + POSTURE_LEN]
+            log("KEEPALIVE idx=%08x counter=%d %s" % (session_idx, counter, posture_text(posture)[3]))
+            if not posture_ok(posture):
+                # 세션 중에 정책에 못 미치게 됐다. 알리고 세션을 내린다.
+                del sessions[session_idx]
+                deny(addr, DENY_POSTURE, session_idx)
+                continue
             sock.sendto(header(KEEPALIVE, session_idx), addr)
 
         else:

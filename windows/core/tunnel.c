@@ -22,6 +22,7 @@
 #define HS_DENIED	(-2)	/* 서버가 거절했다. 다시 보내도 같은 답이 온다 */
 
 #define LOOP_TICK_MSEC 1000
+#define POSTURE_POLL_MSEC 2000
 #define SERVER_TIMEOUT_MSEC (SERVER_TIMEOUT_SEC * 1000)
 
 #define TUN_RING_CAPACITY 0x400000 /* 4MiB */
@@ -45,7 +46,9 @@ typedef struct session {
 	struct sockaddr_in server;
 	uint64_t last_rx_ms;
 	uint64_t last_tx_ms;
-	uint64_t last_ka_ms;	/* 마지막 keepalive 송신. 생존 확인 경로를 10초에 한 번으로 묶는다 */
+	uint64_t last_ka_ms;	/* 마지막 keepalive 송신 */
+	posture_report_t posture;	/* 서버에 마지막으로 보고한 포스처 */
+	uint64_t last_posture_ms;	/* 포스처를 마지막으로 읽은 시각 */
 } session_t;
 
 typedef struct tunnel {
@@ -511,7 +514,7 @@ static void send_hs_request(tunnel_t *t)
 static int send_hs_auth(tunnel_t *t, const uint8_t *nonce)
 {
 	uint8_t auth[sizeof(msg_header_t) + AUTH_PAYLOAD_LEN];
-	posture_report_t report;
+	posture_report_t *report = &t->session.posture;
 	msg_header_t h;
 	uint8_t *signed_part;
 	int off;
@@ -530,8 +533,10 @@ static int send_hs_auth(tunnel_t *t, const uint8_t *nonce)
 	memcpy(auth + off, nonce, AUTH_NONCE_LEN);
 	off += AUTH_NONCE_LEN;
 
-	posture_report_now(&report);
-	off += posture_encode(auth + off, sizeof(auth) - (size_t)off, &report);
+	/* 세션에 남겨 둔다. 이후 keepalive 가 "보고한 값에서 달라졌는가"를 이것과 비교한다. */
+	posture_report_now(report);
+	t->session.last_posture_ms = GetTickCount64();
+	off += posture_encode(auth + off, sizeof(auth) - (size_t)off, report);
 
 	if (hmac_sha256(t->cfg->device_key, AUTH_KEY_LEN,
 			signed_part, AUTH_SIGNED_LEN, auth + off) < 0) {
@@ -541,7 +546,7 @@ static int send_hs_auth(tunnel_t *t, const uint8_t *nonce)
 	off += AUTH_MAC_LEN;
 
 	tlog(t, "[HS] auth: build=%u firewall=%u antivirus=%u",
-			report.os_build, report.firewall, report.antivirus);
+			report->os_build, report->firewall, report->antivirus);
 
 	udp_send(t, auth, off);
 	hs_emit(t, TUNNEL_DIR_TX, &h, auth, off);
@@ -635,18 +640,38 @@ static int do_handshake(tunnel_t *t)
 	return HS_FAIL;
 }
 
+/* KEEPALIVE: counter(8) | posture(8) | mac(32)
+ *
+ * 핸드셰이크에서 한 번 통과했다고 세션이 끝날 때까지 믿지 않는다. keepalive 마다
+ * 지금의 포스처를 다시 싣고, 서버는 받을 때마다 정책을 다시 평가한다.
+ *
+ * mac 은 헤더부터 포스처까지 24바이트를 덮는다. 헤더가 들어가 이 세션에 묶이고,
+ * counter 가 들어가 패킷마다 값이 달라진다. counter 는 데이터 패킷과 같은
+ * tx_counter 를 쓴다. 세션 안에서 한 번 쓴 값을 다시 쓰지 않는다는 점만 필요하다. */
 static void send_keepalive(tunnel_t *t)
 {
+	session_t *session = &t->session;
 	msg_header_t msg_header;
-	uint8_t packet[sizeof(msg_header_t)];
+	data_header_t data_header;
+	uint8_t packet[KA_SIGNED_LEN + AUTH_MAC_LEN];
 	tunnel_packet_t pkt;
 	int off;
 
 	memset(&msg_header, 0, sizeof(msg_header_t));
 	msg_header.version = PROTOCOL_VERSION;
 	msg_header.type = MSG_TYPE_KEEPALIVE;
-	msg_header.session_idx = t->session.idx;
+	msg_header.session_idx = session->idx;
+	data_header.counter = session->tx_counter++;
+
 	off = msg_encode(packet, sizeof(packet), &msg_header);
+	off += data_encode(packet + off, sizeof(packet) - (size_t)off, &data_header);
+	off += posture_encode(packet + off, sizeof(packet) - (size_t)off, &session->posture);
+
+	if (hmac_sha256(t->cfg->device_key, AUTH_KEY_LEN, packet, (size_t)off, packet + off) < 0) {
+		tlog(t, "[keepalive] hmac failed");
+		return;
+	}
+	off += AUTH_MAC_LEN;
 
 	udp_send(t, packet, off);
 	t->session.last_ka_ms = t->session.last_tx_ms;
@@ -658,9 +683,38 @@ static void send_keepalive(tunnel_t *t)
 	pkt_init(t, &pkt, TUNNEL_DIR_TX, TUNNEL_PASS);
 	pkt.msg_type = MSG_TYPE_KEEPALIVE;
 	pkt.session_idx = msg_header.session_idx;
+	pkt.has_counter = 1;
+	pkt.counter = data_header.counter;
 	pkt.wire_len = (uint32_t)off;
 	pkt_snap(&pkt, packet, (uint32_t)off);
 	pkt_emit(t, &pkt);
+}
+
+/* 포스처를 다시 읽어 마지막으로 보고한 값과 달라졌는지 본다. 달라졌으면 세션의
+ * 값을 갱신하고 1 을 돌려줘 다음 keepalive 주기를 기다리지 않고 바로 보고하게 한다.
+ *
+ * 10초 주기만으로는 방화벽을 끈 뒤 최대 10초 동안 서버가 모른다. 읽는 것은
+ * 수십 ms 로 싸므로 2초마다 읽고, 보내는 것은 값이 바뀌었을 때만 앞당긴다. */
+static int posture_changed(tunnel_t *t, uint64_t now)
+{
+	session_t *session = &t->session;
+	posture_report_t report;
+
+	if (now - session->last_posture_ms < POSTURE_POLL_MSEC) {
+		return 0;
+	}
+	session->last_posture_ms = now;
+
+	posture_report_now(&report);
+	if (memcmp(&report, &session->posture, sizeof(report)) == 0) {
+		return 0;
+	}
+
+	tlog(t, "[posture] changed: build=%u firewall=%u antivirus=%u",
+			report.os_build, report.firewall, report.antivirus);
+	session->posture = report;
+
+	return 1;
 }
 
 /* TUN -> UDP. Wintun 링버퍼에 쌓인 패킷을 모두 비운다. */
@@ -975,15 +1029,16 @@ int tunnel_run(const tunnel_config_t *cfg, HANDLE stop_event)
 			session->last_rx_ms = now;
 		}
 
-		/* keepalive가 맡은 두 가지를 따로 본다.
-		 *  - NAT 매핑 유지: 내가 10초 동안 아무것도 보내지 않았으면 보낸다.
-		 *  - 생존 확인: 서버가 10초 동안 조용하면 응답을 유도한다. 데이터 패킷은 서버가
-		 *    버릴 수 있어 응답을 보장하지 못하지만, keepalive는 서버가 반드시 되돌려준다.
-		 *    이 경로가 없으면 "응답 없는 송신"이 이어질 때 keepalive가 억제된 채
-		 *    재핸드셰이크까지 가 버린다. last_ka_ms로 10초에 한 번만 나가게 묶는다. */
-		if (now - session->last_tx_ms > KEEPALIVE_INTERVAL_MSEC ||
-				(now - session->last_rx_ms > KEEPALIVE_INTERVAL_MSEC &&
-				 now - session->last_ka_ms > KEEPALIVE_INTERVAL_MSEC)) {
+		/* keepalive 는 이제 세 가지를 맡는다.
+		 *  - NAT 매핑 유지
+		 *  - 생존 확인: 데이터 패킷은 서버가 버릴 수 있어 응답을 보장하지 못하지만
+		 *    keepalive 는 서버가 반드시 되돌려준다.
+		 *  - 포스처 재보고
+		 * 앞의 둘만 있을 때는 "10초 동안 보낸 것 / 받은 것이 없을 때"만 보내면 됐다.
+		 * 포스처는 트래픽이 흐르는 중에도 보고돼야 하므로 유휴 여부와 관계없이 10초마다
+		 * 보낸다. 그러면 앞의 두 조건은 저절로 채워진다. */
+		if (posture_changed(t, now) ||
+				now - session->last_ka_ms > KEEPALIVE_INTERVAL_MSEC) {
 			send_keepalive(t);
 		}
 
