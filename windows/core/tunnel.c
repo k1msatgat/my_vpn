@@ -747,6 +747,19 @@ int tunnel_run(const tunnel_config_t *cfg, HANDLE stop_event)
 	}
 	wsa_ready = 1;
 
+	/* 서버가 받아 준 뒤에 어댑터를 만든다. 순서를 반대로 하면 서버에 닿지 못하거나
+	 * 거절당하는 경우에도 PC 에 네트워크 어댑터와 터널 대역 경로가 잠깐 생겼다
+	 * 사라진다. 접근이 허락되기 전에는 터널이 존재하지 않는 편이 맞다. */
+	if (socket_open(t) < 0) {
+		goto out;
+	}
+
+	tlog(t, "[%ls] tunneling to %s:%u", cfg->adapter_name, server_str, cfg->server_port);
+
+	if (do_handshake(t) < 0) {
+		goto out;
+	}
+
 	t->wintun = wintun_load();
 	if (!t->wintun) {
 		tlog(t, "failed to load wintun.dll: %lu", GetLastError());
@@ -773,16 +786,6 @@ int tunnel_run(const tunnel_config_t *cfg, HANDLE stop_event)
 	t->tun_event = WintunGetReadWaitEvent(t->tun);
 
 	tlog(t, "[%ls] tun device ready", cfg->adapter_name);
-
-	if (socket_open(t) < 0) {
-		goto out;
-	}
-
-	tlog(t, "[%ls] tunneling to %s:%u", cfg->adapter_name, server_str, cfg->server_port);
-
-	if (do_handshake(t) < 0) {
-		goto out;
-	}
 
 	session->last_rx_ms = GetTickCount64();
 	set_state(t, TUNNEL_STATE_CONNECTED);
