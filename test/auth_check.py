@@ -2,8 +2,9 @@
 """서버의 기기 인증을 프로토콜 수준에서 확인한다.
 
 임시 기기 목록으로 vpn_server 를 띄우고, 클라이언트인 척 UDP 패킷을 직접 만들어
-보내 응답을 본다. 터널 인터페이스에 주소를 붙이지 않으므로 데이터는 오가지 않는다.
-TUN 을 만들어야 해서 root 로 돌린다.
+보내 응답을 본다. 서버의 tun 에 10.0.0.1/24 를 붙여 터널로 들어간 ping 에 커널이
+답하게 하므로, 다른 vpn_server 가 돌고 있는 동안에는 쓸 수 없다.
+TUN 을 만들고 주소를 붙여야 해서 root 로 돌린다.
 
     sudo python3 test/auth_check.py [port] [-v]      (-v: 서버 로그도 출력)
 
@@ -227,6 +228,85 @@ def keepalive_tests():
     check("strict device can come back once the posture is fine", sk(0), "KEEPALIVE")
 
 
+def checksum(data):
+    if len(data) % 2:
+        data += b"\0"
+    s = sum(struct.unpack("!%dH" % (len(data) // 2), data))
+    s = (s >> 16) + (s & 0xffff)
+    s += s >> 16
+    return ~s & 0xffff
+
+
+def echo_request(src, dst, seq):
+    """IPv4 + ICMP echo request 한 개."""
+    icmp = struct.pack("!BBHHH", 8, 0, 0, 0x4d56, seq) + b"my_vpn auth_check"
+    icmp = icmp[:2] + struct.pack("!H", checksum(icmp)) + icmp[4:]
+    ip = struct.pack("!BBHHHBBH4s4s", 0x45, 0, 20 + len(icmp), seq, 0, 64, 1, 0, src, dst)
+    ip = ip[:10] + struct.pack("!H", checksum(ip)) + ip[12:]
+    return ip + icmp
+
+
+def data(idx, counter, inner):
+    return header(DATA, idx) + struct.pack("!Q", counter) + inner
+
+
+def describe_data(r):
+    """DATA 로 돌아온 inner 패킷이 ICMP echo reply 인지."""
+    if r is None:
+        return "no response"
+    msg_type, idx, body = r
+    if msg_type != DATA:
+        return describe(r)
+    inner = body[8:]
+    if len(inner) >= 28 and inner[9] == 1 and inner[20] == 0:
+        return "echo reply"
+    return "DATA (not an echo reply)"
+
+
+def check_data(name, got, want):
+    global failed
+    text = describe_data(got)
+    ok = text == want
+    print("%-4s %-52s %s%s" % ("ok" if ok else "FAIL", name, text, "" if ok else "   (want %s)" % want))
+    failed += not ok
+
+
+def data_tests():
+    """인증된 세션으로만 데이터가 통하는지. 서버의 tun 에 10.0.0.1 을 붙여 커널이 ping 에 답하게 한다."""
+    c = Client()
+    send = lambda pkt: (c.send(pkt), c.recv())[1]
+    server_ip = socket.inet_aton("10.0.0.1")
+
+    idx = session(c)
+    check_data("ping through an authenticated session",
+               send(data(idx, 0, echo_request(TUN_IP, server_ip, 1))), "echo reply")
+    check_data("same ping under a session idx nobody was given",
+               send(data(idx ^ 0x100, 1, echo_request(TUN_IP, server_ip, 2))), "no response")
+    check_data("inner source is another device's tunnel ip",
+               send(data(idx, 2, echo_request(TUN2_IP, server_ip, 3))), "no response")
+
+    # 세션 중에 포스처 때문에 거절되면 데이터 길도 같이 닫힌다.
+    sidx = session(c, strict_dev=True)
+    check_data("strict device, ping while the posture is fine",
+               send(data(sidx, 0, echo_request(TUN2_IP, server_ip, 4))), "echo reply")
+    check("strict device, keepalive reports firewall off",
+          send(keepalive(sidx, 1, key=DEV2_KEY, post=posture(firewall=STATE_OFF))), "DENY(4)")
+    check_data("strict device, ping after being denied",
+               send(data(sidx, 2, echo_request(TUN2_IP, server_ip, 5))), "no response")
+
+
+def setup_tun(log):
+    """서버가 만든 tun 에 터널 주소를 붙인다. test/server.sh 의 setup_if 와 같은 일이다."""
+    log.seek(0)
+    for line in log.read().decode().splitlines():
+        if line.startswith("tun device: "):
+            dev = line.split()[2]
+            subprocess.run(["ip", "addr", "add", "10.0.0.1/24", "dev", dev], check=True)
+            subprocess.run(["ip", "link", "set", dev, "mtu", "1400", "up"], check=True)
+            return dev
+    sys.exit("tun device name not found in the server log")
+
+
 LINE1 = "%s %s 10.0.0.3" % (DEV_ID.hex(), DEV_KEY.hex())
 LINE2 = "%s %s 10.0.0.4 firewall=on antivirus=on min-build=22000  # strict" % (DEV2_ID.hex(), DEV2_KEY.hex())
 
@@ -297,9 +377,11 @@ def main():
         if srv.poll() is not None:
             log.seek(0)
             sys.exit("server failed to start:\n" + log.read().decode())
+        setup_tun(log)
         handshake_tests()
         posture_tests()
         keepalive_tests()
+        data_tests()
         reload_tests(srv, path)
     finally:
         srv.terminate()
