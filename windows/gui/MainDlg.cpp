@@ -1123,8 +1123,9 @@ void CMainDlg::UpdateStats()
 			st.ka_sent, st.ka_recv, m_store.ViewCount(), m_store.ViewCount());
 	SetDlgItemText(IDC_STATS1, s);
 
-	s.Format(_T("폐기 %llu  —  비유니캐스트 %llu, 세션 불일치 %llu, 서버 아닌 출발지 %llu, 헤더 불량 %llu, IPv4 아님 %llu    재핸드셰이크 %llu"),
+	s.Format(_T("폐기 %llu  —  접근 거부 %llu, 비유니캐스트 %llu, 세션 불일치 %llu, 서버 아닌 출발지 %llu, 헤더 불량 %llu, IPv4 아님 %llu    재핸드셰이크 %llu"),
 			m_store.TotalDrops(),
+			st.drops[TUNNEL_DROP_DENIED],
 			st.drops[TUNNEL_DROP_NON_UNICAST],
 			st.drops[TUNNEL_DROP_WRONG_SESSION],
 			st.drops[TUNNEL_DROP_NOT_SERVER],
