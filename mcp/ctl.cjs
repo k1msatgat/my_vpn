@@ -142,6 +142,42 @@ function wantRequirements(v) {
 	return r;
 }
 
+/* 조건을 파일에 쓰는 단어로. device.c / alc.c 가 같은 문법(policy.c)을 읽는다. */
+function reqTokens(r) {
+	const t = [];
+
+	if (r.firewall) t.push('firewall=on');
+	if (r.antivirus) t.push('antivirus=on');
+	if (r.min_build > 0) t.push(`min-build=${r.min_build}`);
+
+	return t;
+}
+
+/* 파일에서 읽은 단어를 조건으로. 모르는 단어면 null. */
+function parseReq(tokens) {
+	const r = { firewall: false, antivirus: false, min_build: 0 };
+
+	for (const t of tokens) {
+		const m = /^min-build=(\d+)$/.exec(t);
+
+		if (t === 'firewall=on') {
+			r.firewall = true;
+		} else if (t === 'antivirus=on') {
+			r.antivirus = true;
+		} else if (m) {
+			r.min_build = Number(m[1]);
+		} else {
+			return null;
+		}
+	}
+
+	return r;
+}
+
+function reqEmpty(r) {
+	return !r.firewall && !r.antivirus && r.min_build === 0;
+}
+
 /* 이름은 줄 끝의 주석으로 들어간다. '#' 나 줄바꿈이 섞이면 파일 형식이 깨진다. */
 function wantLabel(v) {
 	if (v === undefined || v === null || v === '') {
@@ -203,7 +239,7 @@ function readDevices() {
 		const body = hash < 0 ? raw : raw.slice(0, hash);
 		const label = hash < 0 ? '' : raw.slice(hash + 1).trim();
 		const tok = body.trim().split(/\s+/).filter(Boolean);
-		const d = { requirements: { firewall: false, antivirus: false, min_build: 0 } };
+		const d = {};
 
 		if (tok.length === 0) {
 			return;
@@ -218,18 +254,9 @@ function readDevices() {
 		d.tunnel_ip = tok[2];
 		d.label = /^[A-Za-z0-9 _.-]{1,32}$/.test(label) ? label : '';
 
-		for (const t of tok.slice(3)) {
-			const m = /^min-build=(\d+)$/.exec(t);
-
-			if (t === 'firewall=on') {
-				d.requirements.firewall = true;
-			} else if (t === 'antivirus=on') {
-				d.requirements.antivirus = true;
-			} else if (m) {
-				d.requirements.min_build = Number(m[1]);
-			} else {
-				fail(`${DEVICE_FILE}: line ${i + 1}: unknown requirement '${t}'; fix it by hand first`);
-			}
+		d.requirements = parseReq(tok.slice(3));
+		if (d.requirements === null) {
+			fail(`${DEVICE_FILE}: line ${i + 1}: unknown requirement; fix it by hand first`);
 		}
 
 		devices.push(d);
@@ -247,14 +274,8 @@ function writeDevices(devices) {
 	];
 
 	for (const d of devices) {
-		const req = [];
-		let line;
+		let line = [d.id, d.key, d.tunnel_ip, ...reqTokens(d.requirements)].join(' ');
 
-		if (d.requirements.firewall) req.push('firewall=on');
-		if (d.requirements.antivirus) req.push('antivirus=on');
-		if (d.requirements.min_build > 0) req.push(`min-build=${d.requirements.min_build}`);
-
-		line = [d.id, d.key, d.tunnel_ip, ...req].join(' ');
 		if (d.label) {
 			line += `  # ${d.label}`;
 		}
@@ -290,7 +311,13 @@ function readAcl() {
 		const tok = raw.replace(/#.*/, '').trim().split(/\s+/).filter(Boolean);
 
 		if (tok.length >= 5) {
-			rules.push({ src: tok[0], dst: tok[1], proto: tok[2], dport: tok[3], action: tok[4] });
+			const rule = { src: tok[0], dst: tok[1], proto: tok[2], dport: tok[3], action: tok[4] };
+			const require = parseReq(tok.slice(5));
+
+			if (require !== null && !reqEmpty(require)) {
+				rule.require = require;
+			}
+			rules.push(rule);
 		}
 	}
 
@@ -689,7 +716,7 @@ const COMMANDS = {
 			enabled: rules !== null,
 			rules: rules || [],
 			restart_required: aclPending(running),
-			note: 'first matching rule wins; no match means deny. Applies to client -> server packets only. Rule changes apply without a restart; turning the ACL on or off needs server_restart.',
+			note: 'first matching rule wins; no match means deny. An allow rule with a require denies the packet when the last reported posture of the session falls short (later rules are not tried). Applies to client -> server packets only. Rule changes apply without a restart; turning the ACL on or off needs server_restart.',
 		};
 	},
 
@@ -714,7 +741,12 @@ const COMMANDS = {
 			if (!isPort(dport)) fail(`rule ${i}: bad dport '${dport}' (n, lo-hi, any)`);
 			if (r.action !== 'allow' && r.action !== 'deny') fail(`rule ${i}: action must be allow or deny`);
 
-			lines.push([r.src, r.dst, r.proto, dport, r.action].join(' '));
+			const require = wantRequirements(r.require);
+			if (r.action === 'deny' && !reqEmpty(require)) {
+				fail(`rule ${i}: require is only for allow rules`);
+			}
+
+			lines.push([r.src, r.dst, r.proto, dport, r.action, ...reqTokens(require)].join(' '));
 		});
 
 		writeAtomic(ACL_FILE, lines.join('\n') + '\n');

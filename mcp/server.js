@@ -161,7 +161,7 @@ server.registerTool('acl_get', {
 }, () => call('acl_get'));
 
 server.registerTool('acl_set', {
-	description: 'Replace the whole ACL. Rules are checked top to bottom, the first match wins, and a packet matching no rule is denied. Applied from the next packet if the server is already running with an ACL; if it was started without one, restart_required comes back true and server_restart turns it on.',
+	description: 'Replace the whole ACL: which destinations an admitted device may reach, optionally with a stricter posture per destination than the device needs to connect. Rules are checked top to bottom, the first match wins, and a packet matching no rule is denied. Applied from the next packet if the server is already running with an ACL; if it was started without one, restart_required comes back true and server_restart turns it on.',
 	inputSchema: {
 		rules: z.array(z.object({
 			src: z.string().describe('a.b.c.d, a.b.c.d/n or "any"'),
@@ -169,6 +169,7 @@ server.registerTool('acl_set', {
 			proto: z.string().describe('"icmp", "tcp", "udp", "any" or a protocol number'),
 			dport: z.string().optional().describe('"n", "lo-hi" or "any" (tcp/udp only; default "any")'),
 			action: z.enum(['allow', 'deny']),
+			require: requirements.optional().describe('allow rules only: posture a session must currently report to be allowed by this rule, e.g. SSH only from devices with the firewall on. If the rule matches but the posture falls short the packet is denied; later rules are not tried.'),
 		}).strict()).min(1).max(32),
 	},
 	annotations: DISRUPT,
