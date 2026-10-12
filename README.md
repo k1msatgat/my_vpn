@@ -23,6 +23,7 @@ Zero Trust Network Access(ZTNA)의 기반 구조를 학습하는 것을 목표�
 |---|---|
 | 이 문서 | 설계 — 와이어 프로토콜, 패킷 흐름, 보안 모델, 로드맵 |
 | [docs/linux.md](docs/linux.md) | Linux 서버·클라이언트 빌드와 실행, 시나리오 테스트, ACL |
+| [docs/mcp.md](docs/mcp.md) | MCP 서버 — AI 클라이언트가 Linux 서버를 올리고 내리고, 기기·ACL을 바꾸고, 상태를 본다 |
 | [windows/README.md](windows/README.md) | Windows 클라이언트 — Wintun, 이벤트 루프, MFC GUI와 패킷 분석기 |
 
 프로토콜 코드(`lib/common`의 `proto.h` / `proto.c`)는 Linux와 Windows가 같은 소스를 빌드합니다.
@@ -256,8 +257,15 @@ my_vpn/
 │   ├── client.sh          # 클라이언트 실행 / idle·stop·restart 시나리오
 │   ├── auth_check.py      # 서버의 기기 인증 / 포스처 / 지속 검증을 패킷 수준에서 확인
 │   └── devices.conf.example  # 기기 목록 형식 (실제 devices.conf 는 커밋하지 않는다)
+├── mcp/                   # Linux 서버를 제어하는 MCP 서버 (Node.js)
+│   ├── server.js          #   MCP(stdio) — 도구 선언, 권한 없음
+│   ├── ctl.cjs            #   root 헬퍼 — 서비스 제어, 기기 목록 / ACL 편집, 로그에서 세션 계산
+│   ├── my_vpn.service     #   systemd 유닛
+│   ├── service.sh         #   유닛이 부르는 실행 / tun 설정 스크립트
+│   └── install.sh, uninstall.sh
 ├── docs/
-│   └── linux.md           # Linux 빌드·실행·테스트, ACL
+│   ├── linux.md           # Linux 빌드·실행·테스트, ACL
+│   └── mcp.md             # MCP 서버의 구조, 설치, 도구
 └── Makefile               # 컴포넌트별 bin/ 분리 빌드, 의존성 자동 추적
 ```
 
@@ -347,3 +355,4 @@ my_vpn/
 | AI 작성 | ZTNA 확장의 Windows 쪽 — `core/posture.c`(포스처 수집), `core/device.c`(기기 신원), `core/hmac.c`, `core/tunnel.c`의 인증 핸드셰이크와 지속 검증, GUI의 포스처 탭과 기기 등록 창, `windows/test/mock_server.py` |
 | AI 작성 | ZTNA 확장의 서버 쪽 — `server/src/auth.c`, `server/src/device.c`, `server.c`의 `handle_request` / `handle_auth` / `handle_keepalive` / `send_deny`와 SIGHUP 처리, `peer.c`의 `peer_drop`, `test/auth_check.py`. 목표 직무가 Windows 클라이언트라 서버 쪽 확장은 AI에게 맡겼고, 기존 서버 로직(피어 테이블, 데이터 경로, ACL)은 그대로 직접 구현한 것 |
 | AI 작성 | `proto.h` / `proto.c`의 인증·포스처 메시지 정의와 `posture_encode` / `posture_decode`. 메시지 흐름은 AI가 제안하고 검토 후 채택 |
+| AI 작성 | `mcp/` MCP 서버 전체 — `server.js`(도구 선언), `ctl.cjs`(root 헬퍼), systemd 유닛, 설치 스크립트, `docs/mcp.md` |
