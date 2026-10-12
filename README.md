@@ -251,8 +251,10 @@ my_vpn/
 │   │   └── vpn_session.{h,c}  # 워커 스레드 + 패킷 링버퍼 + PostMessage 마셜링
 │   ├── cli/               #   콘솔 클라이언트 (main.c) — 자동 테스트 대상
 │   ├── gui/               #   MFC 다이얼로그
-│   │   ├── MainDlg.{h,cpp}      # 가상 리스트, 상세창, 포스처 탭, 레이아웃
+│   │   ├── MainDlg.{h,cpp}      # 가상 리스트, 상세창, 포스처 탭, 레이아웃, 바탕 그리기
 │   │   ├── EnrollDlg.{h,cpp}    # 기기 등록 창 (ID · 키 1회 표시)
+│   │   ├── ui_theme.{h,cpp}     # 색 · 글꼴 · 둥근 사각형 (순수 Win32 + GDI+)
+│   │   ├── ui_controls.{h,cpp}  # 직접 그리는 버튼과 탭 줄 (순수 Win32)
 │   │   ├── PacketStore.{h,cpp}  # 패킷 보관 / 필터 / 집계
 │   │   └── vpn_gui.rc
 │   └── test/
@@ -373,3 +375,4 @@ my_vpn/
 | AI 작성 | `proto.h` / `proto.c`의 인증·포스처 메시지 정의와 `posture_encode` / `posture_decode`. 메시지 흐름은 AI가 제안하고 검토 후 채택 |
 | AI 작성 | 서버의 ZTNA 확장 (2차) — `server/src/policy.c`, `server/src/status.c`, `alc.c`의 다시 읽기(임시 표)와 규칙별 포스처 조건 / 줄 형식 검사, `server.c`의 nonce 재사용과 상태 소켓 연결 / 카운터, `peer.c`의 단조 시계와 세션별 카운터. ACL의 매칭 로직과 피어 테이블의 구조는 직접 구현한 것 그대로 |
 | AI 작성 | `mcp/` MCP 서버 전체 — `server.js`(도구 선언), `ctl.cjs`(root 헬퍼), systemd 유닛, 설치 스크립트, `docs/mcp.md` |
+| AI 작성 | GUI 재설계 — `gui/ui_theme.cpp`, `gui/ui_controls.cpp`, `MainDlg`의 배치와 그리기, `EnrollDlg`의 그리기, `vpn_gui.rc`, 앱 아이콘(`windows/tools/mkicon.py`). Linux 장비에서 작성해 Windows 빌드는 아직 확인하지 못함 |
