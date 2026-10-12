@@ -193,6 +193,11 @@ device_t *device_find(const uint8_t id[DEVICE_ID_LEN])
 	return NULL;
 }
 
+int device_count(void)
+{
+	return ndevices;
+}
+
 /* 키는 찍지 않는다. 로그는 설정 파일보다 넓게 읽힌다. */
 void device_dump(void)
 {

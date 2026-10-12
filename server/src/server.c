@@ -16,6 +16,7 @@
 #include "acl.h"
 #include "auth.h"
 #include "device.h"
+#include "status.h"
 
 #define MAX_EVENTS 8
 
@@ -53,6 +54,10 @@ static void send_deny(int32_t sock, const struct sockaddr_in *dst, socklen_t dst
 
 	off = msg_encode(res, sizeof(res), &msg_header);
 	res[off++] = reason;
+
+	if (reason <= DENY_POSTURE) {
+		stats.deny[reason]++;
+	}
 
 	if (sendto(sock, res, off, 0, (const struct sockaddr *)dst, dstlen) < 0) {
 		perror("sendto deny");
@@ -202,6 +207,7 @@ static void handle_auth(int32_t sock, const uint8_t *packet, int32_t n,
 
 	memcpy(peer->device_id, dev->id, DEVICE_ID_LEN);
 	peer->posture = posture;
+	stats.handshake_ok++;
 
 	printf("[HS] device %s authenticated as %s (build=%u firewall=%u antivirus=%u)\n",
 			ids, ip_str(tun_ip, ib), posture.os_build, posture.firewall, posture.antivirus);
@@ -258,6 +264,7 @@ static void handle_keepalive(int32_t sock, peer_t *peer, const uint8_t *packet, 
 
 	if (n < (int32_t)(KA_SIGNED_LEN + AUTH_MAC_LEN)) {
 		printf("[drop] keepalive without posture (%d bytes)\n", n);
+		stats.keepalive_dropped++;
 		return;
 	}
 
@@ -277,6 +284,7 @@ static void handle_keepalive(int32_t sock, peer_t *peer, const uint8_t *packet, 
 	if (auth_hmac(dev->key, packet, KA_SIGNED_LEN, mac) < 0 ||
 			!auth_mac_equal(mac, packet + KA_SIGNED_LEN)) {
 		printf("[drop] keepalive bad mac idx=%08x\n", peer->session_idx);
+		stats.keepalive_dropped++;
 		return;
 	}
 
@@ -286,6 +294,7 @@ static void handle_keepalive(int32_t sock, peer_t *peer, const uint8_t *packet, 
 	if (peer->ka_seen && data_header.counter <= peer->ka_counter) {
 		printf("[drop] keepalive replayed counter %llu idx=%08x\n",
 				(unsigned long long)data_header.counter, peer->session_idx);
+		stats.keepalive_dropped++;
 		return;
 	}
 	peer->ka_counter = data_header.counter;
@@ -318,6 +327,9 @@ int main(int argc, char *argv[])
 	int epfd = -1, nev, i;
 	int acl_enabled = 0;
 	int verdict;
+	int opt;
+	int status_fd = -1;
+	const char *status_path = NULL;
 	int nd;
 	struct epoll_event ev, events[MAX_EVENTS];
 	struct sockaddr_in local_addr;
@@ -341,8 +353,23 @@ int main(int argc, char *argv[])
 		return auth_selftest();
 	}
 
+	while ((opt = getopt(argc, argv, "s:")) != -1) {
+		if (opt != 's') {
+			argc = 0;
+			break;
+		}
+		status_path = optarg;
+	}
+
+	/* 옵션을 걷어내고 나머지 인자가 다시 argv[1] 부터 오게 한다. */
+	if (argc != 0) {
+		argv[optind - 1] = argv[0];
+		argv += optind - 1;
+		argc -= optind - 1;
+	}
+
 	if (argc != 3 && argc != 4) {
-		fprintf(stderr, "usage: %s <port> <device-file> [acl-file]\n", argv[0]);
+		fprintf(stderr, "usage: %s [-s status-socket] <port> <device-file> [acl-file]\n", argv[0]);
 		fprintf(stderr, "       %s selftest\n", argv[0]);
 		return 1;
 	}
@@ -424,6 +451,20 @@ int main(int argc, char *argv[])
 		perror("epoll_ctl: sock"); goto out;
 	}
 
+	if (status_path != NULL) {
+		status_fd = status_listen(status_path);
+		if (status_fd < 0) {
+			goto out;
+		}
+
+		ev.events  = EPOLLIN;
+		ev.data.fd = status_fd;
+		if (epoll_ctl(epfd, EPOLL_CTL_ADD, status_fd, &ev) < 0) {
+			perror("epoll_ctl: status_fd"); goto out;
+		}
+		printf("status socket: %s\n", status_path);
+	}
+
 	printf("epoll ready (epfd=%d, tun_fd=%d, sock=%d)\n", epfd, tun_fd, sock);
 
 	while (running) {
@@ -480,7 +521,10 @@ int main(int argc, char *argv[])
 				continue;
 			}
 
-			if (fd == sock) {
+			if (fd == status_fd) {
+				status_serve(status_fd, acl_enabled);
+			}
+			else if (fd == sock) {
 				srclen = sizeof(src);
 				n = recvfrom(sock, packet, sizeof(packet), 0,
 						(struct sockaddr *)&src, &srclen);
@@ -507,6 +551,7 @@ int main(int argc, char *argv[])
 				peer = peer_find_idx(msg_header.session_idx);
 				if (peer == NULL) {
 					printf("[drop] unknown session_idx[%08x]\n", msg_header.session_idx);
+					stats.unknown_session++;
 					continue;
 				}
 
@@ -537,6 +582,7 @@ int main(int argc, char *argv[])
 
 				if (inner.s_addr != peer->inner.s_addr) {
 					printf("[drop] spoofed src %s for idx %08x\n", ip_str(inner, ib), peer->session_idx);
+					stats.spoofed_src++;
 					continue;
 				}
 
@@ -546,7 +592,10 @@ int main(int argc, char *argv[])
 					printf("[deny] %s -> %s proto=%d (%d bytes)",
 							ip_str(inner, ib), ip_str(inner_dst, ob),
 							ip[IP_PROTO_OFF], n);
+					stats.acl_denied++;
+					peer->acl_denied++;
 					if (verdict == ACL_DENY_POSTURE) {
+						stats.acl_denied_posture++;
 						printf(" posture below the rule (build=%u firewall=%u antivirus=%u)",
 								peer->posture.os_build, peer->posture.firewall,
 								peer->posture.antivirus);
@@ -556,6 +605,8 @@ int main(int argc, char *argv[])
 				}
 
 				peer_touch(peer, &src, srclen);
+				peer->rx_packets++;
+				peer->rx_bytes += (uint64_t)n;
 
 				printf("[udp->tun] %d bytes from %s:%d (inner src %s), icmp type=%d\n",
 						n, ip_str(src.sin_addr, ob), ntohs(src.sin_port),
@@ -595,6 +646,8 @@ int main(int argc, char *argv[])
 				msg_header.type = MSG_TYPE_DATA;
 				msg_header.session_idx = peer->session_idx;
 				data_header.counter = peer->tx_counter++;
+				peer->tx_packets++;
+				peer->tx_bytes += (uint64_t)n;
 
 				off = msg_encode(packet, sizeof(packet), &msg_header);
 				off += data_encode(packet + off, sizeof(packet) - off, &data_header);
@@ -612,6 +665,10 @@ int main(int argc, char *argv[])
 out:
 	if (epfd >= 0) {
 		close(epfd);
+	}
+	if (status_fd >= 0) {
+		close(status_fd);
+		unlink(status_path);
 	}
 	close(sock);
 	close(tun_fd);

@@ -22,6 +22,15 @@ typedef struct peer {
     socklen_t outer_len;
     time_t last_seen;	/* CLOCK_MONOTONIC 초 */
 
+    time_t established_at;	/* CLOCK_MONOTONIC 초 */
+
+    /* 터널로 오간 데이터 패킷. rx 는 클라이언트 -> 서버(ACL 을 통과한 것만), tx 는 반대. */
+    uint64_t rx_packets;
+    uint64_t rx_bytes;
+    uint64_t tx_packets;
+    uint64_t tx_bytes;
+    uint64_t acl_denied;
+
     /* 이 세션을 연 기기. 포인터가 아니라 ID 로 들고 있다가 쓸 때마다 목록에서 찾는다.
      * 목록에서 지워진 기기는 다음 keepalive 에서 찾지 못해 세션이 끊긴다. */
     uint8_t device_id[DEVICE_ID_LEN];
@@ -44,5 +53,8 @@ peer_t *peer_find_idx(uint32_t idx);
 void peer_drop(peer_t *peer);
 peer_t *peer_lookup(struct in_addr inner);
 void peer_dump(void);
+
+/* slot i 의 세션. 비어 있으면 NULL. 상태를 내보낼 때 표를 훑는 데 쓴다. */
+const peer_t *peer_at(int i);
 
 #endif

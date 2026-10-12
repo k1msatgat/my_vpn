@@ -281,6 +281,11 @@ static int mask_bits(struct in_addr mask)
 	return n;
 }
 
+int acl_count(void)
+{
+	return nrules;
+}
+
 void acl_dump(void)
 {
 	char a[INET_ADDRSTRLEN], b[INET_ADDRSTRLEN];

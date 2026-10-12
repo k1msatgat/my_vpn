@@ -124,6 +124,7 @@ peer_t *peer_register(struct in_addr inner, const struct sockaddr_in *outer, soc
 	peer->outer = *outer;
 	peer->outer_len = len;
 	peer->last_seen = mono_now();
+	peer->established_at = peer->last_seen;
 
 	printf("[peer] register %s <- %s:%d idx=%08x\n",
 			ip4(inner, ib), ip4(outer->sin_addr, ob),
@@ -156,6 +157,15 @@ peer_t *peer_lookup(struct in_addr inner)
 			return &peers[i];
 	}
 	return NULL;
+}
+
+const peer_t *peer_at(int i)
+{
+	if (i < 0 || i >= MAX_PEERS || !peers[i].used) {
+		return NULL;
+	}
+
+	return &peers[i];
 }
 
 void peer_dump(void)

@@ -38,5 +38,6 @@ int  acl_load(const char *path);
 /* posture 는 이 패킷을 보낸 세션이 마지막으로 보고한 값이다. */
 int  acl_check(const unsigned char *pkt, int len, const posture_report_t *posture);
 void acl_dump(void);
+int  acl_count(void);
 
 #endif /* ACL_H */

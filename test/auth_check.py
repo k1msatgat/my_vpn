@@ -12,6 +12,7 @@ TUN 을 만들고 주소를 붙여야 해서 root 로 돌린다.
 """
 
 import hashlib
+import json
 import hmac
 import os
 import signal
@@ -406,7 +407,8 @@ class Server:
 
     def __init__(self, *args):
         self.log = tempfile.TemporaryFile()
-        self.proc = subprocess.Popen(["stdbuf", "-oL", SERVER, str(PORT)] + list(args),
+        self.status_path = tempfile.mktemp(prefix="vpn_status.", suffix=".sock")
+        self.proc = subprocess.Popen(["stdbuf", "-oL", SERVER, "-s", self.status_path, str(PORT)] + list(args),
                                      stdout=self.log, stderr=subprocess.STDOUT)
         time.sleep(0.7)
         if self.proc.poll() is not None:
@@ -421,9 +423,24 @@ class Server:
         self.proc.send_signal(signal.SIGHUP)
         time.sleep(1.5)
 
+    def status(self):
+        """상태 소켓에 접속해 서버가 쓰는 JSON 을 끝까지 읽는다."""
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(2.0)
+        s.connect(self.status_path)
+        buf = b""
+        while True:
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+        s.close()
+        return json.loads(buf.decode())
+
     def stop(self):
         self.proc.terminate()
         self.proc.wait()
+        self.socket_left = os.path.exists(self.status_path)
 
 
 def udp_packet(src, dst, dport, ident):
@@ -508,6 +525,96 @@ def acl_tests(srv, acl_path):
     expect("posture from the handshake, firewall off", verdict(udp(53), r[1]), "denied")
 
 
+def status_tests(srv):
+    """상태 소켓이 서버의 피어 테이블과 판정 횟수를 그대로 보여 주는지. ACL 을 켠 서버로 돌린다."""
+    global failed
+    c = Client()
+    server_ip = socket.inet_aton("10.0.0.1")
+
+    def expect(name, got, want):
+        global failed
+        ok = got == want
+        print("%-4s %-52s %s%s" % ("ok" if ok else "FAIL", name, got, "" if ok else "   (want %s)" % (want,)))
+        failed += not ok
+
+    def find(st, ip):
+        return next((s for s in st["sessions"] if s["tunnel_ip"] == ip), None)
+
+    mode = os.stat(srv.status_path).st_mode & 0o777
+    expect("status: socket file mode", "%03o" % mode, "600")
+
+    # 앞의 검사들이 남긴 세션을 지우고 시작한다 (규칙은 icmp 만 허용).
+    with open(srv.acl_path, "w") as f:
+        f.write("10.0.0.0/24 10.0.0.1 icmp any allow\n")
+    srv.reload()
+    before = srv.status()
+
+    idx = session(c)
+    st = srv.status()
+    s = find(st, "10.0.0.3")
+    expect("status: the new session is listed", s is not None and s["device_id"], DEV_ID.hex())
+    expect("status: session idx", s and s["session_idx"], "%08x" % idx)
+    expect("status: posture from the handshake", s and s["posture"],
+           {"os_build": 26200, "firewall": "on", "antivirus": "on"})
+    expect("status: handshake_ok counted",
+           st["counters"]["handshake_ok"] - before["counters"]["handshake_ok"], 1)
+
+    c.send(keepalive(idx, 0, post=posture(firewall=STATE_OFF)))
+    c.recv()
+    s = find(srv.status(), "10.0.0.3")
+    expect("status: posture follows the keepalive", s and s["posture"]["firewall"], "off")
+
+    c.send(data(idx, 0, echo_request(TUN_IP, server_ip, 900)))
+    c.recv()
+    c.send(data(idx, 1, udp_packet(TUN_IP, server_ip, 53, 901)))
+    time.sleep(0.3)
+    st = srv.status()
+    s = find(st, "10.0.0.3")
+    expect("status: one packet in, one out, one denied",
+           s and (s["rx_packets"], s["tx_packets"], s["acl_denied"]), (1, 1, 1))
+    expect("status: acl_denied counted",
+           st["counters"]["acl_denied"] - before["counters"]["acl_denied"], 1)
+
+    c.handshake(key=bytes(32))
+    c.send(keepalive(idx, 1, key=bytes(32)))
+    c.recv()
+    st = srv.status()
+    expect("status: bad auth and forged keepalive counted",
+           (st["counters"]["deny_bad_auth"] - before["counters"]["deny_bad_auth"],
+            st["counters"]["keepalive_dropped"] - before["counters"]["keepalive_dropped"]), (1, 1))
+    expect("status: the forged keepalive did not touch the session",
+           find(st, "10.0.0.3")["session_idx"], "%08x" % idx)
+
+    sidx = session(c, strict_dev=True)
+    expect("status: two sessions", len(srv.status()["sessions"]), 2)
+    c.send(keepalive(sidx, 0, key=DEV2_KEY, post=posture(firewall=STATE_OFF)))
+    c.recv()
+    st = srv.status()
+    expect("status: the dropped session is gone", find(st, "10.0.0.4"), None)
+    expect("status: the other one stays", find(st, "10.0.0.3") is not None, True)
+
+    # 읽지 않고 끊는 접속, 줄지어 오는 접속에도 서버는 터널을 계속 나른다.
+    for _ in range(50):
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.connect(srv.status_path)
+        s.close()
+    check("status: server still answers after 50 abandoned connections",
+          (c.send(keepalive(idx, 2)), c.recv())[1], "KEEPALIVE")
+
+    # 접속한 쪽이 보낸 것은 읽지 않는다.
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(2.0)
+    s.connect(srv.status_path)
+    try:
+        s.sendall(b"drop 10.0.0.3\n")
+        while s.recv(65536):
+            pass
+    except (BrokenPipeError, ConnectionResetError):
+        pass            # 서버는 쓰자마자 닫는다. 보내기도 전에 닫혀 있을 수 있다.
+    s.close()
+    expect("status: input on the socket is ignored", find(srv.status(), "10.0.0.3") is not None, True)
+
+
 def acl_loader_tests(dev_path):
     """ACL 파일의 실수를 조용히 넘기지 않는지. 서버는 tun 을 만들기 전에 끝난다."""
     global failed
@@ -559,11 +666,17 @@ def main():
         # ACL 을 켜고 다시 띄운다.
         write_devices(path, LINE1, LINE2)
         srv = Server(path, acl_path)
+        srv.acl_path = acl_path
         try:
             acl_tests(srv, acl_path)
+            status_tests(srv)
         finally:
             srv.stop()
             logs.append(srv.text())
+        global failed
+        print("%-4s %-52s %s" % ("FAIL" if srv.socket_left else "ok", "status: socket file removed on exit",
+                                 "left behind" if srv.socket_left else "removed"))
+        failed += srv.socket_left
     finally:
         os.unlink(path)
         os.unlink(acl_path)

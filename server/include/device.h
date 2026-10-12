@@ -62,4 +62,6 @@ const char *device_id_str(const uint8_t id[DEVICE_ID_LEN], char *dst);
 
 void device_dump(void);
 
+int device_count(void);
+
 #endif

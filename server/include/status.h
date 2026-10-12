@@ -1,0 +1,37 @@
+#ifndef STATUS_H
+#define STATUS_H
+
+/* 서버의 상태를 밖에서 읽는 창구.
+ *
+ * 서버가 아는 것(누가 붙어 있는가, 무엇을 얼마나 거절했는가)은 지금까지 로그로만
+ * 나갔다. 로그는 일어난 일의 기록이지 지금의 상태가 아니라서, "현재 세션"을 알려면
+ * register / drop / expire 를 처음부터 따라가며 다시 계산해야 했다.
+ *
+ * 유닉스 소켓 하나를 열어 두고, 접속하면 JSON 한 덩어리를 쓰고 닫는다. 읽기 전용이다
+ * — 접속한 쪽이 보낸 것은 읽지 않으므로 이 소켓으로 서버에 시킬 수 있는 일이 없다.
+ * 누가 읽을 수 있는지는 소켓 파일의 권한(600)이 정한다.
+ */
+
+#include <stdint.h>
+
+#include "proto.h"
+
+typedef struct server_stats {
+	uint64_t handshake_ok;
+	uint64_t deny[DENY_POSTURE + 1];	/* DENY 사유별. 핸드셰이크와 세션 중 거절을 합친 값 */
+	uint64_t keepalive_dropped;		/* mac 불일치, 예전 counter, 짧은 keepalive */
+	uint64_t unknown_session;
+	uint64_t spoofed_src;
+	uint64_t acl_denied;
+	uint64_t acl_denied_posture;
+} server_stats_t;
+
+extern server_stats_t stats;
+
+/* path 에 소켓을 만들고 듣는다. 성공하면 fd, 실패하면 -1. */
+int status_listen(const char *path);
+
+/* 기다리던 접속 하나를 받아 상태를 쓰고 닫는다. */
+void status_serve(int lfd, int acl_enabled);
+
+#endif
