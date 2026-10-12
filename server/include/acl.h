@@ -23,6 +23,8 @@ struct acl_rule {
 };
 
 void acl_init(void);
+/* 읽은 규칙 수를 돌려준다. 파일을 못 읽거나 형식이 틀리면 -1 이고, 그때는 이전에
+ * 읽어 둔 규칙이 그대로 남는다. */
 int  acl_load(const char *path);
 int  acl_check(const unsigned char *pkt, int len);
 void acl_dump(void);

@@ -73,6 +73,15 @@ class Client:
         version, msg_type, _, idx = struct.unpack("!BBHI", pkt[:8])
         return msg_type, idx, pkt[8:]
 
+    def drain(self):
+        self.sock.setblocking(False)
+        try:
+            while True:
+                self.sock.recvfrom(2048)
+        except BlockingIOError:
+            pass
+        self.sock.settimeout(1.0)
+
     def request(self, dev_id=DEV_ID, tun_ip=TUN_IP):
         self.send(header(REQ_HANDSHAKE) + tun_ip + dev_id)
         return self.recv()
@@ -392,6 +401,85 @@ def loader_tests():
     failed += not ok
 
 
+class Server:
+    """vpn_server 한 개. 로그는 임시 파일로 받아 두고, 테스트가 그 안에서 서버의 판정을 읽는다."""
+
+    def __init__(self, *args):
+        self.log = tempfile.TemporaryFile()
+        self.proc = subprocess.Popen(["stdbuf", "-oL", SERVER, str(PORT)] + list(args),
+                                     stdout=self.log, stderr=subprocess.STDOUT)
+        time.sleep(0.7)
+        if self.proc.poll() is not None:
+            sys.exit("server failed to start:\n" + self.text())
+        setup_tun(self.log)
+
+    def text(self):
+        self.log.seek(0)
+        return self.log.read().decode()
+
+    def reload(self):
+        self.proc.send_signal(signal.SIGHUP)
+        time.sleep(1.5)
+
+    def stop(self):
+        self.proc.terminate()
+        self.proc.wait()
+
+
+def udp_packet(src, dst, dport, ident):
+    """IPv4 + UDP 한 개. 서버의 ACL 판정만 볼 것이라 받는 쪽은 없어도 된다."""
+    udp = struct.pack("!HHHH", 40000, dport, 8 + 4, 0) + b"acl?"
+    ip = struct.pack("!BBHHHBBH4s4s", 0x45, 0, 20 + len(udp), ident, 0, 64, 17, 0, src, dst)
+    return ip[:10] + struct.pack("!H", checksum(ip)) + ip[12:] + udp
+
+
+def acl_tests(srv, acl_path):
+    """ACL 을 서버를 끄지 않고 바꾼다 (kill -HUP). 판정은 서버 로그에서 읽는다 —
+    통과한 패킷은 [udp->tun], 막힌 패킷은 [deny] 로 찍힌다."""
+    c = Client()
+    server_ip = socket.inet_aton("10.0.0.1")
+    seq = [100]
+
+    def verdict(inner, idx):
+        seq[0] += 1
+        before = len(srv.text())
+        c.send(data(idx, seq[0], inner))
+        time.sleep(0.3)
+        c.drain()       # 통과한 패킷에는 서버의 커널이 답한다. 다음 검사가 그걸 읽지 않게 비운다.
+        new = srv.text()[before:]
+        return "denied" if "[deny]" in new else "passed" if "[udp->tun]" in new else "no trace"
+
+    def expect(name, got, want):
+        global failed
+        ok = got == want
+        print("%-4s %-52s %s%s" % ("ok" if ok else "FAIL", name, got, "" if ok else "   (want %s)" % want))
+        failed += not ok
+
+    def rules(*lines):
+        with open(acl_path, "w") as f:
+            f.write("\n".join(lines) + "\n")
+        srv.reload()
+
+    ping = lambda: echo_request(TUN_IP, server_ip, seq[0])
+    udp = lambda port: udp_packet(TUN_IP, server_ip, port, seq[0])
+
+    idx = session(c)
+    expect("acl: icmp allowed by the starting rules", verdict(ping(), idx), "passed")
+    expect("acl: udp/53 not in the starting rules", verdict(udp(53), idx), "denied")
+
+    rules("10.0.0.0/24 10.0.0.1 udp 53 allow")
+    expect("acl reloaded: udp/53 now allowed", verdict(udp(53), idx), "passed")
+    expect("acl reloaded: icmp no longer allowed", verdict(ping(), idx), "denied")
+    check("acl reloaded: the session itself stays open",
+          (c.send(keepalive(idx, 0)), c.recv())[1], "KEEPALIVE")
+
+    rules("10.0.0.0/24 10.0.0.1 udp 53 deny", "10.0.0.0/24 10.0.0.1 icmp any allow", "any any any any allwo")
+    expect("broken acl file: previous rules stay (udp/53)", verdict(udp(53), idx), "passed")
+    expect("broken acl file: previous rules stay (icmp)", verdict(ping(), idx), "denied")
+    ok = "acl: reload failed, keeping the previous rules" in srv.text()
+    expect("broken acl file: the server says so", "logged" if ok else "silent", "logged")
+
+
 def main():
     if os.geteuid() != 0:
         sys.exit("run as root: sudo python3 test/auth_check.py")
@@ -399,31 +487,41 @@ def main():
     fd, path = tempfile.mkstemp(prefix="devices.", suffix=".conf")
     with os.fdopen(fd, "w") as f:      # mkstemp 는 0600 으로 만든다
         f.write(LINE1 + "\n" + LINE2 + "\n")
+    fd, acl_path = tempfile.mkstemp(prefix="acl.", suffix=".conf")
+    with os.fdopen(fd, "w") as f:
+        f.write("10.0.0.0/24 10.0.0.1 icmp any allow\n")
 
     loader_tests()
 
-    log = tempfile.TemporaryFile()
-    srv = subprocess.Popen(["stdbuf", "-oL", SERVER, str(PORT), path], stdout=log, stderr=subprocess.STDOUT)
+    logs = []
     try:
-        time.sleep(0.7)
-        if srv.poll() is not None:
-            log.seek(0)
-            sys.exit("server failed to start:\n" + log.read().decode())
-        setup_tun(log)
-        handshake_tests()
-        disruption_tests()
-        posture_tests()
-        keepalive_tests()
-        data_tests()
-        reload_tests(srv, path)
+        # ACL 없이: 인증된 세션의 패킷은 모두 통과한다.
+        srv = Server(path)
+        try:
+            handshake_tests()
+            disruption_tests()
+            posture_tests()
+            keepalive_tests()
+            data_tests()
+            reload_tests(srv.proc, path)
+        finally:
+            srv.stop()
+            logs.append(srv.text())
+
+        # ACL 을 켜고 다시 띄운다.
+        write_devices(path, LINE1, LINE2)
+        srv = Server(path, acl_path)
+        try:
+            acl_tests(srv, acl_path)
+        finally:
+            srv.stop()
+            logs.append(srv.text())
     finally:
-        srv.terminate()
-        srv.wait()
         os.unlink(path)
+        os.unlink(acl_path)
 
     if "-v" in sys.argv:
-        log.seek(0)
-        print("\n--- server log\n" + log.read().decode())
+        print("\n--- server log\n" + "\n--- server log (acl)\n".join(logs))
     print("\n%s" % ("all passed" if not failed else "%d FAILED" % failed))
     sys.exit(1 if failed else 0)
 

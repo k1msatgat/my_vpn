@@ -10,6 +10,13 @@
 static struct acl_rule rules[MAX_RULES];
 static int             nrules;
 
+/* 파일은 여기에 먼저 읽고, 끝까지 문제없을 때만 위의 표로 옮긴다 (device.c 와 같다).
+ * 서버가 도는 중에 다시 읽다가 중간 줄에서 실패하면, 앞의 몇 줄만 들어간 표가 남는다.
+ * 기본이 거부라 대개는 닫히는 쪽이지만, 뒤에 있던 deny 가 빠지고 넓은 allow 만 남는
+ * 경우에는 열린다. */
+static struct acl_rule staged[MAX_RULES];
+static int             nstaged;
+
 void acl_init(void)
 {
 	memset(rules, 0, sizeof(rules));
@@ -116,7 +123,7 @@ int acl_load(const char *path)
 		perror("fopen acl"); return -1;
 	}
 
-	acl_init();
+	nstaged = 0;
 
 	while (fgets(line, sizeof(line), fp) != NULL) {
 		struct acl_rule *r;
@@ -134,13 +141,14 @@ int acl_load(const char *path)
 			continue;
 		}
 
-		if (nrules >= MAX_RULES) {
+		if (nstaged >= MAX_RULES) {
 			fprintf(stderr, "acl: too many rules (max %d)\n", MAX_RULES);
 			fclose(fp);
 			return -1;
 		}
 
-		r = &rules[nrules];
+		r = &staged[nstaged];
+		memset(r, 0, sizeof(*r));
 
 		if (parse_cidr(s_src, &r->src_addr, &r->src_mask) < 0 ||
 				parse_cidr(s_dst, &r->dst_addr, &r->dst_mask) < 0 ||
@@ -163,10 +171,14 @@ int acl_load(const char *path)
 			return -1;
 		}
 
-		nrules++;
+		nstaged++;
 	}
 
 	fclose(fp);
+
+	memcpy(rules, staged, sizeof(rules));
+	nrules = nstaged;
+
 	return nrules;
 }
 

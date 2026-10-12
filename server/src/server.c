@@ -432,13 +432,29 @@ int main(int argc, char *argv[])
 
 		peer_check_expired();
 
-		/* kill -HUP 으로 기기 목록을 다시 읽는다. 서버를 내렸다 올리면 모든 세션이
-		 * 끊기지만, 이렇게 하면 정책을 바꾸거나 기기 하나를 지우는 동안 나머지는
-		 * 그대로 붙어 있다. 열려 있는 세션은 건드리지 않는다 — 다음 keepalive 가
-		 * 새 목록에 대 보고 걸러진다. epoll_wait 의 타임아웃이 1초라 시그널을 받고
-		 * 늦어도 1초 안에 여기에 온다. */
+		/* kill -HUP 으로 기기 목록과 ACL 을 다시 읽는다. 서버를 내렸다 올리면 모든
+		 * 세션이 끊기지만, 이렇게 하면 정책을 바꾸거나 기기 하나를 지우는 동안
+		 * 나머지는 그대로 붙어 있다. 열려 있는 세션은 건드리지 않는다 — 다음
+		 * keepalive 가 새 목록에 대 보고 걸러진다. epoll_wait 의 타임아웃이 1초라
+		 * 시그널을 받고 늦어도 1초 안에 여기에 온다. */
 		if (reload_requested) {
 			reload_requested = 0;
+
+			/* ACL 은 패킷마다 대 보므로 다음 패킷부터 바로 새 규칙이다. 시작할 때
+			 * 규칙 파일을 주지 않은 서버는 다시 읽어도 ACL 이 켜지지 않는다. 파일이
+			 * 생겼다고 도중에 켜면, 파일이 사라졌을 때 끄는 것도 받아 줘야 하고 그건
+			 * 설정 실수 하나로 전부 열리는 길이다. */
+			if (acl_enabled) {
+				int nr = acl_load(argv[3]);
+				if (nr < 0) {
+					printf("acl: reload failed, keeping the previous rules\n");
+				}
+				else {
+					printf("acl: reloaded, %d rules\n", nr);
+					acl_dump();
+				}
+			}
+
 			nd = device_load(argv[2]);
 			if (nd < 0) {
 				printf("device: reload failed, keeping the previous list\n");
