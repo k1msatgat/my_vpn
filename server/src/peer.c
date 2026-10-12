@@ -44,7 +44,7 @@ void peer_touch(peer_t *peer, const struct sockaddr_in *outer, socklen_t len) {
 		peer->outer_len = len;
 	}
 
-	peer->last_seen = time(NULL);
+	peer->last_seen = mono_now();
 }
 
 peer_t *peer_find_idx(uint32_t idx)
@@ -64,7 +64,7 @@ peer_t *peer_find_idx(uint32_t idx)
 
 void peer_check_expired(void) {
 	int i;
-	time_t now = time(NULL);
+	time_t now = mono_now();
 	char dst[INET_ADDRSTRLEN];
 
 	for (i = 0; i < MAX_PEERS; i++){
@@ -90,7 +90,7 @@ peer_t *peer_register(struct in_addr inner, const struct sockaddr_in *outer, soc
 	peer = peer_lookup(inner);
 	if (peer) {
 		if(peer->outer.sin_addr.s_addr == outer->sin_addr.s_addr && peer->outer.sin_port == outer->sin_port ){
-			peer->last_seen = time(NULL);
+			peer->last_seen = mono_now();
 			return peer;
 		}
 		slot = (int32_t)(peer - peers);
@@ -123,7 +123,7 @@ peer_t *peer_register(struct in_addr inner, const struct sockaddr_in *outer, soc
 	peer->inner = inner;
 	peer->outer = *outer;
 	peer->outer_len = len;
-	peer->last_seen = time(NULL);
+	peer->last_seen = mono_now();
 
 	printf("[peer] register %s <- %s:%d idx=%08x\n",
 			ip4(inner, ib), ip4(outer->sin_addr, ob),
@@ -170,7 +170,7 @@ void peer_dump(void)
 				ip4(peers[i].inner, ib), peers[i].session_idx,
 				ip4(peers[i].outer.sin_addr, ob),
 				ntohs(peers[i].outer.sin_port),
-				(long)(time(NULL) - peers[i].last_seen));
+				(long)(mono_now() - peers[i].last_seen));
 	}
 	printf("------------------\n");
 }

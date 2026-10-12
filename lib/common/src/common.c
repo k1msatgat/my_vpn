@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
@@ -11,6 +12,15 @@
 const char *ip_str(struct in_addr a, char *dist)
 {
 	return inet_ntop(AF_INET, &a, dist, INET_ADDRSTRLEN);
+}
+
+time_t mono_now(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+
+	return ts.tv_sec;
 }
 
 int tun_alloc(char *dev)

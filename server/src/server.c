@@ -37,17 +37,6 @@ static void on_reload(int sig)
 	reload_requested = 1;
 }
 
-/* 벽시계(time)는 관리자가 시간을 고치거나 NTP 가 맞추면 뛴다. nonce 의 수명처럼
- * "몇 초가 지났는가"만 필요한 곳에는 뒤로 가지 않는 시계를 쓴다. */
-static time_t mono_now(void)
-{
-	struct timespec ts;
-
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-
-	return ts.tv_sec;
-}
-
 /* 거절하고 이유를 알려 준다. 응답이 없는 것과 거절된 것을 클라이언트가 구분해야
  * 사용자에게 무엇을 고치라고 말할 수 있다. */
 static void send_deny(int32_t sock, const struct sockaddr_in *dst, socklen_t dstlen,
