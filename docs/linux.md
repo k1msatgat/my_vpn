@@ -30,18 +30,20 @@ TUN 디바이스 생성에 root 권한(`CAP_NET_ADMIN`)이 필요합니다.
 ### Server
 
 ```bash
-sudo ./server/bin/vpn_server <port> <device-file> [acl-file]
+sudo ./server/bin/vpn_server [-s status-socket] <port> <device-file> [acl-file]
 
 # 다른 터미널에서 인터페이스 설정 (생성된 이름은 로그의 "tun device:" 확인)
 sudo ip addr add 10.0.0.1/24 dev tun0
 sudo ip link set tun0 mtu 1400 up
 
 ./server/bin/vpn_server selftest      # HMAC-SHA256 이 RFC 4231 벡터와 맞는지 (root 불필요)
-sudo kill -HUP $(pidof vpn_server)    # 기기 목록을 다시 읽는다 (세션은 유지)
+sudo kill -HUP $(pidof vpn_server)    # 기기 목록과 ACL 을 다시 읽는다 (세션은 유지)
 ```
 
 - `<device-file>`은 필수입니다. 등록된 기기만 세션을 받으므로, 목록이 없으면 누구도 받아 줄 수 없습니다.
   아래 [기기 등록과 포스처 정책](#기기-등록과-포스처-정책)을 보세요.
+- `-s <path>`를 주면 그 경로에 [상태 소켓](#상태-소켓)을 엽니다. 주지 않으면 열지 않습니다.
+- 서비스로 띄우고 AI 클라이언트로 제어하려면 [MCP 서버](mcp.md)를 보세요.
 
 ### Client
 
@@ -106,12 +108,16 @@ sudo python3 test/auth_check.py        # -v 를 붙이면 서버 로그도 출�
 | 묶음 | 확인하는 것 |
 |---|---|
 | 핸드셰이크 | 모르는 기기, 틀린 키, `AUTH` 재전송, 만료된 nonce, 서명 뒤 포스처 변조, 배정되지 않은 터널 IP |
+| 핸드셰이크 방해 | 다른 곳에서 온 `REQ` 20개 / 엉터리 `AUTH` 뒤에도 진짜 기기가 통과, 쓰인 nonce는 다시 나오지 않음 |
 | 포스처 | 방화벽 꺼짐 / 모름, 백신 꺼짐, 빌드 미달 / 경계값 / 모름, 조건이 없는 기기 |
 | keepalive | 재전송, 예전 counter, 틀린 키, 다른 기기의 키, 위조 패킷 뒤에도 세션 유지, 재인증 시 새 세션, 세션 중 거절 |
 | 데이터 | 인증된 세션으로 ping 왕복, 모르는 idx, inner src 위조, 거절된 뒤의 ping |
 | 다시 읽기 | 정책 강화 / 완화, 기기 삭제, 깨진 파일일 때 이전 목록 유지 |
+| ACL | 규칙 파일의 실수(deny에 붙은 조건, 오타, 빠진 필드), `SIGHUP`으로 규칙 교체, 깨진 파일일 때 이전 규칙 유지 |
+| 규칙별 포스처 | keepalive로 포스처만 바꿔 가며 같은 패킷의 판정 — 꺼짐 / 모름 / 빌드 미달, 조건 없는 규칙은 통과, 아래쪽의 넓은 allow가 구해 주지 않음 |
+| 상태 소켓 | 소켓 권한, 세션 / 포스처 / 패킷 수 / 거부 횟수, 내려간 세션, 버려진 접속 50개, 입력 무시, 종료 시 파일 삭제 |
 
-서버의 tun에 `10.0.0.1/24`를 붙이므로 다른 `vpn_server`가 도는 동안에는 쓸 수 없습니다.
+서버를 두 번 띄웁니다 (ACL 없이 한 번, ACL을 켜고 한 번). 서버의 tun에 `10.0.0.1/24`를 붙이므로 다른 `vpn_server`가 도는 동안에는 쓸 수 없습니다.
 
 ---
 
@@ -151,7 +157,8 @@ sudo python3 test/auth_check.py        # -v 를 붙이면 서버 로그도 출�
 ```
 
 ACL과의 관계: 기기 정책은 "이 기기를 터널에 들일 것인가"를, ACL은 "들어온 패킷이 어디로 갈 수 있는가"를 정합니다.
-지금은 포스처 조건이 기기 단위에만 걸립니다.
+같은 포스처 조건을 ACL 규칙에도 걸 수 있습니다. 기기 조건에 못 미치면 세션이 내려가고, 규칙의 조건에 못 미치면
+세션은 유지된 채 그 목적지만 닫힙니다.
 
 ---
 
@@ -160,9 +167,9 @@ ACL과의 관계: 기기 정책은 "이 기기를 터널에 들일 것인가"를
 규칙 파일은 한 줄에 하나씩, **위에서부터 처음 일치한 규칙**이 적용되며 일치하는 규칙이 없으면 거부합니다.
 
 ```
-# src           dst            proto   dport        action
+# src           dst            proto   dport        action   [requirements]
 10.0.0.0/24     10.0.0.1       icmp    any          allow
-10.0.0.0/24     10.0.0.1       tcp     22           allow
+10.0.0.0/24     10.0.0.1       tcp     22           allow    firewall=on antivirus=on
 10.0.0.0/24     10.0.0.1       tcp     8000-8080    allow
 any             any            any     any          deny
 ```
@@ -173,7 +180,51 @@ any             any            any     any          deny
 | proto | `icmp`, `tcp`, `udp`, `any`, 또는 숫자 |
 | dport | `n`, `lo-hi`, `any`, `-` (tcp/udp에만 적용) |
 | action | `allow`, `deny` |
+| requirements | `firewall=on`, `antivirus=on`, `min-build=N` — 생략 가능, `allow`에만 |
 
 - 최대 32개 규칙, `#` 이후는 주석입니다.
 - 현재는 클라이언트 → 서버 방향(UDP → TUN)에 적용됩니다.
+- **규칙 파일을 주지 않으면 ACL은 꺼져 있고** 인증된 세션의 패킷은 모두 통과합니다. 켜고 끄는 것은 서버를 시작할 때만 정해집니다.
+- `kill -HUP`으로 규칙을 다시 읽습니다. 다음 패킷부터 새 규칙이 적용되고 세션은 유지됩니다. 파일이 깨져 있으면 이전 규칙을 그대로 씁니다.
+- 필드가 모자란 줄, 모르는 조건, `deny`에 붙은 조건이 있으면 서버가 시작하지 않습니다. 조용히 건너뛰면 `deny` 한 줄이 빠진 채 그 아래의 `allow`가 적용됩니다.
+
+### 규칙별 포스처 조건
+
+`allow` 규칙의 action 뒤에 [기기 목록과 같은 조건](#기기-등록과-포스처-정책)을 적으면, 그 규칙으로 허용받으려는 세션이
+**지금** 그 포스처여야 합니다. 판정에 쓰는 값은 세션이 마지막으로 서명해서 보고한 포스처이고, 클라이언트는
+keepalive(10초)마다 다시 보고합니다.
+
+- 주소와 포트로 규칙이 정해지고, 조건은 그 규칙 안에서 봅니다. **조건에 못 미쳤다고 다음 규칙으로 넘어가지 않습니다.**
+  넘어가면 아래쪽의 넓은 `allow`가 받아 줘서 조건을 건 줄이 아무것도 막지 못합니다.
+- "모름"은 여기서도 통과가 아닙니다.
+- 세션은 내려가지 않습니다. 방화벽을 다시 켜면 다음 keepalive부터 통합니다.
+
+```
+[deny] 10.0.0.3 -> 10.0.0.1 proto=6 (60 bytes) posture below the rule (build=26200 firewall=1 antivirus=2)
+```
+
+---
+
+## 상태 소켓
+
+`-s <path>`로 띄우면 서버가 그 경로에 유닉스 소켓을 엽니다. 접속하면 JSON 한 덩어리를 쓰고 닫습니다.
+
+```bash
+sudo ./server/bin/vpn_server -s /run/vpn_status.sock 9000 devices.conf acl.conf
+sudo python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); print(s.makefile().read())' /run/vpn_status.sock
+```
+
+```json
+{"uptime_sec":5,"devices":1,"acl":{"enabled":true,"rules":2},
+ "counters":{"handshake_ok":1,"deny_unknown_device":1,"deny_bad_auth":1,"deny_tun_ip":0,"deny_posture":0,
+             "keepalive_dropped":0,"unknown_session":0,"spoofed_src":0,"acl_denied":2,"acl_denied_posture":1},
+ "sessions":[{"tunnel_ip":"10.0.0.3","device_id":"1011...1e1f","endpoint":"203.0.113.7:55425","session_idx":"a22a0400",
+              "age_sec":5,"idle_sec":5,"posture":{"os_build":26200,"firewall":"off","antivirus":"on"},
+              "rx_packets":3,"rx_bytes":135,"tx_packets":3,"tx_bytes":135,"acl_denied":2}]}
+```
+
+- **읽기 전용입니다.** 접속한 쪽이 보낸 것은 읽지 않으므로 이 소켓으로 서버에 시킬 수 있는 일이 없습니다.
+- 소켓 파일은 `600`으로 만들어집니다. 서버를 띄운 계정(root)만 읽습니다.
+- `posture`는 그 세션이 마지막으로 보고한 값, `idle_sec`는 마지막 수신 뒤 지난 시간입니다. `rx`는 ACL을 통과한 것만 셉니다.
+- 숫자는 서버가 뜬 뒤부터 센 값입니다. 키는 싣지 않습니다.
 
