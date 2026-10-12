@@ -37,7 +37,8 @@ typedef struct device {
 	uint8_t need_antivirus;
 	uint32_t min_build;
 
-	/* 진행 중인 핸드셰이크. CHALLENGE 로 내준 nonce 를 AUTH 가 올 때까지 기억한다.
+	/* 진행 중인 핸드셰이크. CHALLENGE 로 내준 nonce 를 서명이 맞는 AUTH 가 오거나
+	 * 수명이 다할 때까지 기억한다. 그동안 다시 온 REQ 에는 같은 nonce 를 내준다.
 	 * 출발지 주소가 아니라 기기에 매달아 둔다 — NAT 뒤에서는 REQ 와 AUTH 사이에
 	 * 출발지 포트가 바뀔 수 있다. */
 	uint8_t nonce[AUTH_NONCE_LEN];

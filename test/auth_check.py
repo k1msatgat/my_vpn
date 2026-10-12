@@ -146,6 +146,38 @@ def handshake_tests():
     check("AUTH too short", c.recv(), "no response")
 
 
+def disruption_tests():
+    """기기 ID 만 아는 제3자가 진짜 기기의 핸드셰이크를 깨뜨릴 수 없는지."""
+    global failed
+    victim, attacker = Client(), Client()
+
+    def report(name, ok, text):
+        global failed
+        print("%-4s %-52s %s" % ("ok" if ok else "FAIL", name, text))
+        failed += not ok
+
+    r = victim.request()
+    again = attacker.request()
+    report("REQ from elsewhere does not replace a live nonce", again[2] == r[2],
+           "same nonce" if again[2] == r[2] else "nonce replaced")
+    check("victim's AUTH after 20 foreign REQs",
+          ([attacker.request() for _ in range(20)], victim.auth(r[2]))[1], "RES_HANDSHAKE")
+
+    r = victim.request()
+    check("garbage AUTH from elsewhere", attacker.auth(r[2], key=bytes(32)), "DENY(2)")
+    check("victim's AUTH after the garbage AUTH", victim.auth(r[2]), "RES_HANDSHAKE")
+
+    # 재사용은 서명이 맞는 AUTH 가 올 때까지만이다. 한 번 쓰인 nonce 는 다시 나오지 않는다.
+    after = victim.request()
+    report("a used nonce is not handed out again", after[2] != r[2],
+           "new nonce" if after[2] != r[2] else "same nonce")
+
+    # 서명은 맞지만 거절된 AUTH 도 nonce 를 쓴 것이다 (엿들은 AUTH 의 재전송 방지).
+    wrong_ip = socket.inet_aton("10.0.0.9")
+    check("properly signed AUTH for a wrong tunnel ip", victim.auth(after[2], tun_ip=wrong_ip), "DENY(3)")
+    check("the same nonce, now with the right tunnel ip", victim.auth(after[2]), "DENY(2)")
+
+
 def strict(c, **post):
     """포스처 조건이 걸린 두 번째 기기로 핸드셰이크한다."""
     r = c.request(dev_id=DEV2_ID, tun_ip=TUN2_IP)
@@ -379,6 +411,7 @@ def main():
             sys.exit("server failed to start:\n" + log.read().decode())
         setup_tun(log)
         handshake_tests()
+        disruption_tests()
         posture_tests()
         keepalive_tests()
         data_tests()

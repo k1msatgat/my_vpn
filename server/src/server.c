@@ -85,13 +85,18 @@ static void handle_request(int32_t sock, const uint8_t *packet, int32_t n,
 		return;
 	}
 
-	/* nonce 는 기기마다 하나만 기억한다. 새 요청이 오면 이전 것은 덮어써진다. */
-	if (auth_random(dev->nonce, sizeof(dev->nonce)) < 0) {
-		perror("getrandom");
-		return;
+	/* nonce 는 기기마다 하나만 기억한다. 아직 살아 있는 것이 있으면 새로 뽑지 않고
+	 * 그것을 다시 내준다. 요청마다 덮어쓰면, 기기 ID(공개된 이름표)를 아는 누구나
+	 * REQ 를 계속 보내는 것만으로 진짜 기기가 서명 중인 nonce 를 무효로 만들 수 있다.
+	 * nonce 는 비밀이 아니다 — 남이 받아 가도 키가 없으면 서명하지 못한다. */
+	if (!dev->nonce_valid || mono_now() - dev->nonce_at > NONCE_TTL_SEC) {
+		if (auth_random(dev->nonce, sizeof(dev->nonce)) < 0) {
+			perror("getrandom");
+			return;
+		}
+		dev->nonce_at = mono_now();
+		dev->nonce_valid = 1;
 	}
-	dev->nonce_at = mono_now();
-	dev->nonce_valid = 1;
 
 	memset(&msg_header, 0, sizeof(msg_header));
 	msg_header.version = PROTOCOL_VERSION;
@@ -142,13 +147,14 @@ static void handle_auth(int32_t sock, const uint8_t *packet, int32_t n,
 	}
 	device_id_str(dev->id, ids);
 
-	/* nonce 는 한 번만 쓴다. 맞든 틀리든 AUTH 를 받은 순간 버린다. 남겨 두면 누군가
-	 * 엿들은 AUTH 를 그대로 다시 보내 세션을 또 열 수 있다. */
 	fresh = dev->nonce_valid &&
 		mono_now() - dev->nonce_at <= NONCE_TTL_SEC &&
 		memcmp(nonce, dev->nonce, AUTH_NONCE_LEN) == 0;
-	dev->nonce_valid = 0;
 
+	/* 틀린 AUTH 는 nonce 를 건드리지 않는다. 받기만 하면 버리던 때에는 아무 값이나
+	 * 채운 AUTH 한 통으로 진짜 기기의 핸드셰이크를 깨뜨릴 수 있었다. 위조 keepalive 로
+	 * 남의 세션을 끊지 못하게 한 것과 같은 원칙이다 — 그 기기가 보냈다고 확인되지 않은
+	 * 패킷은 그 기기의 상태를 바꾸지 못한다. */
 	if (!fresh ||
 			auth_hmac(dev->key, body, AUTH_SIGNED_LEN, mac) < 0 ||
 			!auth_mac_equal(mac, body + AUTH_SIGNED_LEN)) {
@@ -157,7 +163,11 @@ static void handle_auth(int32_t sock, const uint8_t *packet, int32_t n,
 		return;
 	}
 
-	/* 여기부터는 그 기기가 맞다. */
+	/* 여기부터는 그 기기가 맞다. nonce 는 한 번만 쓴다 — 서명이 맞은 AUTH 를 받은
+	 * 순간, 뒤의 검사에서 거절되더라도 버린다. 남겨 두면 엿들은 AUTH 를 그대로 다시
+	 * 보내 세션을 또 열 수 있다. */
+	dev->nonce_valid = 0;
+
 	if (tun_ip.s_addr != dev->tun_ip.s_addr) {
 		printf("[HS] device %s asked for %s, not its tunnel ip\n", ids, ip_str(tun_ip, ib));
 		send_deny(sock, src, srclen, 0, DENY_TUN_IP);
