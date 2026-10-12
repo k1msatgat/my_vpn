@@ -305,19 +305,23 @@ function aclHash() {
 	}
 }
 
-/* 서버는 ACL 을 시작할 때 한 번만 읽는다 (SIGHUP 은 기기 목록만 다시 읽는다).
- * service.sh 가 시작할 때 적어 둔 해시와 지금 파일을 비교해, 파일은 바뀌었는데
- * 서버는 아직 예전 규칙으로 도는 상태를 알려 준다. */
-function aclPending(running) {
-	if (!running) {
-		return false;
-	}
-
+/* 서버가 지금 쓰고 있는 ACL 의 해시. service.sh 가 시작할 때 적고, 다시 읽기에
+ * 성공하면 reload() 가 고쳐 적는다. ACL 없이 뜬 서버는 'none' 이다. */
+function aclApplied() {
 	try {
-		return fs.readFileSync(ACL_APPLIED, 'utf8').trim() !== aclHash();
+		return fs.readFileSync(ACL_APPLIED, 'utf8').trim();
 	} catch (e) {
-		return false;
+		return null;
 	}
+}
+
+/* 파일은 바뀌었는데 서버는 아직 예전 규칙으로 도는 상태. 규칙을 고친 것은 SIGHUP 으로
+ * 적용되지만, ACL 을 켜고 끄는 것은 서버를 다시 띄워야 한다 — 서버는 시작할 때 규칙
+ * 파일을 받았는지로 ACL 을 쓸지 정하고, 도는 중에는 그걸 바꾸지 않는다. */
+function aclPending(running) {
+	const applied = aclApplied();
+
+	return running && applied !== null && applied !== aclHash();
 }
 
 /* ---- systemd / journal ---------------------------------------------------- */
@@ -493,29 +497,45 @@ function systemctl(verb) {
  * 답하면 폐기했다고 믿은 기기가 계속 붙어 있게 된다. */
 function reload() {
 	const u = unit();
-	const filter = [`_SYSTEMD_INVOCATION_ID=${u.InvocationID}`, '--grep', '^device: reload'];
-	let before, now, i;
+	const filter = [`_SYSTEMD_INVOCATION_ID=${u.InvocationID}`, '--grep', '^(device|acl): reload'];
+	let before, now, i, acl, dev, aclLive;
 
 	if (!u.running) {
-		return { reloaded: false, note: 'server is not running; the new list is read at the next start' };
+		return { reloaded: false, note: 'server is not running; the new files are read at the next start' };
 	}
 
+	/* ACL 을 켠 채 뜬 서버만 ACL 을 다시 읽고, 그때는 결과를 두 줄 찍는다. */
+	aclLive = aclApplied() !== 'none';
 	before = journal(filter).length;
 	systemctl('reload');
 
 	/* 서버는 epoll 타임아웃(1초)마다 요청을 확인한다. */
 	for (i = 0; i < 30; i++) {
-		now = journal(filter);
-		if (now.length > before) {
-			if (now[now.length - 1].msg.includes('failed')) {
-				fail('server rejected the device file and kept the previous list');
-			}
-			return { reloaded: true, note: 'open sessions are re-evaluated at their next keepalive (within 10s)' };
+		now = journal(filter).slice(before);
+		dev = now.find((e) => e.msg.startsWith('device:'));
+		acl = now.find((e) => e.msg.startsWith('acl:'));
+		if (dev && (acl || !aclLive)) {
+			break;
 		}
 		spawnSync('/usr/bin/sleep', ['0.1']);
 	}
+	if (i === 30) {
+		fail('sent SIGHUP but the server did not report a reload within 3s');
+	}
 
-	fail('sent SIGHUP but the server did not report a reload within 3s');
+	if (dev.msg.includes('failed')) {
+		fail('server rejected the device file and kept the previous list');
+	}
+	if (acl && !acl.msg.includes('failed')) {
+		fs.writeFileSync(ACL_APPLIED, aclHash() + '\n');
+	} else if (acl && fs.existsSync(ACL_FILE)) {
+		fail('server rejected the ACL file and kept the previous rules');
+	}
+
+	return {
+		reloaded: true,
+		note: 'ACL rules apply from the next packet; open sessions are re-evaluated against the device list at their next keepalive (within 10s)',
+	};
 }
 
 /* ---- 명령 ------------------------------------------------------------------ */
@@ -669,7 +689,7 @@ const COMMANDS = {
 			enabled: rules !== null,
 			rules: rules || [],
 			restart_required: aclPending(running),
-			note: 'first matching rule wins; no match means deny. Applies to client -> server packets only.',
+			note: 'first matching rule wins; no match means deny. Applies to client -> server packets only. Rule changes apply without a restart; turning the ACL on or off needs server_restart.',
 		};
 	},
 
@@ -698,6 +718,12 @@ const COMMANDS = {
 		});
 
 		writeAtomic(ACL_FILE, lines.join('\n') + '\n');
+
+		/* ACL 을 켠 채 돌고 있는 서버에는 바로 적용한다. ACL 없이 뜬 서버는 다시
+		 * 읽어도 켜지지 않으므로 restart_required 로 남는다. */
+		if (unit().running && aclApplied() !== 'none') {
+			reload();
+		}
 
 		return COMMANDS.acl_get();
 	},

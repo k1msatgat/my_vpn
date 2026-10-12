@@ -73,7 +73,7 @@ command="/usr/local/bin/my_vpn_mcp",restrict ssh-ed25519 AAAA... ai-client
 |---|---|
 | `server_status` | 실행 여부, 포트, tun 상태, 현재 세션, 최근 거부 사유, ACL 재시작 필요 여부 |
 | `server_start` / `server_stop` / `server_restart` | 서비스 제어. 재시작하면 모든 세션이 끊기고 클라이언트가 스스로 다시 붙는다 |
-| `server_reload` | `SIGHUP` — 기기 목록 다시 읽기 (세션 유지). 파일을 손으로 고쳤을 때만 필요 |
+| `server_reload` | `SIGHUP` — 기기 목록과 ACL 다시 읽기 (세션 유지). 파일을 손으로 고쳤을 때만 필요 |
 | `server_logs` | 서버 로그. `lines`, `contains`, `since_seconds` |
 | `device_list` | 등록된 기기 — ID, 이름, 터널 IP, 포스처 조건 (키 제외) |
 | `device_add` | 기기 등록. ID와 키는 기기의 `vpn_client.exe enroll`에서 나온 값 |
@@ -83,7 +83,7 @@ command="/usr/local/bin/my_vpn_mcp",restrict ssh-ed25519 AAAA... ai-client
 | `auth_check` | `test/auth_check.py` 실행 (서버가 내려가 있을 때만) |
 
 - **기기 변경은 바로 적용됩니다.** `device_*`는 파일을 고친 뒤 `SIGHUP`을 보내고, 서버가 새 목록을 실제로 받아들였는지 로그로 확인한 다음에 답합니다. 붙어 있던 기기는 다음 keepalive(10초 이내)에서 걸러집니다.
-- **ACL 변경은 재시작해야 적용됩니다.** 서버가 ACL을 시작할 때 한 번만 읽기 때문입니다. 파일은 바뀌었는데 서버는 예전 규칙으로 도는 동안 `restart_required`가 `true`입니다.
+- **ACL 규칙 변경도 바로 적용됩니다.** `acl_set`은 같은 `SIGHUP`으로 다음 패킷부터 새 규칙을 씁니다. 다만 ACL을 **켜고 끄는 것**(ACL 없이 뜬 서버에 처음 규칙을 넣거나 `acl_clear`)은 재시작이 필요합니다. 서버는 시작할 때 규칙 파일을 받았는지로 ACL을 쓸지 정하고, 도는 중에는 바꾸지 않습니다. 그동안 `restart_required`가 `true`입니다.
 - **세션 목록은 로그에서 계산한 값입니다.** 서버에 상태를 물어볼 창구가 없어, 이번 실행의 로그에서 `[peer] register / drop / expire`를 차례로 적용해 피어 테이블을 다시 만듭니다. 마지막 keepalive 시각 같은 것은 알 수 없습니다.
 
 ```

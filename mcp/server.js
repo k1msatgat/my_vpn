@@ -68,7 +68,7 @@ const server = new McpServer({ name: 'my_vpn', version: '0.1.0' }, {
 	instructions: [
 		'Controls the my_vpn server (a UDP/TUN VPN with device authentication and posture checks) on this Linux host.',
 		'Clients are separate Windows machines and are not controlled from here; a client is cut off or admitted by changing its entry in the device list.',
-		'Device changes (device_add / device_update / device_remove) apply to the running server immediately without dropping other sessions. ACL changes need server_restart.',
+		'Device changes (device_add / device_update / device_remove) and ACL rule changes apply to the running server immediately without dropping sessions. Only turning the ACL on for the first time or off (acl_clear) needs server_restart; restart_required tells you when.',
 		'Call server_status first: it shows whether the server is up, who is connected and why a device was recently rejected.',
 	].join(' '),
 });
@@ -94,13 +94,13 @@ server.registerTool('server_stop', {
 }, () => call('stop'));
 
 server.registerTool('server_restart', {
-	description: 'Restart the VPN server. All sessions are dropped; clients re-handshake on their own within about 30 seconds. Needed to apply ACL changes.',
+	description: 'Restart the VPN server. All sessions are dropped; clients re-handshake on their own within about 30 seconds. Needed only to turn the ACL on or off.',
 	inputSchema: {},
 	annotations: DISRUPT,
 }, () => call('restart'));
 
 server.registerTool('server_reload', {
-	description: 'Make the running server re-read the device list (SIGHUP) without dropping sessions. The device_* tools already do this; use it only after the file was edited by hand.',
+	description: 'Make the running server re-read the device list and the ACL (SIGHUP) without dropping sessions. The device_* and acl_set tools already do this; use it only after a file was edited by hand.',
 	inputSchema: {},
 	annotations: WRITE,
 }, () => call('reload'));
@@ -155,13 +155,13 @@ server.registerTool('device_remove', {
 /* ---- ACL ------------------------------------------------------------------- */
 
 server.registerTool('acl_get', {
-	description: 'Show the ACL rules for packets coming out of the tunnel (client -> server) and whether the running server still uses an older version.',
+	description: 'Show the ACL rules for packets coming out of the tunnel (client -> server) and whether the running server still uses an older version (restart_required).',
 	inputSchema: {},
 	annotations: READ,
 }, () => call('acl_get'));
 
 server.registerTool('acl_set', {
-	description: 'Replace the whole ACL. Rules are checked top to bottom, the first match wins, and a packet matching no rule is denied. Takes effect only after server_restart.',
+	description: 'Replace the whole ACL. Rules are checked top to bottom, the first match wins, and a packet matching no rule is denied. Applied from the next packet if the server is already running with an ACL; if it was started without one, restart_required comes back true and server_restart turns it on.',
 	inputSchema: {
 		rules: z.array(z.object({
 			src: z.string().describe('a.b.c.d, a.b.c.d/n or "any"'),
