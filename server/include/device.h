@@ -20,6 +20,7 @@
 #include <netinet/in.h>
 
 #include "proto.h"
+#include "policy.h"
 
 #define MAX_DEVICES 16
 
@@ -32,10 +33,8 @@ typedef struct device {
 	uint8_t key[AUTH_KEY_LEN];
 	struct in_addr tun_ip;
 
-	/* 이 기기에 요구하는 포스처. 0 이면 그 항목은 보지 않는다. */
-	uint8_t need_firewall;
-	uint8_t need_antivirus;
-	uint32_t min_build;
+	/* 이 기기에 요구하는 포스처. 못 미치면 터널에 들이지 않는다. */
+	posture_req_t require;
 
 	/* 진행 중인 핸드셰이크. CHALLENGE 로 내준 nonce 를 서명이 맞는 AUTH 가 오거나
 	 * 수명이 다할 때까지 기억한다. 그동안 다시 온 REQ 에는 같은 nonce 를 내준다.

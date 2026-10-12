@@ -201,6 +201,7 @@ static void handle_auth(int32_t sock, const uint8_t *packet, int32_t n,
 	}
 
 	memcpy(peer->device_id, dev->id, DEVICE_ID_LEN);
+	peer->posture = posture;
 
 	printf("[HS] device %s authenticated as %s (build=%u firewall=%u antivirus=%u)\n",
 			ids, ip_str(tun_ip, ib), posture.os_build, posture.firewall, posture.antivirus);
@@ -299,6 +300,10 @@ static void handle_keepalive(int32_t sock, peer_t *peer, const uint8_t *packet, 
 		return;
 	}
 
+	/* 기기 정책은 통과했다. 보고된 값은 세션에 남겨 둔다 — 기기 정책보다 높은 수준을
+	 * 요구하는 ACL 규칙이 있으면 다음 패킷부터 이 값으로 판정한다. */
+	peer->posture = posture;
+
 	/* 검증을 통과한 뒤에야 외부 주소를 갱신한다. 순서가 반대면 위조 패킷이 세션의
 	 * 주소를 자기 쪽으로 돌려놓을 수 있다. */
 	peer_touch(peer, src, srclen);
@@ -312,6 +317,7 @@ int main(int argc, char *argv[])
 	int tun_fd, sock, n, sent, port;
 	int epfd = -1, nev, i;
 	int acl_enabled = 0;
+	int verdict;
 	int nd;
 	struct epoll_event ev, events[MAX_EVENTS];
 	struct sockaddr_in local_addr;
@@ -534,11 +540,18 @@ int main(int argc, char *argv[])
 					continue;
 				}
 
-				if (acl_enabled && acl_check(ip, n) != ACL_ALLOW) {
+				verdict = acl_enabled ? acl_check(ip, n, &peer->posture) : ACL_ALLOW;
+				if (verdict != ACL_ALLOW) {
 					memcpy(&inner_dst, ip + IP_DST_OFF, IP_ADDR_LEN);
-					printf("[deny] %s -> %s proto=%d (%d bytes)\n",
+					printf("[deny] %s -> %s proto=%d (%d bytes)",
 							ip_str(inner, ib), ip_str(inner_dst, ob),
 							ip[IP_PROTO_OFF], n);
+					if (verdict == ACL_DENY_POSTURE) {
+						printf(" posture below the rule (build=%u firewall=%u antivirus=%u)",
+								peer->posture.os_build, peer->posture.firewall,
+								peer->posture.antivirus);
+					}
+					printf("\n");
 					continue;
 				}
 

@@ -116,7 +116,9 @@ int acl_load(const char *path)
 	FILE *fp;
 	char  line[256];
 	char  s_src[64], s_dst[64], s_proto[16], s_port[32], s_act[16];
+	char *tok;
 	int   lineno = 0;
+	int   nf, used;
 
 	fp = fopen(path, "r");
 	if (fp == NULL) {
@@ -136,9 +138,17 @@ int acl_load(const char *path)
 			*hash = '\0'; 
 		}
 
-		if (sscanf(line, "%63s %63s %15s %31s %15s",
-					s_src, s_dst, s_proto, s_port, s_act) != 5) {
+		/* 빈 줄과 주석만 있는 줄은 넘어간다. 그 밖에 필드가 모자란 줄은 실패다.
+		 * 조용히 건너뛰면 deny 한 줄이 빠진 채로 뒤의 넓은 allow 가 적용된다. */
+		nf = sscanf(line, "%63s %63s %15s %31s %15s%n",
+				s_src, s_dst, s_proto, s_port, s_act, &used);
+		if (nf <= 0) {
 			continue;
+		}
+		if (nf != 5) {
+			fprintf(stderr, "acl: line %d: expected <src> <dst> <proto> <dport> <action> [requirements]\n", lineno);
+			fclose(fp);
+			return -1;
 		}
 
 		if (nstaged >= MAX_RULES) {
@@ -171,6 +181,23 @@ int acl_load(const char *path)
 			return -1;
 		}
 
+		/* action 뒤에 남은 단어들이 포스처 조건이다. 기기 목록과 같은 문법이다. */
+		for (tok = strtok(line + used, " \t\r\n"); tok != NULL; tok = strtok(NULL, " \t\r\n")) {
+			if (posture_req_parse(tok, &r->require) < 0) {
+				fprintf(stderr, "acl: line %d: unknown requirement '%s'\n", lineno, tok);
+				fclose(fp);
+				return -1;
+			}
+		}
+
+		/* 조건은 "허용받으려면 이래야 한다"는 뜻이다. deny 에 붙으면 "방화벽이 켜져
+		 * 있을 때만 막는다"가 되는데, 그렇게 읽히길 바라고 쓴 사람은 없을 것이다. */
+		if (r->action == ACL_DENY && !posture_req_empty(&r->require)) {
+			fprintf(stderr, "acl: line %d: requirements are only for allow rules\n", lineno);
+			fclose(fp);
+			return -1;
+		}
+
 		nstaged++;
 	}
 
@@ -182,7 +209,7 @@ int acl_load(const char *path)
 	return nrules;
 }
 
-int acl_check(const unsigned char *pkt, int len)
+int acl_check(const unsigned char *pkt, int len, const posture_report_t *posture)
 {
 	struct in_addr src, dst;
 	unsigned char  proto;
@@ -230,6 +257,13 @@ int acl_check(const unsigned char *pkt, int len)
 			if (dport < r->dport_lo || dport > r->dport_hi) continue;
 		}
 
+		/* 주소와 포트로 규칙이 정해지고, 조건은 그 규칙 안에서 본다. 조건에 못 미쳤다고
+		 * 다음 규칙으로 넘어가지 않는다 — 넘어가면 아래쪽의 넓은 allow 가 받아 줘서,
+		 * "이 포트는 방화벽이 켜진 기기만"이라고 쓴 줄이 아무것도 막지 못한다. */
+		if (r->action == ACL_ALLOW && !posture_req_ok(&r->require, posture)) {
+			return ACL_DENY_POSTURE;
+		}
+
 		return r->action;
 	}
 
@@ -259,11 +293,18 @@ void acl_dump(void)
 		inet_ntop(AF_INET, &r->src_addr, a, sizeof(a));
 		inet_ntop(AF_INET, &r->dst_addr, b, sizeof(b));
 
-		printf("[%d] %s/%d -> %s/%d proto=%d dport=%u-%u %s\n", i,
+		printf("[%d] %s/%d -> %s/%d proto=%d dport=%u-%u %s", i,
 				a, mask_bits(r->src_mask),
 				b, mask_bits(r->dst_mask),
 				r->proto, r->dport_lo, r->dport_hi,
 				r->action == ACL_ALLOW ? "allow" : "deny");
+		if (!posture_req_empty(&r->require)) {
+			printf("  require: firewall=%s antivirus=%s min-build=%u",
+					r->require.need_firewall ? "on" : "-",
+					r->require.need_antivirus ? "on" : "-",
+					r->require.min_build);
+		}
+		printf("\n");
 	}
 }
 

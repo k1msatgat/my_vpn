@@ -479,6 +479,53 @@ def acl_tests(srv, acl_path):
     ok = "acl: reload failed, keeping the previous rules" in srv.text()
     expect("broken acl file: the server says so", "logged" if ok else "silent", "logged")
 
+    # 리소스마다 요구하는 포스처를 다르게 건다. 첫 번째 기기에는 기기 조건이 없어 어떤
+    # 포스처로도 터널에는 들어온다. 들어온 뒤 어디까지 가는지는 규칙이 정한다.
+    rules("10.0.0.0/24 10.0.0.1 udp 53 allow firewall=on min-build=22000",
+          "10.0.0.0/24 10.0.0.1 icmp any allow",
+          "any any any any allow")
+    ka = lambda n, **post: (c.send(keepalive(idx, n, post=posture(**post))), c.recv())[1]
+
+    idx = session(c)
+    expect("rule requires firewall: reported on", verdict(udp(53), idx), "passed")
+    check("keepalive reports firewall off (no device policy)", ka(0, firewall=STATE_OFF), "KEEPALIVE")
+    expect("rule requires firewall: now off", verdict(udp(53), idx), "denied")
+    expect("a rule without requirements still passes (icmp)", verdict(ping(), idx), "passed")
+    expect("the broad allow below does not rescue udp/53", verdict(udp(53), idx), "denied")
+    expect("the broad allow still covers udp/54", verdict(udp(54), idx), "passed")
+    ok = "posture below the rule (build=26200 firewall=1 antivirus=2)" in srv.text()
+    expect("the denial names the posture", "logged" if ok else "silent", "logged")
+
+    check("keepalive reports firewall on again", ka(1), "KEEPALIVE")
+    expect("rule requires firewall: on again", verdict(udp(53), idx), "passed")
+    check("keepalive reports firewall unknown", ka(2, firewall=STATE_UNKNOWN), "KEEPALIVE")
+    expect("rule requires firewall: unknown", verdict(udp(53), idx), "denied")
+    check("keepalive reports build 19045", ka(3, build=19045), "KEEPALIVE")
+    expect("rule requires min-build=22000: 19045", verdict(udp(53), idx), "denied")
+
+    # 핸드셰이크에서 보고한 값도 같은 자리에 쓰인다 (첫 keepalive 를 기다리지 않는다).
+    r = c.handshake(post=posture(firewall=STATE_OFF))
+    expect("posture from the handshake, firewall off", verdict(udp(53), r[1]), "denied")
+
+
+def acl_loader_tests(dev_path):
+    """ACL 파일의 실수를 조용히 넘기지 않는지. 서버는 tun 을 만들기 전에 끝난다."""
+    global failed
+    cases = [
+        ("acl: requirement on a deny rule", "any any any any deny firewall=on", "only for allow rules"),
+        ("acl: misspelled requirement", "any any any any allow firewal=on", "unknown requirement 'firewal=on'"),
+        ("acl: line with a missing field", "10.0.0.0/24 10.0.0.1 tcp deny\nany any any any allow", "expected <src>"),
+    ]
+    for name, text, want in cases:
+        fd, path = tempfile.mkstemp(prefix="acl.", suffix=".conf")
+        with os.fdopen(fd, "w") as f:
+            f.write(text + "\n")
+        p = subprocess.run([SERVER, str(PORT), dev_path, path], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        os.unlink(path)
+        ok = p.returncode != 0 and want.encode() in p.stdout
+        print("%-4s %-52s %s" % ("ok" if ok else "FAIL", name, "refused to start" if ok else "exit=%d" % p.returncode))
+        failed += not ok
+
 
 def main():
     if os.geteuid() != 0:
@@ -492,6 +539,7 @@ def main():
         f.write("10.0.0.0/24 10.0.0.1 icmp any allow\n")
 
     loader_tests()
+    acl_loader_tests(path)
 
     logs = []
     try:

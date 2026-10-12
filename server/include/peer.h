@@ -26,6 +26,10 @@ typedef struct peer {
      * 목록에서 지워진 기기는 다음 keepalive 에서 찾지 못해 세션이 끊긴다. */
     uint8_t device_id[DEVICE_ID_LEN];
 
+    /* 이 기기가 마지막으로 서명해서 보고한 포스처. 핸드셰이크와 keepalive 마다 바뀐다.
+     * ACL 이 포스처 조건이 걸린 규칙을 볼 때 쓴다. */
+    posture_report_t posture;
+
     /* 마지막으로 받아들인 keepalive 의 counter. 예전 포스처 보고의 재전송을 걸러낸다. */
     uint64_t ka_counter;
     int32_t ka_seen;

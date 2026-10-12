@@ -51,50 +51,9 @@ static int parse_hex(const char *s, uint8_t *out, size_t len)
 	return 0;
 }
 
-/* "firewall=on" 같은 조건 하나를 읽는다. 모르는 단어는 무시하지 않고 실패시킨다.
- * "firewal=on" 같은 오타가 조용히 지나가면 관리자는 걸었다고 믿는 정책이 실제로는
- * 걸리지 않는다. */
-static int parse_require(const char *tok, device_t *d)
-{
-	char *end;
-	unsigned long v;
-
-	if (strcmp(tok, "firewall=on") == 0) {
-		d->need_firewall = 1;
-		return 0;
-	}
-	if (strcmp(tok, "antivirus=on") == 0) {
-		d->need_antivirus = 1;
-		return 0;
-	}
-	if (strncmp(tok, "min-build=", 10) == 0 && tok[10] != '\0') {
-		v = strtoul(tok + 10, &end, 10);
-		if (*end != '\0' || v > 0xFFFFFFFFul) {
-			return -1;
-		}
-		d->min_build = (uint32_t)v;
-		return 0;
-	}
-
-	return -1;
-}
-
-/* "모름"은 통과가 아니다. 클라이언트가 값을 읽지 못해 POSTURE_STATE_UNKNOWN 을
- * 보냈을 때 통과시키면, 조회를 실패하게 만드는 것만으로 정책을 피할 수 있다.
- * os_build 도 읽지 못하면 0 이라 min-build 조건에 저절로 걸린다. */
 int device_posture_ok(const device_t *dev, const posture_report_t *posture)
 {
-	if (dev->need_firewall && posture->firewall != POSTURE_STATE_ON) {
-		return 0;
-	}
-	if (dev->need_antivirus && posture->antivirus != POSTURE_STATE_ON) {
-		return 0;
-	}
-	if (posture->os_build < dev->min_build) {
-		return 0;
-	}
-
-	return 1;
+	return posture_req_ok(&dev->require, posture);
 }
 
 const char *device_id_str(const uint8_t id[DEVICE_ID_LEN], char *dst)
@@ -174,7 +133,7 @@ int device_load(const char *path)
 
 		/* 터널 IP 뒤에 남은 단어들이 포스처 조건이다. */
 		for (tok = strtok(line + used, " \t\r\n"); tok != NULL; tok = strtok(NULL, " \t\r\n")) {
-			if (parse_require(tok, d) < 0) {
+			if (posture_req_parse(tok, &d->require) < 0) {
 				fprintf(stderr, "device: line %d: unknown requirement '%s'\n", lineno, tok);
 				goto fail;
 			}
@@ -245,8 +204,8 @@ void device_dump(void)
 	for (i = 0; i < ndevices; i++) {
 		printf("[%d] %s -> %s  require: firewall=%s antivirus=%s min-build=%u\n", i,
 				device_id_str(devices[i].id, ids), ip_str(devices[i].tun_ip, ib),
-				devices[i].need_firewall ? "on" : "-",
-				devices[i].need_antivirus ? "on" : "-",
-				devices[i].min_build);
+				devices[i].require.need_firewall ? "on" : "-",
+				devices[i].require.need_antivirus ? "on" : "-",
+				devices[i].require.min_build);
 	}
 }
