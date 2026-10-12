@@ -1,7 +1,12 @@
 #include "framework.h"
+#include <uxtheme.h>
 #include "resource.h"
 #include "MainDlg.h"
 #include "EnrollDlg.h"
+
+#ifdef _MSC_VER
+#pragma comment(lib, "uxtheme.lib")
+#endif
 
 #define TUN_PREFIX_LEN 24
 
@@ -25,11 +30,10 @@ static const struct {
 
 #define COLUMN_COUNT ((int)(sizeof(COLUMNS) / sizeof(COLUMNS[0])))
 
-/* 행 배경색. 방향과 폐기 여부가 한눈에 들어오게만 하고 과하게 칠하지 않는다. */
-#define COLOR_TX_BG	RGB(240, 247, 255)
-#define COLOR_RX_BG	RGB(242, 251, 243)
-#define COLOR_DROP_BG	RGB(255, 241, 241)
-#define COLOR_DROP_FG	RGB(176, 32, 32)
+/* 색을 따로 입히는 열 */
+#define COL_DIR		2
+#define COL_SUMMARY	6
+#define COL_TYPE	3
 
 CMainDlg::CMainDlg(CWnd *parent)
 	: CDialogEx(IDD_MAIN, parent)
@@ -39,8 +43,14 @@ CMainDlg::CMainDlg(CWnd *parent)
 	, m_has_reported(false)
 	, m_deny_reason(0)
 	, m_posture_ticks(0)
-	, m_state_color(GetSysColor(COLOR_WINDOWTEXT))
+	, m_session_idx(0)
+	, m_stopping(false)
+	, m_tabs(nullptr)
+	, m_sep_y(0)
+	, m_status_dot(0)
+	, m_status_sub_color(0)
 {
+	ZeroMemory(&m_fonts, sizeof(m_fonts));
 	ZeroMemory(&m_local, sizeof(m_local));
 	ZeroMemory(&m_reported, sizeof(m_reported));
 	ZeroMemory(m_posture_bad, sizeof(m_posture_bad));
@@ -52,13 +62,11 @@ void CMainDlg::DoDataExchange(CDataExchange *pDX)
 	DDX_Control(pDX, IDC_PACKETS, m_packets);
 	DDX_Control(pDX, IDC_POSTURE, m_posture);
 	DDX_Control(pDX, IDC_LOG, m_log);
-	DDX_Control(pDX, IDC_TAB, m_tab);
 	DDX_Control(pDX, IDC_DETAIL, m_detail);
 }
 
 BEGIN_MESSAGE_MAP(CMainDlg, CDialogEx)
 	ON_BN_CLICKED(IDC_CONNECT, &CMainDlg::OnConnect)
-	ON_BN_CLICKED(IDC_DISCONNECT, &CMainDlg::OnDisconnect)
 	ON_BN_CLICKED(IDC_CLEAR, &CMainDlg::OnClear)
 	ON_BN_CLICKED(IDC_SAVE, &CMainDlg::OnSave)
 	ON_BN_CLICKED(IDC_ENROLL, &CMainDlg::OnEnroll)
@@ -70,11 +78,17 @@ BEGIN_MESSAGE_MAP(CMainDlg, CDialogEx)
 	ON_WM_GETMINMAXINFO()
 	ON_WM_TIMER()
 	ON_WM_CTLCOLOR()
+	ON_WM_PAINT()
+	ON_WM_ERASEBKGND()
+	ON_WM_DRAWITEM()
+	ON_WM_SYSCOLORCHANGE()
+	ON_MESSAGE(WM_PRINTCLIENT, &CMainDlg::OnPrintClient)
+	ON_NOTIFY(LVN_GETEMPTYMARKUP, IDC_PACKETS, &CMainDlg::OnGetEmptyMarkup)
+	ON_CONTROL(UI_TABS_CHANGED, IDC_TAB, &CMainDlg::OnTabChanged)
 	ON_NOTIFY(LVN_GETDISPINFO, IDC_PACKETS, &CMainDlg::OnGetDispInfo)
 	ON_NOTIFY(NM_CUSTOMDRAW, IDC_PACKETS, &CMainDlg::OnPacketCustomDraw)
 	ON_NOTIFY(LVN_ITEMCHANGED, IDC_PACKETS, &CMainDlg::OnPacketSelChanged)
 	ON_NOTIFY(NM_CUSTOMDRAW, IDC_POSTURE, &CMainDlg::OnPostureCustomDraw)
-	ON_NOTIFY(TCN_SELCHANGE, IDC_TAB, &CMainDlg::OnTabChanged)
 	ON_MESSAGE(WM_VPN_LOG, &CMainDlg::OnVpnLog)
 	ON_MESSAGE(WM_VPN_STATE, &CMainDlg::OnVpnState)
 	ON_MESSAGE(WM_VPN_DONE, &CMainDlg::OnVpnDone)
@@ -85,15 +99,38 @@ BOOL CMainDlg::OnInitDialog()
 {
 	CDialogEx::OnInitDialog();
 
-	m_tab.InsertItem(TAB_PACKETS, _T("패킷"));
-	m_tab.InsertItem(TAB_LOG, _T("로그"));
-	m_tab.InsertItem(TAB_POSTURE, _T("포스처"));
+	/* 큰 아이콘(Alt+Tab)과 작은 아이콘(제목 표시줄)을 각자의 크기로 읽는다. LoadIcon 은
+	 * 32픽셀 하나만 주므로 작은 쪽은 줄여 그려져 뭉개진다. */
+	SetIcon(AfxGetApp()->LoadIcon(IDI_APP), TRUE);
+	SetIcon(static_cast<HICON>(LoadImageW(AfxGetInstanceHandle(), MAKEINTRESOURCEW(IDI_APP),
+			IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON),
+			LR_SHARED)), FALSE);
+	ui::MatchTitleBar(GetSafeHwnd());
+
+	/* 글꼴은 다이얼로그 글꼴에서 파생한다. 그 글꼴은 이미 시스템 DPI 에 맞춰져 있다. */
+	ui::CreateFonts(reinterpret_cast<HFONT>(SendMessage(WM_GETFONT)), &m_fonts);
+	m_card_brush.CreateSolidBrush(ui::Colors().card);
+
+	m_tabs = ::GetDlgItem(GetSafeHwnd(), IDC_TAB);
+	ui::TabsAdd(m_tabs, L"패킷");
+	ui::TabsAdd(m_tabs, L"로그");
+	ui::TabsAdd(m_tabs, L"포스처");
+
+	ui::StyleButton(::GetDlgItem(GetSafeHwnd(), IDC_CONNECT), ui::BUTTON_PRIMARY);
+	ui::StyleButton(::GetDlgItem(GetSafeHwnd(), IDC_CLEAR), ui::BUTTON_SECONDARY);
+	ui::StyleButton(::GetDlgItem(GetSafeHwnd(), IDC_SAVE), ui::BUTTON_SECONDARY);
+	ui::StyleButton(::GetDlgItem(GetSafeHwnd(), IDC_ENROLL), ui::BUTTON_SECONDARY);
 
 	CComboBox *filter = (CComboBox *)GetDlgItem(IDC_FILTER_DIR);
 	filter->AddString(_T("전체"));
-	filter->AddString(_T("송신"));
-	filter->AddString(_T("수신"));
+	filter->AddString(_T("송신만"));
+	filter->AddString(_T("수신만"));
 	filter->SetCurSel(PKT_FILTER_ALL);
+
+	/* 빈 칸에 무엇을 적는지 흐린 글씨로 알려 준다. */
+	GetDlgItem(IDC_SERVER)->SendMessage(EM_SETCUEBANNER, FALSE, (LPARAM)L"203.0.113.10");
+	GetDlgItem(IDC_PORT)->SendMessage(EM_SETCUEBANNER, FALSE, (LPARAM)L"9000");
+	GetDlgItem(IDC_TUNIP)->SendMessage(EM_SETCUEBANNER, FALSE, (LPARAM)L"10.0.0.3");
 
 	SetupPacketColumns();
 
@@ -102,9 +139,10 @@ BOOL CMainDlg::OnInitDialog()
 	 * DOUBLEBUFFER 는 빠르게 추가될 때의 깜빡임을 없앤다. */
 	m_packets.SetExtendedStyle(LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER |
 			LVS_EX_HEADERDRAGDROP);
+	StyleList(m_packets);
 
-	m_mono.CreatePointFont(90, _T("Consolas"));
-	m_detail.SetFont(&m_mono);
+	m_detail.SetFont(CFont::FromHandle(m_fonts.mono));
+	m_log.SetFont(CFont::FromHandle(m_fonts.mono));
 
 	SetupPostureList();
 	LoadDeviceId();
@@ -124,12 +162,23 @@ BOOL CMainDlg::OnInitDialog()
 	UpdateStats();
 	SetTimer(TIMER_TICK_ID, TIMER_TICK_MS, nullptr);
 
-	CRect rc;
-	GetClientRect(&rc);
-	LayoutChildren(rc.Width(), rc.Height());
-	OnTabChanged(nullptr, nullptr);
+	/* 탭에 따라 보이는 컨트롤이 정해지고, 그 뒤에 자리를 잡는다. */
+	OnTabChanged();
 
 	return TRUE;
+}
+
+/* 리스트를 탐색기와 같은 모양으로 (선택 / 마우스 올림 표시가 납작해진다) 바꾸고 행을
+ * 조금 높인다. 리스트뷰에는 행 높이를 정하는 설정이 없다. 행은 글꼴과 작은 아이콘
+ * 중 큰 쪽에 맞춰지므로, 높이만 있는 빈 이미지 목록을 물려 준다. */
+void CMainDlg::StyleList(CListCtrl &list)
+{
+	SetWindowTheme(list.GetSafeHwnd(), L"Explorer", nullptr);
+
+	if (!m_row_pad.GetSafeHandle()) {
+		m_row_pad.Create(1, ui::Scale(22), ILC_COLOR32, 0, 1);
+	}
+	list.SetImageList(&m_row_pad, LVSIL_SMALL);
 }
 
 void CMainDlg::SetupPacketColumns()
@@ -194,7 +243,7 @@ bool CMainDlg::BuildConfig(tunnel_config_t &cfg)
 	cfg.log_packets = 0;
 
 	if (adapter.IsEmpty() || adapter.GetLength() >= TUNNEL_ADAPTER_NAME_LEN) {
-		AfxMessageBox(_T("어댑터 이름을 확인하세요."), MB_ICONWARNING);
+		FieldError(IDC_ADAPTER, _T("터널 어댑터의 이름입니다. 비워 둘 수 없습니다."));
 		return false;
 	}
 	/* adapter_name 은 wchar_t 배열이고 cfg 는 구조체째로 복사되므로
@@ -202,19 +251,19 @@ bool CMainDlg::BuildConfig(tunnel_config_t &cfg)
 	wcscpy_s(cfg.adapter_name, TUNNEL_ADAPTER_NAME_LEN, adapter);
 
 	if (InetPtonW(AF_INET, server, &cfg.server_ip) != 1) {
-		AfxMessageBox(_T("서버 IP 를 확인하세요."), MB_ICONWARNING);
+		FieldError(IDC_SERVER, _T("서버의 IPv4 주소를 적어 주세요. 예) 203.0.113.10"));
 		return false;
 	}
 
 	port_num = _ttoi(port);
 	if (port_num <= 0 || port_num > 65535) {
-		AfxMessageBox(_T("포트를 확인하세요 (1-65535)."), MB_ICONWARNING);
+		FieldError(IDC_PORT, _T("1 부터 65535 사이의 숫자여야 합니다."));
 		return false;
 	}
 	cfg.server_port = static_cast<uint16_t>(port_num);
 
 	if (InetPtonW(AF_INET, tun_ip, &cfg.tun_ip) != 1) {
-		AfxMessageBox(_T("터널 IP 를 확인하세요."), MB_ICONWARNING);
+		FieldError(IDC_TUNIP, _T("서버가 이 기기에 배정한 터널 IPv4 주소를 적어 주세요. 예) 10.0.0.3"));
 		return false;
 	}
 
@@ -226,6 +275,9 @@ bool CMainDlg::BuildConfig(tunnel_config_t &cfg)
 		AfxMessageBox(_T("등록되지 않은 기기입니다.\n\n")
 				_T("[포스처] 탭의 [기기 등록...] 으로 ID 와 키를 만들고\n")
 				_T("그 값을 서버에 등록하세요."), MB_ICONWARNING);
+		/* 어디로 가야 하는지 말로만 하지 않고 데려다 준다. */
+		ui::TabsSetSel(m_tabs, TAB_POSTURE);
+		OnTabChanged();
 		return false;
 	}
 	if (enrolled != DEVICE_OK) {
@@ -240,11 +292,14 @@ bool CMainDlg::BuildConfig(tunnel_config_t &cfg)
 }
 
 /* ---- 버튼 -------------------------------------------------------------- */
+/* 버튼은 하나다. 터널이 닫혀 있으면 "연결", 열려 있으면 "연결 해제"다. 두 버튼을
+ * 나란히 두면 늘 한쪽은 눌리지 않는 채로 자리만 차지한다. */
 void CMainDlg::OnConnect()
 {
 	tunnel_config_t cfg;
 
 	if (vpn_session_active(m_session)) {
+		RequestDisconnect();
 		return;
 	}
 
@@ -257,7 +312,7 @@ void CMainDlg::OnConnect()
 	/* 지난 연결의 판정과 보고 값은 새 연결과 무관하다. */
 	m_deny_reason = 0;
 	m_has_reported = false;
-	SetDlgItemText(IDC_ELAPSED, _T(""));
+	m_session_idx = 0;
 
 	if (vpn_session_start(m_session, &cfg) < 0) {
 		AppendLog(_T("[gui] 워커 스레드를 만들 수 없습니다"));
@@ -269,9 +324,9 @@ void CMainDlg::OnConnect()
 	SetUiState(TUNNEL_STATE_CONNECTING);
 }
 
-void CMainDlg::OnDisconnect()
+void CMainDlg::RequestDisconnect()
 {
-	if (!vpn_session_active(m_session)) {
+	if (m_stopping) {
 		return;
 	}
 
@@ -279,8 +334,28 @@ void CMainDlg::OnDisconnect()
 	vpn_session_stop(m_session);
 
 	/* 여기서 워커를 기다리지 않는다. 기다리면 UI 가 멈추고, 그 사이 워커가 보낸
-	 * PostMessage 도 처리되지 않는다. 워커가 끝나면 WM_VPN_DONE 이 오고 거기서 join 한다. */
-	GetDlgItem(IDC_DISCONNECT)->EnableWindow(FALSE);
+	 * PostMessage 도 처리되지 않는다. 워커가 끝나면 WM_VPN_DONE 이 오고 거기서 join 한다.
+	 * 그동안 버튼은 잠그고 무슨 일이 진행 중인지 적어 둔다. */
+	m_stopping = true;
+	SetUiState(m_state);
+}
+
+/* 잘못 적은 칸을 가리키며 말한다. 메시지 상자는 확인을 누르고 나면 어느 칸이었는지
+ * 다시 찾아야 한다. */
+void CMainDlg::FieldError(int id, LPCTSTR message)
+{
+	CWnd *edit = GetDlgItem(id);
+	EDITBALLOONTIP tip;
+
+	ZeroMemory(&tip, sizeof(tip));
+	tip.cbStruct = sizeof(tip);
+	tip.pszTitle = L"입력을 확인해 주세요";
+	tip.pszText = message;
+	tip.ttiIcon = TTI_WARNING;
+
+	edit->SetFocus();
+	edit->SendMessage(EM_SETSEL, 0, -1);
+	edit->SendMessage(EM_SHOWBALLOONTIP, 0, reinterpret_cast<LPARAM>(&tip));
 }
 
 void CMainDlg::OnClear()
@@ -491,9 +566,7 @@ LRESULT CMainDlg::OnVpnPackets(WPARAM, LPARAM)
 	/* 상태 변화(WM_VPN_STATE)와 패킷(WM_VPN_PACKETS)은 따로 오는 메시지라, "거부됨"
 	 * 상태가 DENY 패킷보다 먼저 처리될 수 있다. 그때는 SetUiState 가 사유를 아직
 	 * 모르므로 사유를 알게 된 여기서도 한 번 더 쓴다. */
-	if (m_deny_reason != 0) {
-		SetDlgItemText(IDC_ELAPSED, DenyReasonName(m_deny_reason));
-	}
+	UpdateStatus();
 	RefreshPosture(false);
 
 	return 0;
@@ -520,35 +593,72 @@ void CMainDlg::OnGetDispInfo(NMHDR *pNMHDR, LRESULT *pResult)
 	_tcsncpy_s(di->item.pszText, di->item.cchTextMax, s, _TRUNCATE);
 }
 
+/* 행 전체를 방향별로 칠하지 않는다. 표가 줄무늬로 가득 차면 정작 봐야 할 폐기 행이
+ * 묻힌다. 방향은 그 열의 글자색으로만 알리고, 바탕을 칠하는 것은 폐기된 행뿐이다. */
 void CMainDlg::OnPacketCustomDraw(NMHDR *pNMHDR, LRESULT *pResult)
 {
 	LPNMLVCUSTOMDRAW cd = reinterpret_cast<LPNMLVCUSTOMDRAW>(pNMHDR);
+	const ui::Palette &c = ui::Colors();
+
+	*pResult = CDRF_DODEFAULT;
+
+	/* 고대비에서는 시스템이 고른 색을 그대로 둔다. 폐기 여부는 결과 열에 글자로 있다. */
+	if (c.highContrast) {
+		return;
+	}
 
 	switch (cd->nmcd.dwDrawStage) {
 	case CDDS_PREPAINT:
 		*pResult = CDRF_NOTIFYITEMDRAW;
 		return;
 
-	case CDDS_ITEMPREPAINT: {
+	case CDDS_ITEMPREPAINT:
+		*pResult = CDRF_NOTIFYSUBITEMDRAW;
+		return;
+
+	case CDDS_ITEMPREPAINT | CDDS_SUBITEM: {
 		const tunnel_packet_t *p = m_store.ViewAt((int)cd->nmcd.dwItemSpec);
 
-		if (p) {
-			if (p->verdict != TUNNEL_PASS) {
-				cd->clrTextBk = COLOR_DROP_BG;
-				cd->clrText = COLOR_DROP_FG;
+		if (!p) {
+			return;
+		}
+
+		if (p->verdict != TUNNEL_PASS) {
+			cd->clrTextBk = c.dangerBg;
+			cd->clrText = c.danger;
+		}
+		else {
+			cd->clrTextBk = c.card;
+			if (cd->iSubItem == COL_DIR) {
+				cd->clrText = (p->dir == TUNNEL_DIR_TX) ? c.tx : c.rx;
+			}
+			else if (cd->iSubItem == COL_SUMMARY || cd->iSubItem == COL_TYPE) {
+				cd->clrText = c.text;
 			}
 			else {
-				cd->clrTextBk = (p->dir == TUNNEL_DIR_TX) ? COLOR_TX_BG : COLOR_RX_BG;
-				cd->clrText = GetSysColor(COLOR_WINDOWTEXT);
+				/* 번호, 시간, 세션, counter, 길이, 결과는 한 단계 흐리게. 눈이
+				 * 타입과 요약으로 먼저 간다. */
+				cd->clrText = c.muted;
 			}
 		}
-		*pResult = CDRF_DODEFAULT;
+		*pResult = CDRF_NEWFONT;
 		return;
 	}
 	default:
-		*pResult = CDRF_DODEFAULT;
 		return;
 	}
+}
+
+/* 리스트가 비어 있을 때 한가운데에 보일 글. 빈 표만 있으면 고장인지 아직 아무 일도
+ * 없었던 것인지 알 수 없다. */
+void CMainDlg::OnGetEmptyMarkup(NMHDR *pNMHDR, LRESULT *pResult)
+{
+	NMLVEMPTYMARKUP *em = reinterpret_cast<NMLVEMPTYMARKUP *>(pNMHDR);
+
+	em->dwFlags = EMF_CENTERED;
+	wcsncpy_s(em->szMarkup, ARRAYSIZE(em->szMarkup),
+			L"표시할 패킷이 없습니다. 연결하면 터널을 오가는 패킷이 여기에 나타납니다.", _TRUNCATE);
+	*pResult = TRUE;
 }
 
 void CMainDlg::OnPacketSelChanged(NMHDR *pNMHDR, LRESULT *pResult)
@@ -562,22 +672,30 @@ void CMainDlg::OnPacketSelChanged(NMHDR *pNMHDR, LRESULT *pResult)
 	}
 }
 
-void CMainDlg::OnTabChanged(NMHDR *, LRESULT *pResult)
+/* 탭마다 필요한 것만 보인다. 필터와 상세창은 패킷에만 뜻이 있으므로 다른 탭에서는
+ * 치우고 그 자리를 내용에 준다. */
+void CMainDlg::OnTabChanged()
 {
-	int sel = m_tab.GetCurSel();
+	static const int packetsOnly[] = { IDC_FILTER_DIR, IDC_HIDE_KA, IDC_ONLY_DROPS, IDC_SAVE, IDC_DETAIL };
+	const int sel = ui::TabsGetSel(m_tabs);
+	CRect rc;
 
 	m_packets.ShowWindow(sel == TAB_PACKETS ? SW_SHOW : SW_HIDE);
 	m_log.ShowWindow(sel == TAB_LOG ? SW_SHOW : SW_HIDE);
 	m_posture.ShowWindow(sel == TAB_POSTURE ? SW_SHOW : SW_HIDE);
+
+	for (int id : packetsOnly) {
+		GetDlgItem(id)->ShowWindow(sel == TAB_PACKETS ? SW_SHOW : SW_HIDE);
+	}
+	GetDlgItem(IDC_CLEAR)->ShowWindow(sel != TAB_POSTURE ? SW_SHOW : SW_HIDE);
 	GetDlgItem(IDC_ENROLL)->ShowWindow(sel == TAB_POSTURE ? SW_SHOW : SW_HIDE);
 
 	if (sel == TAB_POSTURE) {
 		RefreshPosture(true);
 	}
 
-	if (pResult) {
-		*pResult = 0;
-	}
+	GetClientRect(&rc);
+	LayoutChildren(rc.Width(), rc.Height());
 }
 
 /* ---- 포스처 탭 --------------------------------------------------------- */
@@ -599,7 +717,8 @@ void CMainDlg::SetupPostureList()
 	CRect unit(0, 0, 4, 8);
 
 	MapDialogRect(&unit);
-	m_posture.SetExtendedStyle(LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_GRIDLINES);
+	m_posture.SetExtendedStyle(LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+	StyleList(m_posture);
 
 	for (int i = 0; i < (int)(sizeof(cols) / sizeof(cols[0])); i++) {
 		m_posture.InsertColumn(i, cols[i].title, LVCFMT_LEFT, cols[i].du_width * unit.Width() / 4);
@@ -643,6 +762,7 @@ void CMainDlg::TrackAuth(const tunnel_packet_t &p)
 	}
 	else if (p.msg_type == MSG_TYPE_RES_HANDSHAKE) {
 		m_deny_reason = 0;
+		m_session_idx = p.session_idx;
 	}
 }
 
@@ -747,9 +867,10 @@ void CMainDlg::OnPostureCustomDraw(NMHDR *pNMHDR, LRESULT *pResult)
 	else if (cd->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
 		int row = (int)cd->nmcd.dwItemSpec;
 
-		if (row >= 0 && row < POSTURE_ROW_COUNT && m_posture_bad[row]) {
-			cd->clrTextBk = COLOR_DROP_BG;
-			cd->clrText = COLOR_DROP_FG;
+		if (row >= 0 && row < POSTURE_ROW_COUNT && m_posture_bad[row] &&
+				!ui::Colors().highContrast) {
+			cd->clrTextBk = ui::Colors().dangerBg;
+			cd->clrText = ui::Colors().danger;
 		}
 	}
 }
@@ -1054,57 +1175,36 @@ void CMainDlg::AppendLog(const CString &text)
 
 void CMainDlg::SetUiState(tunnel_state_t state)
 {
-	LPCTSTR text;
 	BOOL stopped;
-
-	switch (state) {
-	case TUNNEL_STATE_CONNECTING:
-		text = _T("연결 중");
-		m_state_color = RGB(176, 108, 0);
-		break;
-	case TUNNEL_STATE_CONNECTED:
-		text = _T("연결됨");
-		m_state_color = RGB(16, 124, 16);
-		break;
-	case TUNNEL_STATE_RECONNECTING:
-		text = _T("재연결 중");
-		m_state_color = RGB(176, 32, 32);
-		break;
-	case TUNNEL_STATE_DENIED:
-		text = _T("접근 거부됨");
-		m_state_color = RGB(176, 32, 32);
-		break;
-	case TUNNEL_STATE_STOPPED:
-	default:
-		text = _T("중지됨");
-		m_state_color = GetSysColor(COLOR_GRAYTEXT);
-		break;
-	}
+	CWnd *connect = GetDlgItem(IDC_CONNECT);
 
 	if (state == TUNNEL_STATE_CONNECTED && m_connected_at == 0) {
 		m_connected_at = GetTickCount64();
 	}
 	else if (state == TUNNEL_STATE_STOPPED) {
 		m_connected_at = 0;
-		SetDlgItemText(IDC_ELAPSED, _T(""));
+		m_session_idx = 0;
+		m_stopping = false;
 	}
 
 	m_state = state;
-	SetDlgItemText(IDC_STATE, text);
-	GetDlgItem(IDC_STATE)->Invalidate();
-
-	/* 거부됐으면 상태 아래 줄에 사유를 둔다. 탭을 옮기지 않아도 왜 막혔는지 보인다.
-	 * 연결이 끊긴 뒤에도 남겨 둔다 — 첫 핸드셰이크에서 거부되면 곧바로 "중지됨"이
-	 * 되므로, 지우면 사유를 볼 틈이 없다. */
-	if (m_deny_reason != 0) {
-		SetDlgItemText(IDC_ELAPSED, DenyReasonName(m_deny_reason));
-	}
+	UpdateStatus();
 	RefreshPosture(false);
 
 	stopped = (state == TUNNEL_STATE_STOPPED) ? TRUE : FALSE;
 
-	GetDlgItem(IDC_CONNECT)->EnableWindow(stopped);
-	GetDlgItem(IDC_DISCONNECT)->EnableWindow(!stopped);
+	/* 강조색 버튼은 "지금 할 일"에만 쓴다. 연결된 뒤의 해제는 흔한 동작이 아니므로
+	 * 보조 버튼으로 물러난다. */
+	connect->SetWindowText(stopped ? _T("연결") : m_stopping ? _T("해제 중…") : _T("연결 해제"));
+	connect->EnableWindow(!m_stopping);
+	ui::SetButtonKind(connect->GetSafeHwnd(), stopped ? ui::BUTTON_PRIMARY : ui::BUTTON_SECONDARY);
+	connect->Invalidate(FALSE);
+
+	/* 리스트나 입력 칸에서 치는 Enter 는 다이얼로그의 기본 버튼으로 간다. 닫혀 있을 때는
+	 * 그것이 [연결]이라 편하지만, 열려 있을 때는 같은 버튼이 [연결 해제]다 — 패킷을
+	 * 보다가 Enter 를 눌렀다고 터널이 끊겨서는 안 된다. 그동안은 기본 버튼을 버튼이
+	 * 아닌 컨트롤로 돌려 둔다 (그쪽으로 가는 BN_CLICKED 는 받는 곳이 없다). */
+	SendMessage(DM_SETDEFID, stopped ? IDC_CONNECT : IDC_TAB);
 
 	/* 연결 중에 설정을 바꿔도 반영되지 않으므로 잠근다. */
 	GetDlgItem(IDC_ADAPTER)->EnableWindow(stopped);
@@ -1113,44 +1213,177 @@ void CMainDlg::SetUiState(tunnel_state_t state)
 	GetDlgItem(IDC_TUNIP)->EnableWindow(stopped);
 }
 
-void CMainDlg::UpdateStats()
+/* 상태 줄의 글과 색을 지금 값으로 다시 정한다. 바뀐 것이 있을 때만 그 영역을 다시
+ * 그린다 — 500ms 마다 불리므로 매번 그리면 쓸데없이 깜빡일 틈을 준다. */
+void CMainDlg::UpdateStatus()
 {
-	const PacketStats &st = m_store.Stats();
+	const ui::Palette &c = ui::Colors();
+	CString title;
+	CString sub;
+	COLORREF dot;
+	COLORREF subColor = c.muted;
+
+	switch (m_state) {
+	case TUNNEL_STATE_CONNECTING:
+		title = _T("연결 중");
+		sub = _T("서버에 이 기기를 인증하고 있습니다");
+		dot = c.warn;
+		break;
+	case TUNNEL_STATE_CONNECTED:
+		title = _T("연결됨");
+		dot = c.ok;
+		if (m_connected_at) {
+			ULONGLONG sec = (GetTickCount64() - m_connected_at) / 1000;
+
+			sub.Format(_T("%02llu:%02llu:%02llu"), sec / 3600, (sec / 60) % 60, sec % 60);
+			if (m_session_idx != 0) {
+				CString t;
+
+				t.Format(_T("   ·   세션 %08x"), m_session_idx);
+				sub += t;
+			}
+		}
+		break;
+	case TUNNEL_STATE_RECONNECTING:
+		title = _T("재연결 중");
+		sub = _T("서버의 응답이 없어 세션을 다시 맺고 있습니다");
+		dot = c.warn;
+		break;
+	case TUNNEL_STATE_DENIED:
+		title = _T("접근 거부됨");
+		sub = _T("서버가 이 기기의 접근을 막았습니다");
+		dot = c.danger;
+		break;
+	case TUNNEL_STATE_STOPPED:
+	default:
+		title = _T("연결되지 않음");
+		sub = _T("서버 주소와 터널 IP 를 확인하고 연결을 누르세요");
+		dot = c.idle;
+		break;
+	}
+
+	/* 거부됐으면 그 줄에 사유를 둔다. 탭을 옮기지 않아도 왜 막혔는지 보인다. 연결이
+	 * 끊긴 뒤에도 남겨 둔다 — 첫 핸드셰이크에서 거부되면 곧바로 닫히므로, 지우면
+	 * 사유를 볼 틈이 없다. 경과 시간으로도 덮지 않는다. */
+	if (m_deny_reason != 0) {
+		sub = _T("거부 사유: ") + DenyReasonName(m_deny_reason);
+		subColor = c.danger;
+		if (m_state == TUNNEL_STATE_STOPPED) {
+			dot = c.danger;
+		}
+	}
+
+	if (m_stopping) {
+		title = _T("해제 중");
+		sub = _T("터널을 닫고 어댑터를 정리하고 있습니다");
+		subColor = c.muted;
+		dot = c.idle;
+	}
+
+	if (title == m_status_title && sub == m_status_sub &&
+			dot == m_status_dot && subColor == m_status_sub_color) {
+		return;
+	}
+
+	m_status_title = title;
+	m_status_sub = sub;
+	m_status_dot = dot;
+	m_status_sub_color = subColor;
+
+	if (!m_rc_status.IsRectEmpty()) {
+		InvalidateRect(&m_rc_status, FALSE);
+	}
+}
+
+static CString BytesText(ULONGLONG bytes)
+{
 	CString s;
 
-	s.Format(_T("송신 %llu (%llu B)    수신 %llu (%llu B)    keepalive %llu / %llu    보관 %d / 표시 %d"),
-			st.tx_packets, st.tx_bytes, st.rx_packets, st.rx_bytes,
-			st.ka_sent, st.ka_recv, m_store.ViewCount(), m_store.ViewCount());
-	SetDlgItemText(IDC_STATS1, s);
-
-	s.Format(_T("폐기 %llu  —  접근 거부 %llu, 비유니캐스트 %llu, 세션 불일치 %llu, 서버 아닌 출발지 %llu, 헤더 불량 %llu, IPv4 아님 %llu    재핸드셰이크 %llu"),
-			m_store.TotalDrops(),
-			st.drops[TUNNEL_DROP_DENIED],
-			st.drops[TUNNEL_DROP_NON_UNICAST],
-			st.drops[TUNNEL_DROP_WRONG_SESSION],
-			st.drops[TUNNEL_DROP_NOT_SERVER],
-			st.drops[TUNNEL_DROP_BAD_HEADER],
-			st.drops[TUNNEL_DROP_NON_IPV4],
-			st.rehandshakes);
-
-	if (st.lost) {
-		CString t;
-		t.Format(_T("    [UI 유실 %llu]"), st.lost);
-		s += t;
+	if (bytes < 1024) {
+		s.Format(_T("%llu B"), bytes);
 	}
-	SetDlgItemText(IDC_STATS2, s);
+	else if (bytes < 1024 * 1024) {
+		s.Format(_T("%.1f KB"), (double)bytes / 1024.0);
+	}
+	else {
+		s.Format(_T("%.1f MB"), (double)bytes / (1024.0 * 1024.0));
+	}
+
+	return s;
+}
+
+/* 숫자는 타일에, 폐기 사유의 내역은 맨 아래 한 줄에 둔다. 사유는 0 이 아닌 것만 적는다.
+ * 일곱 가지를 늘 다 적어 두면 대부분 0 인 숫자 사이에서 하나 있는 2 를 찾아야 한다. */
+void CMainDlg::UpdateStats()
+{
+	static const struct {
+		int verdict;
+		LPCTSTR name;
+	} reasons[] = {
+		{ TUNNEL_DROP_DENIED,		_T("접근 거부") },
+		{ TUNNEL_DROP_NON_UNICAST,	_T("비유니캐스트") },
+		{ TUNNEL_DROP_WRONG_SESSION,	_T("세션 불일치") },
+		{ TUNNEL_DROP_NOT_SERVER,	_T("서버 아닌 출발지") },
+		{ TUNNEL_DROP_BAD_HEADER,	_T("헤더 불량") },
+		{ TUNNEL_DROP_NON_IPV4,		_T("IPv4 아님") },
+		{ TUNNEL_DROP_TOO_LONG,		_T("길이 초과") },
+		{ TUNNEL_DROP_UNKNOWN_TYPE,	_T("알 수 없는 타입") },
+		{ TUNNEL_DROP_IO_ERROR,		_T("전달 실패") },
+	};
+	const PacketStats &st = m_store.Stats();
+	CString value[TILE_COUNT];
+	CString note[TILE_COUNT];
+	CString footer;
+	CString t;
+
+	value[TILE_TX].Format(_T("%llu"), st.tx_packets);
+	note[TILE_TX] = BytesText(st.tx_bytes);
+	value[TILE_RX].Format(_T("%llu"), st.rx_packets);
+	note[TILE_RX] = BytesText(st.rx_bytes);
+	value[TILE_KEEPALIVE].Format(_T("%llu / %llu"), st.ka_sent, st.ka_recv);
+	note[TILE_KEEPALIVE] = _T("보냄 / 받음");
+	value[TILE_DROPS].Format(_T("%llu"), m_store.TotalDrops());
+	value[TILE_REHANDSHAKE].Format(_T("%llu"), st.rehandshakes);
+
+	footer.Format(_T("패킷 %d개 표시"), m_store.ViewCount());
+	for (const auto &r : reasons) {
+		if (st.drops[r.verdict] != 0) {
+			t.Format(_T("%s%s %llu"), note[TILE_DROPS].IsEmpty() ? _T("") : _T(", "),
+					r.name, st.drops[r.verdict]);
+			note[TILE_DROPS] += t;
+		}
+	}
+	if (!note[TILE_DROPS].IsEmpty()) {
+		footer += _T("   ·   폐기 사유: ") + note[TILE_DROPS];
+		/* 타일은 좁다. 내역은 아래 줄에서 읽는다. */
+		note[TILE_DROPS] = _T("내역은 아래 줄");
+	}
+	if (st.lost) {
+		t.Format(_T("   ·   화면이 따라가지 못해 놓친 패킷 %llu"), st.lost);
+		footer += t;
+	}
+
+	for (int i = 0; i < TILE_COUNT; i++) {
+		if (value[i] != m_tile_value[i] || note[i] != m_tile_note[i]) {
+			m_tile_value[i] = value[i];
+			m_tile_note[i] = note[i];
+			if (!m_rc_tiles[i].IsRectEmpty()) {
+				InvalidateRect(&m_rc_tiles[i], FALSE);
+			}
+		}
+	}
+	if (footer != m_footer) {
+		m_footer = footer;
+		if (!m_rc_footer.IsRectEmpty()) {
+			InvalidateRect(&m_rc_footer, FALSE);
+		}
+	}
 }
 
 void CMainDlg::OnTimer(UINT_PTR id)
 {
 	if (id == TIMER_TICK_ID) {
-		/* 거부 중에는 그 줄에 사유가 떠 있으므로 경과 시간으로 덮지 않는다. */
-		if (m_connected_at && m_deny_reason == 0) {
-			ULONGLONG sec = (GetTickCount64() - m_connected_at) / 1000;
-			CString s;
-			s.Format(_T("%02llu:%02llu:%02llu"), sec / 3600, (sec / 60) % 60, sec % 60);
-			SetDlgItemText(IDC_ELAPSED, s);
-		}
+		UpdateStatus();		/* 경과 시간 */
 		UpdateStats();
 
 		if (++m_posture_ticks >= POSTURE_REFRESH_TICKS) {
@@ -1162,21 +1395,218 @@ void CMainDlg::OnTimer(UINT_PTR id)
 	CDialogEx::OnTimer(id);
 }
 
+/* ---- 그리기 ------------------------------------------------------------ */
+
+/* 라벨과 체크 상자, 읽기 전용 편집창은 스스로 그리되 바탕색을 부모에게 묻는다. 모두
+ * 흰 판 위에 있으므로 판의 색을 준다. 다이얼로그의 회색이 글자 뒤에 네모로 남지 않는다. */
 HBRUSH CMainDlg::OnCtlColor(CDC *pDC, CWnd *pWnd, UINT type)
 {
-	HBRUSH hbr = CDialogEx::OnCtlColor(pDC, pWnd, type);
+	const ui::Palette &c = ui::Colors();
 
-	if (pWnd->GetDlgCtrlID() == IDC_STATE) {
-		pDC->SetTextColor(m_state_color);
+	if (type == CTLCOLOR_STATIC || type == CTLCOLOR_BTN) {
+		const int id = pWnd->GetDlgCtrlID();
+		const bool label = (id == IDC_LBL_ADAPTER || id == IDC_LBL_TUNIP ||
+				id == IDC_LBL_SERVER || id == IDC_LBL_PORT);
+
+		pDC->SetBkColor(c.card);
+		pDC->SetTextColor(label ? c.muted : c.text);
+
+		return static_cast<HBRUSH>(m_card_brush.GetSafeHandle());
 	}
 
-	return hbr;
+	return CDialogEx::OnCtlColor(pDC, pWnd, type);
+}
+
+/* 바탕은 OnPaint 가 한 번에 그린다. 여기서 먼저 지우면 지운 색이 잠깐 보인다. */
+BOOL CMainDlg::OnEraseBkgnd(CDC *)
+{
+	return TRUE;
+}
+
+/* 테마가 입혀진 체크 상자 같은 컨트롤은 자기 뒤의 바탕을 부모에게 그려 달라고 한다
+ * (DrawThemeParentBackground 가 WM_PRINTCLIENT 를 보낸다). 여기서 판을 그려 주지 않으면
+ * 그 자리가 다이얼로그의 기본 회색으로 남는다. */
+LRESULT CMainDlg::OnPrintClient(WPARAM wParam, LPARAM)
+{
+	PaintBackground(reinterpret_cast<HDC>(wParam));
+
+	return 0;
+}
+
+void CMainDlg::OnPaint()
+{
+	CPaintDC paint(this);
+	CRect client;
+	HDC dc;
+	HBITMAP bitmap;
+	HGDIOBJ old;
+
+	GetClientRect(&client);
+	if (client.IsRectEmpty()) {
+		return;
+	}
+
+	/* 화면 밖 비트맵에 다 그린 뒤 한 번에 옮긴다. 경과 시간과 통계가 초마다 바뀌는데
+	 * 바로 그리면 지우고 쓰는 사이가 깜빡임으로 보인다. 컨트롤이 있는 자리는
+	 * WS_CLIPCHILDREN 덕에 덮이지 않는다. */
+	dc = CreateCompatibleDC(paint.GetSafeHdc());
+	bitmap = CreateCompatibleBitmap(paint.GetSafeHdc(), client.Width(), client.Height());
+	if (!dc || !bitmap) {
+		PaintBackground(paint.GetSafeHdc());
+	}
+	else {
+		old = SelectObject(dc, bitmap);
+		PaintBackground(dc);
+		BitBlt(paint.GetSafeHdc(), 0, 0, client.Width(), client.Height(), dc, 0, 0, SRCCOPY);
+		SelectObject(dc, old);
+	}
+
+	if (bitmap) {
+		DeleteObject(bitmap);
+	}
+	if (dc) {
+		DeleteDC(dc);
+	}
+}
+
+void CMainDlg::PaintTile(HDC dc, int tile)
+{
+	static const LPCTSTR labels[TILE_COUNT] = {
+		_T("송신"), _T("수신"), _T("keepalive"), _T("폐기"), _T("재핸드셰이크"),
+	};
+	const ui::Palette &c = ui::Colors();
+	const CRect &rc = m_rc_tiles[tile];
+	const int pad = ui::Scale(12);
+	COLORREF valueColor = c.text;
+	CRect line;
+	SIZE size;
+
+	if (rc.IsRectEmpty()) {
+		return;
+	}
+
+	ui::RoundRect(dc, rc, ui::Scale(6), c.card, c.border);
+
+	/* 0 이 아닐 때만 색을 쓴다. 늘 빨간 "폐기 0" 은 문제가 없는데도 경고처럼 보인다. */
+	if (tile == TILE_DROPS && m_tile_value[tile] != _T("0")) {
+		valueColor = c.danger;
+	}
+	else if (tile == TILE_REHANDSHAKE && m_tile_value[tile] != _T("0")) {
+		valueColor = c.warn;
+	}
+
+	line.SetRect(rc.left + pad, rc.top + ui::Scale(7), rc.right - pad, rc.top + rc.Height() / 2);
+	ui::Text(dc, line, labels[tile], m_fonts.label, c.muted, DT_LEFT | DT_TOP | DT_SINGLELINE);
+
+	line.SetRect(rc.left + pad, rc.top + rc.Height() / 2 - ui::Scale(4), rc.right - pad, rc.bottom - ui::Scale(6));
+	ui::Text(dc, line, m_tile_value[tile], m_fonts.value, valueColor,
+			DT_LEFT | DT_BOTTOM | DT_SINGLELINE);
+
+	/* 보조 설명은 숫자 오른쪽 아래에 맞춘다. 자리가 모자라면 그리지 않는다. */
+	size = ui::Measure(dc, m_tile_value[tile], m_fonts.value);
+	line.left += size.cx + ui::Scale(8);
+	if (!m_tile_note[tile].IsEmpty() &&
+			ui::Measure(dc, m_tile_note[tile], m_fonts.label).cx <= line.Width()) {
+		line.bottom -= ui::Scale(3);
+		ui::Text(dc, line, m_tile_note[tile], m_fonts.label, c.muted,
+				DT_LEFT | DT_BOTTOM | DT_SINGLELINE);
+	}
+}
+
+/* 컨트롤이 아닌 모든 것. 좌표는 LayoutChildren 이 정해 둔 것을 그대로 쓴다. */
+void CMainDlg::PaintBackground(HDC dc)
+{
+	const ui::Palette &c = ui::Colors();
+	const int radius = ui::Scale(8);
+	CRect client;
+	CRect rc;
+	HBRUSH brush;
+
+	GetClientRect(&client);
+	brush = CreateSolidBrush(c.bg);
+	FillRect(dc, &client, brush);
+	DeleteObject(brush);
+
+	/* 머리: 상태 */
+	if (!m_rc_header.IsRectEmpty()) {
+		const int dotR = ui::Scale(5);
+		CRect title = m_rc_status;
+		CRect sub = m_rc_status;
+
+		ui::RoundRect(dc, m_rc_header, radius, c.card, c.border);
+
+		title.bottom = title.top + title.Height() * 55 / 100;
+		sub.top = title.bottom;
+
+		ui::Dot(dc, title.left + dotR, title.CenterPoint().y + ui::Scale(1), dotR, m_status_dot);
+		title.left += dotR * 2 + ui::Scale(9);
+		sub.left = title.left;
+
+		ui::Text(dc, title, m_status_title, m_fonts.title, c.text,
+				DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+		ui::Text(dc, sub, m_status_sub, m_fonts.label, m_status_sub_color,
+				DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS);
+	}
+
+	for (int i = 0; i < TILE_COUNT; i++) {
+		PaintTile(dc, i);
+	}
+
+	/* 내용: 탭 줄 + 리스트 */
+	if (!m_rc_content.IsRectEmpty()) {
+		ui::RoundRect(dc, m_rc_content, radius, c.card, c.border);
+
+		rc.SetRect(m_rc_content.left + 1, m_sep_y, m_rc_content.right - 1, m_sep_y + 1);
+		brush = CreateSolidBrush(c.border);
+		FillRect(dc, &rc, brush);
+		DeleteObject(brush);
+	}
+
+	/* 선택한 패킷 */
+	if (!m_rc_detail.IsRectEmpty()) {
+		ui::RoundRect(dc, m_rc_detail, radius, c.card, c.border);
+
+		rc.SetRect(m_rc_detail.left + ui::Scale(14), m_rc_detail.top + ui::Scale(8),
+				m_rc_detail.right - ui::Scale(14), m_rc_detail.top + ui::Scale(28));
+		ui::Text(dc, rc, _T("선택한 패킷"), m_fonts.strong, c.muted,
+				DT_LEFT | DT_TOP | DT_SINGLELINE);
+	}
+
+	if (!m_rc_footer.IsRectEmpty()) {
+		ui::Text(dc, m_rc_footer, m_footer, m_fonts.label, c.muted,
+				DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+	}
+}
+
+/* 버튼은 ui_controls 가 그린다. */
+void CMainDlg::OnDrawItem(int id, LPDRAWITEMSTRUCT dis)
+{
+	if (ui::DrawButton(dis)) {
+		return;
+	}
+
+	CDialogEx::OnDrawItem(id, dis);
+}
+
+/* 시스템 색이나 고대비 설정이 바뀌었다. 색을 다시 정하고 전부 다시 그린다. */
+void CMainDlg::OnSysColorChange()
+{
+	CDialogEx::OnSysColorChange();
+
+	ui::RefreshPalette();
+	m_card_brush.DeleteObject();
+	m_card_brush.CreateSolidBrush(ui::Colors().card);
+	ui::MatchTitleBar(GetSafeHwnd());
+
+	m_status_title.Empty();		/* UpdateStatus 가 색을 다시 고르게 */
+	UpdateStatus();
+	RedrawWindow(nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
 }
 
 /* ---- 레이아웃 ---------------------------------------------------------- */
 void CMainDlg::OnGetMinMaxInfo(MINMAXINFO *mmi)
 {
-	CRect rc(0, 0, 420, 320);
+	CRect rc(0, 0, 520, 330);
 
 	MapDialogRect(&rc);
 	/* 클라이언트 크기 기준이라 테두리 / 캡션을 더해 준다. */
@@ -1197,10 +1627,24 @@ void CMainDlg::OnSize(UINT type, int cx, int cy)
 	}
 }
 
+/*  +--------------------------------------------------------------+
+ *  | (●) 연결됨                 서버 [....] 포트 [..]   [ 연결 해제 ] |  머리
+ *  |     00:12:31 · 세션 ....   터널 [....] 어댑터 [..]              |
+ *  +--------------------------------------------------------------+
+ *  [ 송신 ]   [ 수신 ]   [ keepalive ]   [ 폐기 ]   [ 재핸드셰이크 ]    타일
+ *  +--------------------------------------------------------------+
+ *  | 패킷  로그  포스처           [전체▾] □ □        [지움] [저장] |  내용
+ *  |--------------------------------------------------------------|
+ *  | 리스트                                                       |
+ *  +--------------------------------------------------------------+
+ *  | 선택한 패킷 (패킷 탭에서만)                                   |
+ *  +--------------------------------------------------------------+
+ *   패킷 N개 표시 · 폐기 사유: ...                                    바닥
+ */
 void CMainDlg::LayoutChildren(int cx, int cy)
 {
 	/* OnSize 는 컨트롤이 만들어지기 전에도 올 수 있다. */
-	if (!m_packets.GetSafeHwnd() || !m_tab.GetSafeHwnd()) {
+	if (!m_packets.GetSafeHwnd() || !m_tabs) {
 		return;
 	}
 
@@ -1213,24 +1657,40 @@ void CMainDlg::LayoutChildren(int cx, int cy)
 	auto DX = [ux](int du) { return du * ux / 4; };
 	auto DY = [uy](int du) { return du * uy / 8; };
 
-	const int m = DX(7);
-	const int btnW = DX(76);
-	const int btnH = DY(18);
+	const int sel = ui::TabsGetSel(m_tabs);
+	const int m = DX(8);
+	const int gap = DY(6);
 
-	/* 세로 기준선 */
-	const int connTop = DY(4);
-	const int connH = DY(62);
-	const int filterTop = connTop + connH + DY(6);
-	const int filterH = DY(16);
-	const int tabTop = filterTop + filterH + DY(4);
+	/* 세로 기준선: 위에서부터 머리, 타일. 아래에서부터 바닥, 상세. 남는 것이 내용이다. */
+	m_rc_header.SetRect(m, DY(7), cx - m, DY(7) + DY(48));
 
-	const int statsH = DY(11);
-	const int stats2Top = cy - DY(4) - statsH;
-	const int stats1Top = stats2Top - statsH;
-	const int detailBottom = stats1Top - DY(4);
-	const int detailH = DY(96);
-	const int detailTop = detailBottom - detailH;
-	const int tabBottom = detailTop - DY(6);
+	const int tilesTop = m_rc_header.bottom + gap;
+	const int tilesH = DY(34);
+	const int tileGap = DX(6);
+	const int tileW = (cx - 2 * m - (TILE_COUNT - 1) * tileGap) / TILE_COUNT;
+
+	for (int i = 0; i < TILE_COUNT; i++) {
+		const int x = m + i * (tileW + tileGap);
+
+		/* 나눗셈의 나머지는 마지막 타일이 가져가 오른쪽 끝을 맞춘다. */
+		m_rc_tiles[i].SetRect(x, tilesTop, (i == TILE_COUNT - 1) ? cx - m : x + tileW, tilesTop + tilesH);
+	}
+
+	const int footerH = DY(10);
+	m_rc_footer.SetRect(m + DX(4), cy - DY(4) - footerH, cx - m, cy - DY(4));
+
+	int contentBottom = m_rc_footer.top - DY(4);
+
+	if (sel == TAB_PACKETS) {
+		const int detailH = DY(86);
+
+		m_rc_detail.SetRect(m, contentBottom - detailH, cx - m, contentBottom);
+		contentBottom = m_rc_detail.top - gap;
+	}
+	else {
+		m_rc_detail.SetRectEmpty();
+	}
+	m_rc_content.SetRect(m, tilesTop + tilesH + gap, cx - m, contentBottom);
 
 	/* 여러 컨트롤을 한 번에 옮긴다. 하나씩 MoveWindow 하면 중간 상태가 그려져 깜빡인다. */
 	HDWP dwp = BeginDeferWindowPos(20);
@@ -1246,47 +1706,90 @@ void CMainDlg::LayoutChildren(int cx, int cy)
 		}
 	};
 
-	/* 연결 그룹: 버튼과 상태는 오른쪽에 붙인다 */
-	Place(IDC_GRP_CONN, m, connTop, cx - 2 * m, connH);
+	/* 머리: 오른쪽 끝에 버튼, 그 왼쪽에 입력 칸 두 줄, 남는 왼쪽이 상태다. */
+	const int btnW = DX(74);
+	const int btnH = DY(20);
+	const int btnX = m_rc_header.right - DX(10) - btnW;
+	Place(IDC_CONNECT, btnX, m_rc_header.top + (m_rc_header.Height() - btnH) / 2, btnW, btnH);
 
-	const int btnX = cx - m - DX(8) - btnW;
-	Place(IDC_CONNECT, btnX, connTop + DY(12), btnW, btnH);
-	Place(IDC_DISCONNECT, btnX, connTop + DY(34), btnW, btnH);
+	const int lblW = DX(30);
+	const int edit1W = DX(88);
+	const int edit2W = DX(60);
+	const int edit2X = btnX - DX(14) - edit2W;
+	const int lbl2X = edit2X - lblW;
+	const int edit1X = lbl2X - DX(10) - edit1W;
+	const int lbl1X = edit1X - lblW;
+	const int row1 = m_rc_header.top + DY(9);
+	const int row2 = m_rc_header.top + DY(27);
+	const int editH = DY(13);
 
-	const int stLblX = btnX - DX(142);
-	Place(IDC_LBL_STATE, stLblX, connTop + DY(16), DX(28), DY(9));
-	Place(IDC_STATE, stLblX + DX(30), connTop + DY(16), DX(100), DY(9));
-	Place(IDC_ELAPSED, stLblX + DX(30), connTop + DY(36), DX(100), DY(9));
+	Place(IDC_LBL_SERVER, lbl1X, row1 + DY(2), lblW, DY(9));
+	Place(IDC_SERVER, edit1X, row1, edit1W, editH);
+	Place(IDC_LBL_PORT, lbl2X, row1 + DY(2), lblW, DY(9));
+	Place(IDC_PORT, edit2X, row1, edit2W, editH);
+	Place(IDC_LBL_TUNIP, lbl1X, row2 + DY(2), lblW, DY(9));
+	Place(IDC_TUNIP, edit1X, row2, edit1W, editH);
+	Place(IDC_LBL_ADAPTER, lbl2X, row2 + DY(2), lblW, DY(9));
+	Place(IDC_ADAPTER, edit2X, row2, edit2W, editH);
 
-	/* 필터 줄: 지움 / 저장은 오른쪽 */
-	const int toolW = DX(60);
-	Place(IDC_SAVE, cx - m - toolW, filterTop, toolW, filterH);
-	Place(IDC_CLEAR, cx - m - 2 * toolW - DX(8), filterTop, toolW, filterH);
+	m_rc_status.SetRect(m_rc_header.left + DX(12), m_rc_header.top + DY(8),
+			lbl1X - DX(8), m_rc_header.bottom - DY(8));
 
-	/* 탭과 그 안의 리스트 / 로그 */
-	const int tabH = tabBottom - tabTop;
-	Place(IDC_TAB, m, tabTop, cx - 2 * m, tabH);
+	/* 내용의 윗줄: 왼쪽에 탭, 오른쪽에 그 탭의 도구 */
+	const int rowTop = m_rc_content.top + DY(3);
+	const int rowH = DY(18);
+	const int toolH = DY(14);
+	const int toolY = rowTop + (rowH - toolH) / 2;
+	int tabsW = ui::TabsIdealWidth(m_tabs);
+	int x = m_rc_content.right - DX(8);
 
-	CRect inner(m, tabTop, cx - m, tabTop + tabH);
-	m_tab.AdjustRect(FALSE, &inner);
-	inner.DeflateRect(DX(2), DY(1));
-	Place(IDC_PACKETS, inner.left, inner.top, inner.Width(), inner.Height());
-	Place(IDC_LOG, inner.left, inner.top, inner.Width(), inner.Height());
+	if (tabsW <= 0) {
+		tabsW = DX(150);
+	}
+	Place(IDC_TAB, m_rc_content.left + DX(4), rowTop, tabsW, rowH);
+	m_sep_y = rowTop + rowH + DY(2);
 
-	/* 포스처 탭은 아래에 버튼 한 줄을 남긴다. */
-	const int enrollH = DY(16);
-	Place(IDC_POSTURE, inner.left, inner.top, inner.Width(), inner.Height() - enrollH - DY(4));
-	Place(IDC_ENROLL, inner.left, inner.bottom - enrollH, DX(70), enrollH);
+	/* 기기 등록은 포스처 탭에서, 나머지는 패킷 / 로그 탭에서 같은 자리를 쓴다. */
+	Place(IDC_ENROLL, x - DX(64), toolY, DX(64), toolH);
 
-	/* 상세창 */
-	Place(IDC_GRP_DETAIL, m, detailTop, cx - 2 * m, detailH);
-	Place(IDC_DETAIL, m + DX(6), detailTop + DY(12), cx - 2 * m - DX(12), detailH - DY(18));
+	x -= DX(42);
+	Place(IDC_SAVE, x, toolY, DX(42), toolH);
+	if (sel != TAB_PACKETS) {
+		x += DX(42);	/* 저장이 없는 탭에서는 지움이 끝으로 온다 */
+	}
+	else {
+		x -= DX(4);
+	}
+	x -= DX(36);
+	Place(IDC_CLEAR, x, toolY, DX(36), toolH);
 
-	/* 통계 두 줄 */
-	Place(IDC_STATS1, m + DX(3), stats1Top, cx - 2 * m, statsH);
-	Place(IDC_STATS2, m + DX(3), stats2Top, cx - 2 * m, statsH);
+	x -= DX(12) + DX(44);
+	Place(IDC_ONLY_DROPS, x, rowTop + (rowH - DY(10)) / 2, DX(44), DY(10));
+	x -= DX(4) + DX(76);
+	Place(IDC_HIDE_KA, x, rowTop + (rowH - DY(10)) / 2, DX(76), DY(10));
+	x -= DX(8) + DX(52);
+	/* 콤보 상자의 높이는 펼쳤을 때의 높이다. */
+	Place(IDC_FILTER_DIR, x, rowTop + (rowH - DY(13)) / 2, DX(52), DY(80));
+
+	/* 리스트는 판의 둥근 모서리를 덮지 않게 조금 들여 넣는다. */
+	const int listX = m_rc_content.left + DX(2);
+	const int listY = m_sep_y + 1;
+	const int listW = m_rc_content.Width() - 2 * DX(2);
+	const int listH = m_rc_content.bottom - DY(4) - listY;
+
+	Place(IDC_PACKETS, listX, listY, listW, listH);
+	Place(IDC_LOG, listX + DX(4), listY + DY(2), listW - DX(4), listH - DY(2));
+	Place(IDC_POSTURE, listX, listY, listW, listH);
+
+	if (!m_rc_detail.IsRectEmpty()) {
+		Place(IDC_DETAIL, m_rc_detail.left + DX(8), m_rc_detail.top + DY(16),
+				m_rc_detail.Width() - 2 * DX(8), m_rc_detail.Height() - DY(20));
+	}
 
 	EndDeferWindowPos(dwp);
+
+	/* 판의 자리가 바뀌었으니 바탕을 다시 그린다. */
+	Invalidate(FALSE);
 }
 
 /* ---- 종료 -------------------------------------------------------------- */
@@ -1307,4 +1810,7 @@ void CMainDlg::OnDestroy()
 	vpn_session_drain(GetSafeHwnd());
 
 	CDialogEx::OnDestroy();
+
+	/* 컨트롤이 쓰던 글꼴은 컨트롤이 사라진 뒤에 지운다. */
+	ui::DestroyFonts(&m_fonts);
 }

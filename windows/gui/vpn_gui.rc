@@ -9,81 +9,69 @@
 
 LANGUAGE LANG_KOREAN, SUBLANG_DEFAULT
 
-/* 여기 좌표는 초깃값일 뿐이다. 실제 배치는 CMainDlg::OnSize 가 다시 잡으므로
- * 창 크기를 바꿔도 리스트와 상세창이 따라 늘어난다. */
-IDD_MAIN DIALOGEX 0, 0, 560, 400
+IDI_APP ICON "app.ico"
+
+/* 여기 좌표는 초깃값일 뿐이다. 실제 배치는 CMainDlg::LayoutChildren 이 다시 잡는다.
+ * 컨트롤의 순서가 Tab 키로 옮겨 다니는 순서이고, 라벨은 바로 뒤의 입력 칸의 이름이 된다
+ * (화면 낭독기가 그렇게 읽는다).
+ *
+ * 상태, 통계, 판(card)은 여기에 없다. 다이얼로그가 바탕에 직접 그린다. 그 위에 놓인
+ * 컨트롤이 바탕 그리기에 덮이지 않게 WS_CLIPCHILDREN 을 준다. */
+IDD_MAIN DIALOGEX 0, 0, 600, 420
 STYLE DS_SETFONT | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU |
-      WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_THICKFRAME
-CAPTION "my_vpn 클라이언트"
+      WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_THICKFRAME | WS_CLIPCHILDREN
+CAPTION "my_vpn"
 FONT 9, "Segoe UI", 400, 0, 0x1
 BEGIN
-    GROUPBOX        "연결", IDC_GRP_CONN, 7, 4, 546, 62
+    LTEXT           "서버", IDC_LBL_SERVER, 250, 18, 30, 9
+    EDITTEXT        IDC_SERVER, 282, 16, 88, 13, ES_AUTOHSCROLL
+    LTEXT           "포트", IDC_LBL_PORT, 380, 18, 30, 9
+    EDITTEXT        IDC_PORT, 412, 16, 64, 13, ES_AUTOHSCROLL | ES_NUMBER
+    LTEXT           "터널 IP", IDC_LBL_TUNIP, 250, 37, 30, 9
+    EDITTEXT        IDC_TUNIP, 282, 35, 88, 13, ES_AUTOHSCROLL
+    LTEXT           "어댑터", IDC_LBL_ADAPTER, 380, 37, 30, 9
+    EDITTEXT        IDC_ADAPTER, 412, 35, 64, 13, ES_AUTOHSCROLL
 
-    LTEXT           "어댑터", IDC_LBL_ADAPTER, 16, 20, 40, 9
-    EDITTEXT        IDC_ADAPTER, 58, 18, 104, 14, ES_AUTOHSCROLL
-    LTEXT           "터널 IP", IDC_LBL_TUNIP, 174, 20, 40, 9
-    EDITTEXT        IDC_TUNIP, 216, 18, 104, 14, ES_AUTOHSCROLL
+    DEFPUSHBUTTON   "연결", IDC_CONNECT, 508, 22, 74, 20
 
-    LTEXT           "서버", IDC_LBL_SERVER, 16, 40, 40, 9
-    EDITTEXT        IDC_SERVER, 58, 38, 104, 14, ES_AUTOHSCROLL
-    LTEXT           "포트", IDC_LBL_PORT, 174, 40, 40, 9
-    EDITTEXT        IDC_PORT, 216, 38, 52, 14, ES_AUTOHSCROLL | ES_NUMBER
+    CONTROL         "", IDC_TAB, "MyVpnTabs", WS_TABSTOP, 12, 104, 150, 18
 
-    LTEXT           "상태", IDC_LBL_STATE, 334, 20, 28, 9
-    LTEXT           "", IDC_STATE, 364, 20, 100, 9
-    LTEXT           "", IDC_ELAPSED, 364, 40, 100, 9
-
-    DEFPUSHBUTTON   "연결", IDC_CONNECT, 470, 16, 76, 18
-    PUSHBUTTON      "해제", IDC_DISCONNECT, 470, 38, 76, 18
-
-    LTEXT           "필터", IDC_LBL_FILTER, 12, 76, 24, 9
-    COMBOBOX        IDC_FILTER_DIR, 38, 73, 78, 80,
+    COMBOBOX        IDC_FILTER_DIR, 300, 106, 52, 80,
                     CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL
     CONTROL         "keepalive 숨김", IDC_HIDE_KA, "Button",
-                    BS_AUTOCHECKBOX | WS_TABSTOP, 126, 75, 82, 10
+                    BS_AUTOCHECKBOX | WS_TABSTOP, 358, 108, 76, 10
     CONTROL         "폐기만", IDC_ONLY_DROPS, "Button",
-                    BS_AUTOCHECKBOX | WS_TABSTOP, 216, 75, 52, 10
-    PUSHBUTTON      "지움", IDC_CLEAR, 418, 72, 60, 16
-    PUSHBUTTON      "저장...", IDC_SAVE, 486, 72, 60, 16
-
-    CONTROL         "", IDC_TAB, WC_TABCONTROL, WS_TABSTOP, 7, 92, 546, 180
+                    BS_AUTOCHECKBOX | WS_TABSTOP, 438, 108, 44, 10
+    PUSHBUTTON      "지움", IDC_CLEAR, 496, 106, 36, 14
+    PUSHBUTTON      "저장...", IDC_SAVE, 536, 106, 42, 14
+    PUSHBUTTON      "기기 등록...", IDC_ENROLL, 514, 106, 64, 14, NOT WS_VISIBLE
 
     CONTROL         "", IDC_PACKETS, WC_LISTVIEW,
                     LVS_REPORT | LVS_OWNERDATA | LVS_SINGLESEL |
-                    LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP, 12, 112, 536, 156
-    LISTBOX         IDC_LOG, 12, 112, 536, 156,
+                    LVS_SHOWSELALWAYS | WS_TABSTOP, 10, 126, 580, 170
+    LISTBOX         IDC_LOG, 10, 126, 580, 170,
                     LBS_NOINTEGRALHEIGHT | LBS_NOSEL | WS_VSCROLL | WS_HSCROLL |
-                    WS_BORDER | NOT WS_VISIBLE
-
+                    NOT WS_BORDER | NOT WS_VISIBLE
     CONTROL         "", IDC_POSTURE, WC_LISTVIEW,
                     LVS_REPORT | LVS_SINGLESEL | LVS_NOSORTHEADER |
-                    WS_BORDER | WS_TABSTOP | NOT WS_VISIBLE, 12, 112, 536, 156
+                    WS_TABSTOP | NOT WS_VISIBLE, 10, 126, 580, 170
 
-    GROUPBOX        "선택한 패킷", IDC_GRP_DETAIL, 7, 276, 546, 96
-    EDITTEXT        IDC_DETAIL, 13, 288, 534, 78,
+    EDITTEXT        IDC_DETAIL, 16, 322, 568, 68,
                     ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL |
-                    NOT WS_TABSTOP
-
-    PUSHBUTTON      "기기 등록...", IDC_ENROLL, 12, 252, 70, 16, NOT WS_VISIBLE
-
-    LTEXT           "", IDC_STATS1, 10, 377, 543, 9
-    LTEXT           "", IDC_STATS2, 10, 388, 543, 9
+                    NOT WS_BORDER | NOT WS_TABSTOP
 END
 
-IDD_ENROLL DIALOGEX 0, 0, 340, 116
-STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+IDD_ENROLL DIALOGEX 0, 0, 356, 150
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN
 CAPTION "기기 등록"
 FONT 9, "Segoe UI", 400, 0, 0x1
 BEGIN
-    LTEXT           "이 기기의 ID 와 키를 만들었습니다. 아래 값을 서버의 기기 목록에 등록하세요.",
-                    IDC_STATIC, 10, 8, 320, 9
-    LTEXT           "키는 이 창을 닫으면 다시 볼 수 없습니다.", IDC_STATIC, 10, 20, 320, 9
+    /* 제목과 안내, 경고는 다이얼로그가 직접 그린다 (CEnrollDlg::OnPaint). */
+    LTEXT           "기기 ID", IDC_STATIC, 16, 58, 40, 9
+    EDITTEXT        IDC_ENROLL_ID, 58, 56, 282, 13, ES_AUTOHSCROLL | ES_READONLY
+    LTEXT           "키", IDC_STATIC, 16, 77, 40, 9
+    EDITTEXT        IDC_ENROLL_KEY, 58, 75, 282, 13, ES_AUTOHSCROLL | ES_READONLY
 
-    LTEXT           "기기 ID", IDC_STATIC, 10, 42, 36, 9
-    EDITTEXT        IDC_ENROLL_ID, 48, 40, 282, 14, ES_AUTOHSCROLL | ES_READONLY
-    LTEXT           "키", IDC_STATIC, 10, 62, 36, 9
-    EDITTEXT        IDC_ENROLL_KEY, 48, 60, 282, 14, ES_AUTOHSCROLL | ES_READONLY
-
-    PUSHBUTTON      "복사", IDC_ENROLL_COPY, 10, 92, 60, 16
-    DEFPUSHBUTTON   "닫기", IDOK, 270, 92, 60, 16
+    DEFPUSHBUTTON   "한 줄로 복사", IDC_ENROLL_COPY, 196, 122, 76, 18
+    PUSHBUTTON      "닫기", IDOK, 278, 122, 62, 18
 END

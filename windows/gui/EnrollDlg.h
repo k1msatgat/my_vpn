@@ -5,6 +5,8 @@
 #endif
 
 #include "device.h"
+#include "ui_theme.h"
+#include "ui_controls.h"
 
 /* 방금 만든 기기 ID 와 키를 한 번 보여 주는 창.
  *
@@ -19,6 +21,11 @@ public:
 protected:
 	BOOL OnInitDialog() override;
 	afx_msg void OnCopy();
+	afx_msg void OnPaint();
+	afx_msg BOOL OnEraseBkgnd(CDC *pDC);
+	afx_msg HBRUSH OnCtlColor(CDC *pDC, CWnd *pWnd, UINT type);
+	afx_msg void OnDrawItem(int id, LPDRAWITEMSTRUCT dis);
+	afx_msg void OnDestroy();
 
 	DECLARE_MESSAGE_MAP()
 
@@ -27,5 +34,6 @@ private:
 
 	CString m_id;
 	CString m_key;
-	CFont m_mono;
+	ui::Fonts m_fonts;
+	CBrush m_card_brush;
 };

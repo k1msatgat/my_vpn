@@ -4,6 +4,11 @@
 
 BEGIN_MESSAGE_MAP(CEnrollDlg, CDialogEx)
 	ON_BN_CLICKED(IDC_ENROLL_COPY, &CEnrollDlg::OnCopy)
+	ON_WM_PAINT()
+	ON_WM_ERASEBKGND()
+	ON_WM_CTLCOLOR()
+	ON_WM_DRAWITEM()
+	ON_WM_DESTROY()
 END_MESSAGE_MAP()
 
 CEnrollDlg::CEnrollDlg(const device_t &dev, CWnd *parent)
@@ -11,6 +16,7 @@ CEnrollDlg::CEnrollDlg(const device_t &dev, CWnd *parent)
 	, m_id(Hex(dev.id, DEVICE_ID_LEN))
 	, m_key(Hex(dev.key, AUTH_KEY_LEN))
 {
+	ZeroMemory(&m_fonts, sizeof(m_fonts));
 }
 
 /* CString 은 해제할 때 내용을 지우지 않는다. 키의 16진 문자열이 해제된 힙에 남지
@@ -40,10 +46,17 @@ BOOL CEnrollDlg::OnInitDialog()
 {
 	CDialogEx::OnInitDialog();
 
+	ui::MatchTitleBar(GetSafeHwnd());
+	ui::CreateFonts(reinterpret_cast<HFONT>(SendMessage(WM_GETFONT)), &m_fonts);
+	m_card_brush.CreateSolidBrush(ui::Colors().card);
+
+	/* 이 창에서 할 일은 복사다. 닫기는 그다음이다. */
+	ui::StyleButton(::GetDlgItem(GetSafeHwnd(), IDC_ENROLL_COPY), ui::BUTTON_PRIMARY);
+	ui::StyleButton(::GetDlgItem(GetSafeHwnd(), IDOK), ui::BUTTON_SECONDARY);
+
 	/* 0 과 O, 1 과 l 이 구분되도록 고정폭으로 보여 준다. */
-	m_mono.CreatePointFont(90, _T("Consolas"));
-	GetDlgItem(IDC_ENROLL_ID)->SetFont(&m_mono);
-	GetDlgItem(IDC_ENROLL_KEY)->SetFont(&m_mono);
+	GetDlgItem(IDC_ENROLL_ID)->SetFont(CFont::FromHandle(m_fonts.mono));
+	GetDlgItem(IDC_ENROLL_KEY)->SetFont(CFont::FromHandle(m_fonts.mono));
 
 	SetDlgItemText(IDC_ENROLL_ID, m_id);
 	SetDlgItemText(IDC_ENROLL_KEY, m_key);
@@ -80,5 +93,82 @@ void CEnrollDlg::OnCopy()
 	SecureZeroMemory(line.GetBuffer(), bytes);
 	line.ReleaseBuffer(0);
 
-	SetDlgItemText(IDC_ENROLL_COPY, _T("복사됨"));
+	SetDlgItemText(IDC_ENROLL_COPY, _T("복사됨 ✓"));
+	GetDlgItem(IDC_ENROLL_COPY)->Invalidate(FALSE);
+}
+
+/* ---- 그리기 ------------------------------------------------------------ */
+
+/* 창 전체가 흰 판 하나다. 제목, 안내, 경고를 직접 그린다. 경고는 본문과 같은 크기의
+ * 회색 글씨로 두면 읽히지 않는다 — 이 창에서 놓치면 안 되는 한 줄이다. */
+void CEnrollDlg::OnPaint()
+{
+	CPaintDC paint(this);
+	const ui::Palette &c = ui::Colors();
+	const int pad = ui::Scale(24);
+	HDC dc = paint.GetSafeHdc();
+	CRect client;
+	CRect rc;
+	HBRUSH brush;
+
+	GetClientRect(&client);
+	brush = CreateSolidBrush(c.card);
+	FillRect(dc, &client, brush);
+	DeleteObject(brush);
+
+	rc.SetRect(pad, ui::Scale(18), client.right - pad, ui::Scale(48));
+	ui::Text(dc, rc, L"이 기기의 ID 와 키를 만들었습니다", m_fonts.title, c.text,
+			DT_LEFT | DT_TOP | DT_SINGLELINE);
+
+	rc.SetRect(pad, ui::Scale(50), client.right - pad, ui::Scale(72));
+	ui::Text(dc, rc, L"아래 두 값을 서버의 기기 목록에 등록하면 이 기기로 접속할 수 있습니다.",
+			m_fonts.label, c.muted, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+	/* 경고 띠: 입력 칸 아래, 버튼 위 */
+	CRect key;
+	GetDlgItem(IDC_ENROLL_KEY)->GetWindowRect(&key);
+	ScreenToClient(&key);
+
+	rc.SetRect(pad, key.bottom + ui::Scale(14), client.right - pad, key.bottom + ui::Scale(44));
+	ui::RoundRect(dc, rc, ui::Scale(6), c.dangerBg, CLR_NONE);
+	rc.DeflateRect(ui::Scale(12), 0);
+	ui::Text(dc, rc, L"키는 이 창을 닫으면 다시 볼 수 없습니다. 지금 복사해 두세요.",
+			m_fonts.strong, c.danger, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+}
+
+BOOL CEnrollDlg::OnEraseBkgnd(CDC *)
+{
+	return TRUE;
+}
+
+HBRUSH CEnrollDlg::OnCtlColor(CDC *pDC, CWnd *pWnd, UINT type)
+{
+	if (type == CTLCOLOR_STATIC) {
+		/* 라벨은 흐리게, 읽기 전용 편집창(값)은 또렷하게. 둘 다 CTLCOLOR_STATIC 으로 온다. */
+		const int id = pWnd->GetDlgCtrlID();
+		const bool value = (id == IDC_ENROLL_ID || id == IDC_ENROLL_KEY);
+
+		pDC->SetBkColor(ui::Colors().card);
+		pDC->SetTextColor(value ? ui::Colors().text : ui::Colors().muted);
+
+		return static_cast<HBRUSH>(m_card_brush.GetSafeHandle());
+	}
+
+	return CDialogEx::OnCtlColor(pDC, pWnd, type);
+}
+
+void CEnrollDlg::OnDrawItem(int id, LPDRAWITEMSTRUCT dis)
+{
+	if (ui::DrawButton(dis)) {
+		return;
+	}
+
+	CDialogEx::OnDrawItem(id, dis);
+}
+
+void CEnrollDlg::OnDestroy()
+{
+	CDialogEx::OnDestroy();
+
+	ui::DestroyFonts(&m_fonts);
 }

@@ -8,6 +8,8 @@
 #include "vpn_session.h"
 #include "posture.h"
 #include "PacketStore.h"
+#include "ui_theme.h"
+#include "ui_controls.h"
 
 /* 텍스트 로그가 무한히 쌓이지 않게 자른다. */
 #define LOG_MAX_LINES 2000
@@ -26,6 +28,16 @@ enum {
 	TAB_PACKETS = 0,
 	TAB_LOG,
 	TAB_POSTURE
+};
+
+/* 통계 타일 */
+enum {
+	TILE_TX = 0,
+	TILE_RX,
+	TILE_KEEPALIVE,
+	TILE_DROPS,
+	TILE_REHANDSHAKE,
+	TILE_COUNT
 };
 
 /* 포스처 탭의 행 */
@@ -48,7 +60,6 @@ protected:
 	void DoDataExchange(CDataExchange *pDX) override;
 
 	afx_msg void OnConnect();
-	afx_msg void OnDisconnect();
 	afx_msg void OnClear();
 	afx_msg void OnSave();
 	afx_msg void OnFilterChanged();
@@ -59,11 +70,19 @@ protected:
 	afx_msg void OnTimer(UINT_PTR id);
 	afx_msg HBRUSH OnCtlColor(CDC *pDC, CWnd *pWnd, UINT type);
 
+	/* 바탕, 판, 상태, 통계는 컨트롤이 아니라 다이얼로그가 직접 그린다. */
+	afx_msg void OnPaint();
+	afx_msg BOOL OnEraseBkgnd(CDC *pDC);
+	afx_msg LRESULT OnPrintClient(WPARAM wParam, LPARAM lParam);
+	afx_msg void OnDrawItem(int id, LPDRAWITEMSTRUCT dis);
+	afx_msg void OnSysColorChange();
+
 	/* 가상 리스트: 행 내용을 컨트롤에 복사해 두지 않고 그릴 때마다 물어본다. */
 	afx_msg void OnGetDispInfo(NMHDR *pNMHDR, LRESULT *pResult);
 	afx_msg void OnPacketCustomDraw(NMHDR *pNMHDR, LRESULT *pResult);
 	afx_msg void OnPacketSelChanged(NMHDR *pNMHDR, LRESULT *pResult);
-	afx_msg void OnTabChanged(NMHDR *pNMHDR, LRESULT *pResult);
+	afx_msg void OnGetEmptyMarkup(NMHDR *pNMHDR, LRESULT *pResult);
+	afx_msg void OnTabChanged();
 	afx_msg void OnPostureCustomDraw(NMHDR *pNMHDR, LRESULT *pResult);
 
 	/* 워커 스레드가 PostMessage 로 보낸 것들. 모두 UI 스레드에서 처리된다. */
@@ -77,7 +96,13 @@ protected:
 private:
 	bool BuildConfig(tunnel_config_t &cfg);
 	void AppendLog(const CString &text);
+	void RequestDisconnect();
+	void FieldError(int id, LPCTSTR message);
 	void SetUiState(tunnel_state_t state);
+	void UpdateStatus();
+	void PaintBackground(HDC dc);
+	void PaintTile(HDC dc, int tile);
+	void StyleList(CListCtrl &list);
 	void SetupPacketColumns();
 	void ApplyFilter();
 	void RefreshPacketCount();
@@ -125,11 +150,32 @@ private:
 	bool m_posture_bad[POSTURE_ROW_COUNT];
 	int m_posture_ticks;
 
+	uint32_t m_session_idx;		/* 지금 세션, 없으면 0 */
+	bool m_stopping;		/* 해제를 요청하고 워커가 끝나기를 기다리는 중 */
+
 	CListCtrl m_packets;
 	CListCtrl m_posture;
 	CListBox m_log;
-	CTabCtrl m_tab;
 	CEdit m_detail;
-	CFont m_mono;			/* 상세창 / hex 용 고정폭 */
-	COLORREF m_state_color;
+	HWND m_tabs;			/* ui_controls 의 탭 줄 */
+
+	/* 직접 그리는 것들. 자리는 LayoutChildren 이 정하고 PaintBackground 가 그린다. */
+	ui::Fonts m_fonts;
+	CBrush m_card_brush;		/* 판 위에 놓인 라벨 / 체크 상자의 바탕 */
+	CImageList m_row_pad;		/* 리스트의 행 높이를 늘리는 빈 이미지 목록 */
+	CRect m_rc_header;
+	CRect m_rc_status;		/* 상태 글자가 바뀔 때 다시 그릴 영역 */
+	CRect m_rc_tiles[TILE_COUNT];
+	CRect m_rc_content;
+	CRect m_rc_detail;
+	CRect m_rc_footer;
+	int m_sep_y;			/* 탭 줄 아래 구분선 */
+
+	CString m_status_title;
+	CString m_status_sub;
+	COLORREF m_status_dot;
+	COLORREF m_status_sub_color;
+	CString m_tile_value[TILE_COUNT];
+	CString m_tile_note[TILE_COUNT];
+	CString m_footer;
 };
