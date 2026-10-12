@@ -76,14 +76,26 @@ jobs:
               $text = $text.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
               Write-Output "::$kind title=msbuild ($(@($items).Count))::$text"
           }
-          Annotate error   ($lines | Where-Object { $_ -match ': (fatal )?error ' })
-          Annotate warning ($lines | Where-Object { $_ -match ': warning ' })
+          $errors = @($lines | Where-Object { $_ -match ': (fatal )?error ' })
+          $warnings = @($lines | Where-Object { $_ -match ': warning ' })
+          Annotate error $errors
+          Annotate warning $warnings
+          Write-Output "::notice title=msbuild::exit $code, $($errors.Count) errors, $($warnings.Count) warnings"
 
           exit $code
 
       # 관리자 권한도 어댑터도 필요 없는 것만 돌린다.
       - name: HMAC-SHA256 self test
-        run: windows\build\Release\vpn_client.exe selftest
+        shell: pwsh
+        run: |
+          $out = (& windows\build\Release\vpn_client.exe selftest 2>&1 | Out-String).Trim()
+          $code = $LASTEXITCODE
+          Write-Output $out
+          if ($code -ne 0) {
+              $text = "exit $code`n$out".Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+              Write-Output "::error title=vpn_client selftest::$text"
+              exit 1
+          }
 
       - uses: actions/upload-artifact@v4
         with:
