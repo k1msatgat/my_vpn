@@ -84,7 +84,16 @@ jobs:
 
           exit $code
 
-      # 관리자 권한도 어댑터도 필요 없는 것만 돌린다.
+      # 관리자 권한도 어댑터도 필요 없는 것만 돌린다. 러너는 Windows Server 라
+      # 보안 센터(wscapi.dll)가 없다 — 그런 곳에서도 클라이언트가 뜨는지가 함께 확인된다.
+      - name: Posture on this runner
+        shell: pwsh
+        run: |
+          $out = (& windows\build\Release\vpn_client.exe posture 2>&1 | Out-String).Trim()
+          Write-Output $out
+          $text = "exit $LASTEXITCODE`n$out".Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+          Write-Output "::notice title=vpn_client posture::$text"
+
       - name: HMAC-SHA256 self test
         shell: pwsh
         run: |

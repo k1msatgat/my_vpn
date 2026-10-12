@@ -71,7 +71,7 @@
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>ws2_32.lib;iphlpapi.lib;wscapi.lib;bcrypt.lib;crypt32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>ws2_32.lib;iphlpapi.lib;bcrypt.lib;crypt32.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <!-- Wintun 어댑터 생성과 IP / MTU 설정에 관리자 권한이 필요하다.
            매니페스트에 박아 두면 실행할 때 Windows 가 권한 상승을 먼저 묻는다. -->
       <EnableUAC>true</EnableUAC>

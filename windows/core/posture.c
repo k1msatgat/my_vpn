@@ -129,13 +129,39 @@ out:
  * 한 값만 주고, 어느 프로필이 꺼졌는지와 그 프로필이 지금 쓰이는지는 알려주지 않는다.
  *
  * WSC 는 클라이언트 Windows 에만 있다. 서비스가 없거나 멈춰 있으면 S_FALSE 가
- * 오고 health 는 믿을 수 없으므로 UNKNOWN 으로 둔다. */
+ * 오고 health 는 믿을 수 없으므로 UNKNOWN 으로 둔다.
+ *
+ * Windows Server 에는 wscapi.dll 자체가 없다. 그래서 이 함수를 import 표로 묶지 않고
+ * 부를 때 찾는다. import 로 묶으면 로더가 프로세스를 띄우기도 전에 "DLL 을 찾을 수
+ * 없음"(0xC0000135)으로 끝내 버려, 백신과 아무 상관 없는 selftest 조차 돌지 않는다.
+ * 없으면 UNKNOWN 이고, UNKNOWN 은 서버에서 통과가 아니다 — 백신을 요구하는 정책은
+ * 그대로 거절한다. 읽을 수 없다는 것을 "문제없음"으로 바꿔 말하지 않는다.
+ *
+ * LOAD_LIBRARY_SEARCH_SYSTEM32 로 System32 에서만 찾는다. 이름만 주면 실행 파일이
+ * 있는 폴더를 먼저 뒤지는데, 관리자 권한으로 도는 프로그램이 그 폴더에 놓인 가짜
+ * wscapi.dll 을 올리게 된다 (DLL 심기). */
+typedef HRESULT (WINAPI *wsc_get_health_fn)(DWORD providers, PWSC_SECURITY_PROVIDER_HEALTH health);
+
 static uint8_t collect_antivirus(void)
 {
 	WSC_SECURITY_PROVIDER_HEALTH health;
+	wsc_get_health_fn get_health;
+	HMODULE wsc;
 	HRESULT hr;
 
-	hr = WscGetSecurityProviderHealth(WSC_SECURITY_PROVIDER_ANTIVIRUS, &health);
+	wsc = LoadLibraryExW(L"wscapi.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+	if (wsc == NULL) {
+		return POSTURE_UNKNOWN;
+	}
+
+	get_health = (wsc_get_health_fn)GetProcAddress(wsc, "WscGetSecurityProviderHealth");
+	if (get_health == NULL) {
+		FreeLibrary(wsc);
+		return POSTURE_UNKNOWN;
+	}
+
+	hr = get_health(WSC_SECURITY_PROVIDER_ANTIVIRUS, &health);
+	FreeLibrary(wsc);
 	if (hr != S_OK) {
 		return POSTURE_UNKNOWN;
 	}
