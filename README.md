@@ -1,5 +1,7 @@
 # my_vpn
 
+[![ci](https://github.com/k1msatgat/my_vpn/actions/workflows/ci.yml/badge.svg)](https://github.com/k1msatgat/my_vpn/actions/workflows/ci.yml)
+
 > C로 처음부터 만드는 L3 VPN — TUN 인터페이스 + UDP 터널 + 기기 인증 + 포스처 기반 접근 제어 + ACL
 
 리눅스 TUN 디바이스로 IP 패킷을 가로채고, 직접 설계한 헤더를 붙여 UDP로 터널링하는 VPN입니다.
@@ -272,6 +274,7 @@ my_vpn/
 │   ├── my_vpn.service     #   systemd 유닛
 │   ├── service.sh         #   유닛이 부르는 실행 / tun 설정 스크립트
 │   └── install.sh, uninstall.sh
+├── .github/workflows/ci.yml  # 푸시마다 서버 빌드 + 인증 검사, Windows 클라이언트 MSVC 빌드
 ├── docs/
 │   ├── linux.md           # Linux 빌드·실행·테스트, ACL
 │   └── mcp.md             # MCP 서버의 구조, 설치, 도구
@@ -352,6 +355,7 @@ my_vpn/
 - [ ] 비블로킹 재핸드셰이크 (상태 머신), 종료 통지 메시지
 - [x] Windows 클라이언트 — Wintun 콘솔 클라이언트 (ping 왕복 / 유휴 120초 / 서버 재시작 복구 확인)
 - [x] Windows 클라이언트 — MFC GUI (연결·해제 상태 전이 / 패킷 분석 탭 / 필터·통계 / ping 왕복 확인)
+- [x] CI — 푸시마다 서버 빌드와 `test/auth_check.py`, Windows 클라이언트(콘솔 + MFC GUI) MSVC 빌드
 - [ ] Windows 클라이언트 — Windows 서비스 + Named Pipe IPC
 
 ---
@@ -375,4 +379,5 @@ my_vpn/
 | AI 작성 | `proto.h` / `proto.c`의 인증·포스처 메시지 정의와 `posture_encode` / `posture_decode`. 메시지 흐름은 AI가 제안하고 검토 후 채택 |
 | AI 작성 | 서버의 ZTNA 확장 (2차) — `server/src/policy.c`, `server/src/status.c`, `alc.c`의 다시 읽기(임시 표)와 규칙별 포스처 조건 / 줄 형식 검사, `server.c`의 nonce 재사용과 상태 소켓 연결 / 카운터, `peer.c`의 단조 시계와 세션별 카운터. ACL의 매칭 로직과 피어 테이블의 구조는 직접 구현한 것 그대로 |
 | AI 작성 | `mcp/` MCP 서버 전체 — `server.js`(도구 선언), `ctl.cjs`(root 헬퍼), systemd 유닛, 설치 스크립트, `docs/mcp.md` |
-| AI 작성 | GUI 재설계 — `gui/ui_theme.cpp`, `gui/ui_controls.cpp`, `MainDlg`의 배치와 그리기, `EnrollDlg`의 그리기, `vpn_gui.rc`, 앱 아이콘(`windows/tools/mkicon.py`). Linux 장비에서 작성해 Windows 빌드는 아직 확인하지 못함 |
+| AI 작성 | GUI 재설계 — `gui/ui_theme.cpp`, `gui/ui_controls.cpp`, `MainDlg`의 배치와 그리기, `EnrollDlg`의 그리기, `vpn_gui.rc`, 앱 아이콘(`windows/tools/mkicon.py`). Linux 장비에서 작성했고 MSVC 빌드는 CI로 확인, 실행은 아직 확인하지 못함 |
+| AI 작성 | `.github/workflows/ci.yml`, CI가 찾은 `posture.c`의 `wscapi.dll` 동적 로드 |

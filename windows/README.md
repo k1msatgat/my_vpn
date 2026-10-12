@@ -182,12 +182,10 @@ MFC 래퍼만 얹지 않고 Win32 수준에서 처리한 부분입니다.
 | `SPI_GETHIGHCONTRAST` / `WM_SYSCOLORCHANGE` | 고대비 모드에서는 우리 색을 버리고 시스템 색을 쓴다. 상태를 색으로만 구분하는 곳이 없게 글자를 함께 둔다 |
 | `DwmSetWindowAttribute(DWMWA_CAPTION_COLOR)` | 제목 표시줄을 창 바탕과 같은 색으로 (Windows 11, 이전 버전에서는 무시된다) |
 
-> **이 화면은 아직 Windows에서 빌드하거나 실행해 보지 못했습니다.** Linux 장비에서 작성했고,
-> 확인한 것은 다음까지입니다. 순수 Win32 파일(`ui_theme.cpp`, `ui_controls.cpp`)은 MinGW의 실제
-> Windows 헤더로 경고 없이 컴파일되고, `vpn_gui.rc`는 `windres`로 컴파일됩니다. MFC를 쓰는 파일은
-> MFC 선언을 흉내 낸 최소한의 헤더로 문법과 함수 형식까지만 봤습니다. 배치는 계산을 옮겨 기본 크기와
-> 최소 크기에서 겹침이 없는지 확인했습니다. 실제 모양, 깜빡임, 테마와의 어울림은 Visual Studio에서
-> 빌드해 봐야 압니다.
+> **이 화면은 MSVC로 빌드되는 것까지 확인했고, 실제로 띄워 본 적은 아직 없습니다.** Linux 장비에서
+> 작성했습니다. CI(`.github/workflows/ci.yml`)가 Windows 러너에서 `my_vpn.sln`을 Release x64로 빌드하며,
+> `/W4`에서 오류와 경고가 없습니다. 배치는 계산을 옮겨 기본 크기와 최소 크기에서 겹침이 없는지 봤습니다.
+> 실제 모양, 깜빡임, 테마와의 어울림, 고대비와 125% / 150% 배율은 Windows PC에서 띄워 봐야 압니다.
 
 - 연결 설정은 `HKCU\Software\my_vpn`에 저장해 다음 실행에 복원합니다.
 - CSV 저장은 UTF-8 BOM을 앞에 써서 엑셀이 한글을 알아보게 합니다.
@@ -294,12 +292,16 @@ python windows\test\mock_server.py --device <id>:<key>:10.0.0.3 --require-firewa
 막지 못하는 것:
 - 데이터 패킷은 여전히 평문이고 인증되지 않습니다. 인증은 세션을 여는 시점과 포스처 보고에만 걸립니다.
 - 서버는 클라이언트에게 자신을 증명하지 않습니다. 서버 주소를 위조할 수 있는 공격자는 가짜 `DENY`로 접속을 방해할 수 있습니다.
+- Windows Server에는 보안 센터가 없어 백신 상태가 늘 "확인 불가"로 보고됩니다. 서버는 이를 통과로 치지 않으므로, Server를 붙이려면 그 기기의 정책에서 `antivirus=on`을 빼야 합니다. (클라이언트는 `wscapi.dll`을 import로 묶지 않고 부를 때 System32에서만 찾습니다. 묶으면 DLL이 없는 곳에서는 프로세스가 뜨지도 못합니다.)
 - DPAPI는 다른 사용자와 다른 PC로부터 키를 지키지만, 같은 사용자로 도는 다른 프로세스는 키를 풀 수 있습니다.
 - 포스처는 클라이언트의 자기 보고입니다. 키를 가진 변조된 클라이언트는 거짓으로 보고할 수 있습니다.
 
 ---
 
 ## 빌드와 실행
+
+푸시할 때마다 CI가 아래 1~2번을 Windows 러너(Windows Server 2022, MSVC)에서 그대로 하고
+`vpn_client.exe selftest`를 돌립니다. 빌드된 실행 파일은 그 실행의 아티팩트로 받을 수 있습니다.
 
 1. [wintun.net](https://www.wintun.net/)에서 Wintun zip을 받아 `windows/third_party/`에 풉니다.
    (`windows/third_party/wintun/include/wintun.h`, `windows/third_party/wintun/bin/amd64/wintun.dll`)
