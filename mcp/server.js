@@ -76,7 +76,7 @@ const server = new McpServer({ name: 'my_vpn', version: '0.1.0' }, {
 /* ---- 서버 ------------------------------------------------------------------ */
 
 server.registerTool('server_status', {
-	description: 'Show whether the VPN server is running, its listen port and tunnel interface, the current sessions (derived from the log of this run), recent rejections, and whether an ACL change is waiting for a restart.',
+	description: 'Show whether the VPN server is running, its listen port and tunnel interface, the current sessions as the server itself reports them (device, endpoint, last reported posture, seconds since last packet, packet/byte counts, ACL denials), counters of handshakes and rejections by reason, the last few rejection log lines, and whether an ACL change is waiting for a restart.',
 	inputSchema: {},
 	annotations: READ,
 }, () => call('status'));

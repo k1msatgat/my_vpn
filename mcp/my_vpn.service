@@ -7,6 +7,7 @@ Wants=network-online.target
 Type=simple
 EnvironmentFile=/etc/my_vpn/server.env
 RuntimeDirectory=my_vpn
+RuntimeDirectoryMode=0700
 ExecStart=/opt/my_vpn/libexec/service.sh run
 ExecStartPost=/opt/my_vpn/libexec/service.sh tun-up $MAINPID
 ExecReload=/bin/kill -HUP $MAINPID

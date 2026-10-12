@@ -14,6 +14,7 @@
 
 const fs = require('node:fs');
 const crypto = require('node:crypto');
+const net = require('node:net');
 const { spawnSync } = require('node:child_process');
 
 const UNIT = 'my_vpn.service';
@@ -22,6 +23,7 @@ const DEVICE_FILE = `${ETC}/devices.conf`;
 const ACL_FILE = `${ETC}/acl.conf`;
 const ENV_FILE = `${ETC}/server.env`;
 const ACL_APPLIED = '/run/my_vpn/acl.applied';
+const STATUS_SOCK = '/run/my_vpn/status.sock';
 const SERVER_BIN = '/opt/my_vpn/server/bin/vpn_server';
 const AUTH_CHECK = '/opt/my_vpn/test/auth_check.py';
 
@@ -403,48 +405,37 @@ function tailLog(n) {
 	return journal(['-u', UNIT, '-n', String(n)]).map((e) => `${e.time} ${e.msg}`);
 }
 
-const POSTURE_STATE = ['unknown', 'off', 'on'];
+/* 서버에게 직접 묻는다. 상태 소켓은 접속하면 JSON 한 덩어리를 쓰고 닫는다
+ * (server/include/status.h). 세션 목록과 판정 횟수는 서버의 피어 테이블에서 바로
+ * 나온 값이다. */
+function serverStatus() {
+	return new Promise((resolve) => {
+		const sock = net.connect(STATUS_SOCK);
+		let buf = '';
 
-/* 서버에는 상태를 물어볼 창구가 없다. 이번 실행의 로그에서 세션이 생기고 사라진
- * 줄만 뽑아 차례로 적용하면 서버의 피어 테이블과 같은 것이 나온다. */
-function sessions(invocation) {
-	const live = new Map();
-	const rejected = [];
-	let m;
+		sock.setTimeout(2000, () => sock.destroy(new Error('timeout')));
+		sock.on('data', (d) => { buf += d; });
+		sock.on('error', () => resolve(null));
+		sock.on('end', () => {
+			try {
+				resolve(JSON.parse(buf));
+			} catch (e) {
+				resolve(null);
+			}
+		});
+	});
+}
 
+/* 왜 거절됐는지는 숫자가 아니라 문장으로 남는다. 그건 로그에서 읽는다. */
+function rejections(invocation) {
 	if (!invocation) {
-		return { sessions: [], recent_rejections: [] };
+		return [];
 	}
 
-	for (const e of journal([`_SYSTEMD_INVOCATION_ID=${invocation}`, '--grep', '^\\[(peer|HS|ka)\\] '])) {
-		const s = e.msg;
-
-		if ((m = /^\[peer\] register (\S+) <- (\S+) idx=([0-9a-f]{8})/.exec(s))) {
-			live.set(m[1], { tunnel_ip: m[1], endpoint: m[2], session_idx: m[3], since: e.time });
-		} else if ((m = /^\[HS\] device ([0-9a-f]{32}) authenticated as (\S+) \(build=(\d+) firewall=(\d+) antivirus=(\d+)\)/.exec(s))) {
-			const p = live.get(m[2]);
-			if (p) {
-				p.device_id = m[1];
-				p.posture_at_handshake = {
-					os_build: Number(m[3]),
-					firewall: POSTURE_STATE[m[4]] || m[4],
-					antivirus: POSTURE_STATE[m[5]] || m[5],
-				};
-			}
-		} else if ((m = /^\[peer\] rebind (\S+): \S+ -> (\S+)/.exec(s))) {
-			if (live.has(m[1])) {
-				live.get(m[1]).endpoint = m[2];
-			}
-		} else if ((m = /^\[peer\] drop (\S+) idx=/.exec(s)) ||
-				(m = /^\[peer\] expire inner ip\[([^\]]+)\]/.exec(s)) ||
-				(m = /^\[peer\] table full evicting (\S+)/.exec(s))) {
-			live.delete(m[1]);
-		} else if (/rejected|bad auth|unknown device|no longer registered|not its tunnel ip/.test(s)) {
-			rejected.push(`${e.time} ${s}`);
-		}
-	}
-
-	return { sessions: [...live.values()], recent_rejections: rejected.slice(-5) };
+	return journal([`_SYSTEMD_INVOCATION_ID=${invocation}`, '--grep', '^\\[(HS|ka|deny)\\] '])
+		.filter((e) => /rejected|bad auth|unknown device|no longer registered|not its tunnel ip|^\[deny\]/.test(e.msg))
+		.slice(-5)
+		.map((e) => `${e.time} ${e.msg}`);
 }
 
 function tunnel(pid) {
@@ -480,7 +471,7 @@ function tunnel(pid) {
 	}
 }
 
-function status() {
+async function status() {
 	const u = unit();
 	const env = readEnv();
 	const acl = readAcl();
@@ -502,7 +493,16 @@ function status() {
 		st.pid = Number(u.MainPID);
 		st.started_at = new Date(Number(u.ExecMainStartTimestamp.slice(1)) * 1000).toISOString();
 		st.tunnel = tunnel(u.MainPID);
-		Object.assign(st, sessions(u.InvocationID));
+
+		const live = await serverStatus();
+		if (live === null) {
+			st.sessions_error = 'the server did not answer on its status socket';
+		} else {
+			st.uptime_sec = live.uptime_sec;
+			st.sessions = live.sessions;
+			st.counters = live.counters;
+		}
+		st.recent_rejections = rejections(u.InvocationID);
 	} else if (u.ActiveState === 'failed') {
 		st.last_result = `${u.Result} (exit status ${u.ExecMainStatus})`;
 		st.last_log = tailLog(15);
@@ -569,29 +569,29 @@ function reload() {
 
 const COMMANDS = {
 	status() {
-		return status();
+		return status();	/* Promise — main 이 기다린다 */
 	},
 
-	start() {
+	async start() {
 		if (unit().running) {
-			return { changed: false, ...status() };
+			return { changed: false, ...await status() };
 		}
 		systemctl('start');
-		return { changed: true, ...status() };
+		return { changed: true, ...await status() };
 	},
 
-	stop() {
+	async stop() {
 		const was = unit().running;
 
 		systemctl('stop');
 		/* 시작에 실패한 유닛은 stop 뒤에도 failed 로 남는다. 내리라고 했으면 지운다. */
 		run('/usr/bin/systemctl', ['reset-failed', UNIT]);
-		return { changed: was, ...status() };
+		return { changed: was, ...await status() };
 	},
 
-	restart() {
+	async restart() {
 		systemctl('restart');
-		return { changed: true, ...status() };
+		return { changed: true, ...await status() };
 	},
 
 	reload() {
@@ -784,7 +784,7 @@ const COMMANDS = {
 	},
 };
 
-function main() {
+async function main() {
 	let req, out;
 
 	if (process.getuid() !== 0) {
@@ -801,7 +801,7 @@ function main() {
 		if (req === null || typeof req !== 'object' || !Object.hasOwn(COMMANDS, req.cmd)) {
 			fail(`unknown command (${Object.keys(COMMANDS).join(', ')})`);
 		}
-		out = { ok: true, ...COMMANDS[req.cmd](req) };
+		out = { ok: true, ...await COMMANDS[req.cmd](req) };
 	} catch (e) {
 		/* 예상한 실패만 그대로 전한다. 그 밖의 예외는 경로 같은 내부 사정을 담고
 		 * 있을 수 있으니 종류만 알린다. */
@@ -816,4 +816,4 @@ function main() {
 	return out.ok ? 0 : 1;
 }
 
-process.exitCode = main();
+main().then((code) => { process.exitCode = code; });
