@@ -17,3 +17,6 @@ windows/build/
 windows/third_party/wintun/
 windows/test/logs/
 *.vcxproj.user
+
+# MCP 서버 (Node)
+mcp/node_modules/

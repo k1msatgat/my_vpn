@@ -1,0 +1,31 @@
+[Unit]
+Description=my_vpn server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/my_vpn/server.env
+RuntimeDirectory=my_vpn
+ExecStart=/opt/my_vpn/libexec/service.sh run
+ExecStartPost=/opt/my_vpn/libexec/service.sh tun-up $MAINPID
+ExecReload=/bin/kill -HUP $MAINPID
+
+# 죽으면 다시 올리되, 설정이 틀려 스스로 1 로 끝난 경우는 올려 봐야 같은 결과다.
+Restart=on-failure
+RestartSec=2
+RestartPreventExitStatus=1
+
+# 서버는 패킷마다 한 줄씩 찍는다. journald 의 기본 제한에 걸리면 세션이 생기고
+# 사라진 줄까지 버려지고, MCP 는 그 줄들로 현재 세션을 계산한다.
+LogRateLimitIntervalSec=0
+
+# TUN 을 만들고 주소를 붙이는 것 말고는 root 의 힘이 필요 없다.
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
