@@ -214,3 +214,17 @@ void device_dump(void)
 				devices[i].require.min_build);
 	}
 }
+
+/* 그 터널 주소를 가진 기기. 없으면 NULL. */
+device_t *device_find_ip(struct in_addr tun_ip)
+{
+	int i;
+
+	for (i = 0; i < ndevices; i++) {
+		if (devices[i].tun_ip.s_addr == tun_ip.s_addr) {
+			return &devices[i];
+		}
+	}
+
+	return NULL;
+}

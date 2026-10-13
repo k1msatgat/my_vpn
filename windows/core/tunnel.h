@@ -124,6 +124,28 @@ typedef struct tunnel_config {
  * 정상 종료 0, 초기화/핸드셰이크 실패나 I/O 오류는 1. */
 int tunnel_run(const tunnel_config_t *cfg, HANDLE stop_event);
 
+/* 등록 코드로 서버에 기기를 올린 결과. */
+typedef enum tunnel_enroll_result {
+	TUNNEL_ENROLL_OK = 0,
+	TUNNEL_ENROLL_BAD_CODE,		/* 코드의 글자 수나 글자가 맞지 않는다. 서버에 묻지 않았다 */
+	TUNNEL_ENROLL_NO_RESPONSE,	/* 서버가 답하지 않는다 */
+	TUNNEL_ENROLL_REJECTED,		/* 서버가 그 코드를 받지 않는다: 잘못 적었거나, 만료됐거나, 이미 쓰였다 */
+	TUNNEL_ENROLL_CONFLICT,		/* 그 기기 ID 나 그 터널 주소가 이미 서버에 있다 */
+	TUNNEL_ENROLL_SERVER_FAILED,	/* 서버가 받았지만 기기 목록에 적지 못했다 */
+	TUNNEL_ENROLL_ERROR		/* 이쪽의 오류 (소켓, 암호 도구) 또는 중지 요청 */
+} tunnel_enroll_result_t;
+
+/* 등록 코드(code)로 서버에 이 기기의 id 와 key 를 올린다. tunnel_enroll_result_t 를 돌려준다.
+ *
+ * cfg 에서는 서버 주소 / 포트와 on_log 만 쓴다. 어댑터를 만들지 않으므로 관리자 권한이
+ * 필요 없다. 응답을 기다리는 동안 블로킹한다 (길어야 십여 초). stop_event 는
+ * manual-reset 이벤트여야 하고, signaled 되면 기다리던 것을 그만둔다.
+ *
+ * id 와 key 는 호출자가 device_generate() 로 만든 것이고, OK 를 받은 뒤에 device_save()
+ * 로 저장해야 한다. 순서가 반대면 서버가 받지 않았을 때 예전 신원만 잃는다. */
+int tunnel_enroll(const tunnel_config_t *cfg, const char *code,
+		const uint8_t id[DEVICE_ID_LEN], const uint8_t key[AUTH_KEY_LEN], HANDLE stop_event);
+
 /* 폐기 이유의 짧은 영문 이름.
  * 코어는 표시 문자열을 가지지 않는다 — 여기서 한국어를 돌려주면 char* 가 되어
  * UI 가 ANSI 코드페이지로 변환하면서 깨진다. 화면에 쓸 라벨은 UI 가 enum 을

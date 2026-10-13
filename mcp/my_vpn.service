@@ -13,6 +13,11 @@ RuntimeDirectoryMode=0700
 # 곳은 systemd 가 이렇게 내준 디렉터리뿐이다.
 LogsDirectory=my_vpn
 LogsDirectoryMode=0700
+
+# 등록 코드로 온 기기를 서버가 기기 목록에 직접 올린다 (devices.conf 에 한 줄을 더하고
+# enroll.conf 에서 쓰인 줄을 지운다). ProtectSystem=strict 는 /etc 를 읽기 전용으로
+# 만들므로 이 디렉터리만 따로 연다.
+ReadWritePaths=/etc/my_vpn
 ExecStart=/opt/my_vpn/libexec/service.sh run
 ExecStartPost=/opt/my_vpn/libexec/service.sh tun-up $MAINPID
 ExecReload=/bin/kill -HUP $MAINPID

@@ -61,6 +61,15 @@ int secure_res_open(const uint8_t key[VPN_KEY_LEN], uint8_t *pkt, size_t len);
 int secure_deny_mac(const uint8_t device_key[AUTH_KEY_LEN], uint8_t reason,
 		const uint8_t auth_mac[AUTH_MAC_LEN], uint8_t out[AUTH_MAC_LEN]);
 
+/* 등록 코드에서 등록용 임시 신원을 뽑는다 (proto.h 의 "기기 등록").
+ *
+ *   id  = HMAC-SHA256("my_vpn enroll id",  코드) 의 앞 16B
+ *   key = HMAC-SHA256("my_vpn enroll key", 코드)
+ *
+ * 코드는 줄표와 공백을 빼고 대문자로 바꾼 25자다. O 는 0 으로, I 와 L 은 1 로 읽는다.
+ * 글자 수가 맞지 않거나 쓰지 않는 글자가 있으면 -1. */
+int secure_enroll_identity(const char *code, uint8_t id[DEVICE_ID_LEN], uint8_t key[AUTH_KEY_LEN]);
+
 /* ---- 열린 세션 -------------------------------------------------------------- */
 
 /* 이미 받은 counter 를 기억하는 창의 폭. UDP 는 순서를 바꿔 전달할 수 있으므로 가장

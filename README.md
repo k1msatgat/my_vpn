@@ -51,6 +51,7 @@ Zero Trust Network Access(ZTNA)의 기반 구조를 학습하는 것을 목표�
 - **리소스별 포스처 조건** — ACL 규칙마다 요구하는 포스처를 따로 건다. 터널에 들어온 기기라도 방화벽을 끄면 SSH 같은 민감한 목적지만 닫힌다
 - **상태 소켓** — 지금 붙어 있는 세션(기기, 포스처, 트래픽)과 사유별 거부 횟수를 읽기 전용 유닉스 소켓으로 내보낸다
 - **감사 로그** — 누가 언제 들어와 어디에 닿았고 왜 거절됐는지를 사건마다 한 줄씩 JSON으로 남긴다. 패킷마다가 아니라 세션과 목적지마다 한 번
+- **등록 코드** — 기기의 ID와 키를 손으로 옮기지 않는다. 관리자가 만든 일회용 코드를 기기에 적으면 기기가 자기 키를 암호화된 세션으로 서버에 올린다
 - **MCP 제어** — AI 클라이언트가 서버를 올리고 내리고, 기기와 ACL을 바꾸고, 상태를 본다 ([docs/mcp.md](docs/mcp.md))
 - **위조 방어** — 서버는 inner src가 세션에 등록된 터널 IP와 같은지, 클라이언트는 출발지가 서버인지 확인
 - **Keepalive & 세션 만료** — 유휴 시 10초마다 keepalive, 서버는 60초 무응답 세션을 정리
@@ -89,6 +90,7 @@ Zero Trust Network Access(ZTNA)의 기반 구조를 학습하는 것을 목표�
 | `MSG_TYPE_CHALLENGE` | 5 | `msg_header` + nonce (16B) |
 | `MSG_TYPE_AUTH` | 6 | `msg_header` + 기기 ID (16B) + nonce (16B) + 클라이언트의 일회용 공개키 (64B) + 포스처 (8B) + mac (32B) |
 | `MSG_TYPE_DENY` | 7 | 핸드셰이크 중 (`session_idx` = 0): `msg_header` + 사유 (1B) + mac (32B) / 세션 중: 세션 패킷, 암호문 = 사유 (1B) |
+| `MSG_TYPE_ENROLL` | 8 | 세션 패킷. 등록 코드로 연 세션에서만. C→S: 암호문 = 기기 ID (16B) + 키 (32B) / S→C: 암호문 = 결과 (1B) |
 
 포스처 보고는 8바이트 고정입니다: `os_build`(4B, BE) + `firewall`(1B) + `antivirus`(1B) + 예약(2B).
 상태 값은 0 = 모름, 1 = 꺼짐, 2 = 켜짐이며, 채우지 않은 필드가 통과로 읽히지 않도록 0을 "모름"으로 뒀습니다.
@@ -297,6 +299,7 @@ my_vpn/
 │       ├── server.c       # epoll 루프, 인증 핸드셰이크 / keepalive 검증, 패킷 검증
 │       ├── peer.c         # 피어 테이블, 세션 idx 발급/조회, 세션 만료
 │       ├── device.c       # 등록된 기기 목록, 기기별 포스처 정책
+│       ├── enroll.c       # 등록 코드의 대기 목록, 등록된 기기를 기기 목록에 올리기
 │       ├── crypt.c        # crypt.h 의 OpenSSL 구현 — SHA-256 / HMAC, ECDH P-256, AES-256-GCM, 난수
 │       ├── policy.c       # 포스처 조건의 문법과 판정 (기기 목록과 ACL이 함께 쓴다)
 │       ├── status.c       # 상태 소켓 — 세션과 카운터를 JSON으로
@@ -369,6 +372,9 @@ my_vpn/
 | 데이터 패킷 재전송 | 방어 | 받은 `counter`를 64개 폭의 창으로 기억. 순서가 바뀌어 늦게 온 패킷은 받고, 이미 받은 값과 창보다 오래된 값은 버림 |
 | 서버 위장 | 방어 | 세션 키에 기기 키가 들어가므로 그 키를 모르는 쪽은 클라이언트가 받아들일 `RES_HANDSHAKE`를 만들지 못함. 세션 중의 keepalive 응답과 `DENY`도 세션 키로 감쌈 |
 | 가짜 거절로 접속 방해 | 부분 방어 | 인증 뒤의 거절은 mac / 세션 키로 확인. 인증 전의 거절(모르는 기기, 인증 실패)은 확인할 수 없어, 클라이언트가 곧바로 믿지 않고 진짜 답을 끝까지 기다림. 경로 위에서 진짜 답을 지울 수 있는 공격자는 여전히 막을 수 있음 |
+| 등록할 때 키가 새는 것 | 방어 | 기기의 키는 등록 코드로 연 세션의 키로 감싸여 감. 그 세션에도 일회용 ECDH가 들어 있어 코드를 나중에 알게 돼도 녹화해 둔 등록에서 키를 꺼낼 수 없음 |
+| 등록 코드의 재사용 / 등록용 세션으로 터널 쓰기 | 방어 | 코드는 한 번 쓰이면 대기 목록에서 지워지고 만료됨. 등록용 세션은 `ENROLL` 말고는 받지 않음 |
+| 가로챈 등록 코드로 남의 자리에 등록 | **미방어** | 만료 전의 코드를 가진 사람이 그 자리의 기기가 됨. 코드를 건네는 길이 신뢰의 근거이고, 누가 올라왔는지는 감사 로그의 `enrolled`에 외부 주소와 함께 남음 |
 | 메타데이터 노출 | **미방어** | 누가(기기 ID) 언제 얼마나 주고받는지, 핸드셰이크의 포스처는 암호화되지 않음 |
 | 포스처 거짓 보고 | **미방어** | 포스처는 클라이언트의 자기 보고. 키를 가진 변조된 클라이언트는 거짓으로 보고할 수 있음 (막으려면 TPM 기반 원격 증명 필요) |
 
@@ -408,6 +414,7 @@ my_vpn/
 - [x] 서버가 내려 주는 터널 설정 — 터널 주소 / prefix / MTU와 ACL에서 뽑은 경로를 `RES_HANDSHAKE`와 keepalive 응답에 싣고, 클라이언트가 달라진 부분만 어댑터에 맞춤 (`test/auth_check.py` 130개 통과, 실제 Windows 클라이언트로 주소 / 경로 적용과 그 경로로의 ping 확인)
 - [x] 서버 뒤의 네트워크로 전달 — 규칙 파일이 없으면 터널 대역 안까지만, 서비스의 `FORWARD_OUT`으로 IP 전달 / 주소 변환 / 되돌아오는 답만 허용 (`test/auth_check.py` 136개 통과, 실제 Windows 클라이언트로 서버 뒤의 게이트웨이까지 ping, 규칙을 빼면 경로와 함께 끊기고 넣으면 돌아오는 것 확인)
 - [x] 감사 로그 — 세션의 시작과 끝, 거절된 핸드셰이크, 목적지별 접근 판정, 정책 다시 읽기를 JSON 줄로 (`test/auth_check.py` 149개 통과), MCP `audit_log` 도구
+- [x] 등록 코드 — 코드에서 뽑은 임시 신원으로 평소의 핸드셰이크를 돌아 기기의 ID와 키를 세션 안에서 받는다. 일회용 / 만료, 등록용 세션은 터널에 닿지 못함 (`test/auth_check.py` 176개 통과, 실제 Windows 클라이언트로 MCP에서 만든 코드로 등록 → 새 신원으로 접속 확인)
 - [x] 신원 기반 인증 — 기기 키 챌린지-응답, 포스처 기반 정책 (ZTNA)
   - [x] 와이어 포맷 정의 (`CHALLENGE` / `AUTH` / `DENY`, 포스처 보고)
   - [x] Windows 클라이언트 — 포스처 수집, 기기 등록, 인증 핸드셰이크
@@ -452,6 +459,7 @@ my_vpn/
 | AI 작성 | 서버가 내려 주는 터널 설정 — `proto.{h,c}`의 `net_config`, `alc.c`의 `acl_routes`, `server.c`의 `net_config_for`와 keepalive 응답, `tunnel.c`의 `netcfg_apply` / `netcfg_refresh`(주소 · MTU · 경로를 달라진 만큼만 고침), GUI의 터널 IP 칸을 입력에서 표시로 바꾼 것. 경로를 ACL에서 뽑는 방식은 AI가 제안 |
 | AI 작성 | 서버 뒤의 네트워크로 전달 — `server.c`의 규칙 파일이 없을 때의 판정, `mcp/service.sh`의 `forward_up` / `forward-down`(nftables), `docs/linux.md`의 해당 절 |
 | AI 작성 | 감사 로그 — `server/src/audit.c`, `server.c` / `peer.c`의 사건 지점, `mcp/ctl.cjs`의 `audit`와 MCP `audit_log` 도구 |
+| AI 작성 | 등록 코드 — `server/src/enroll.c`, `server.c`의 `handle_enroll`, `secure.c`의 `secure_enroll_identity`, `tunnel.c`의 `tunnel_enroll`, `device.c`(Windows)의 생성 / 저장 분리, 콘솔과 GUI의 코드 입력, `mcp/ctl.cjs`의 `enroll_*`. 새 핸드셰이크를 만들지 않고 코드에서 임시 신원을 뽑는 방식은 AI가 제안 |
 | AI 작성 | `mcp/` MCP 서버 전체 — `server.js`(도구 선언), `ctl.cjs`(root 헬퍼), systemd 유닛, 설치 스크립트, `docs/mcp.md` |
 | AI 작성 | GUI 재설계 — `gui/ui_theme.cpp`, `gui/ui_controls.cpp`, `MainDlg`의 배치와 그리기, `EnrollDlg`의 그리기, `vpn_gui.rc`, 앱 아이콘(`windows/tools/mkicon.py`). Linux 장비에서 작성했고 MSVC 빌드는 CI로 확인, 실행은 아직 확인하지 못함 |
 | AI 작성 | `.github/workflows/ci.yml`, CI가 찾은 `posture.c`의 `wscapi.dll` 동적 로드 |

@@ -27,6 +27,7 @@ AI 클라이언트 ──ssh──▶ my_vpn_mcp (mcp/server.js, 일반 계정)
 | 설정 | `/etc/my_vpn/` (root 전용) | `server.env`(포트, 터널 주소, MTU, 전달), `devices.conf`, `acl.conf` |
 
 - **셸을 열어 주지 않습니다.** 할 수 있는 일은 아래 도구가 전부입니다. sudoers는 `my_vpn_ctl`을 인자 없이 부르는 것 하나만 허용합니다.
+- **기기 키는 보통 여기를 지나지도 않습니다.** `enroll_create`로 만든 코드를 기기에 적으면 기기가 자기 키를 암호화된 세션으로 서버에 직접 올립니다 ([docs/linux.md](linux.md#등록-코드)). 서버는 그 기기를 `devices.conf`에 스스로 적으므로, 서비스는 `/etc/my_vpn`에만 쓸 수 있게 열려 있습니다 (`ReadWritePaths`).
 - **기기 키는 들어가기만 하고 나오지 않습니다.** `device_add`로 받은 키는 `devices.conf`에만 쓰이고 어떤 응답에도 실리지 않습니다. 요청을 argv가 아니라 stdin으로 넘기는 것도 키가 `ps`나 sudo 로그에 남지 않게 하기 위해서입니다.
 - **포트를 새로 열지 않습니다.** 전송은 SSH 위의 stdio라서 인증은 SSH 키가 맡습니다.
 - 설치되는 파일은 전부 root 소유의 복사본입니다. 서비스가 저장소의 바이너리를 직접 실행하면 저장소를 고칠 수 있는 계정이 곧 root가 됩니다.
@@ -78,7 +79,9 @@ command="/usr/local/bin/my_vpn_mcp",restrict ssh-ed25519 AAAA... ai-client
 | `server_logs` | 서버 로그. `lines`, `contains`, `since_seconds` |
 | `audit_log` | 감사 로그 — 누가 붙었고 어디에 닿았고 왜 거절됐는지를 사건마다 한 줄씩. `lines`, `event`, `device`, `since_seconds` |
 | `device_list` | 등록된 기기 — ID, 이름, 터널 IP, 포스처 조건 (키 제외) |
-| `device_add` | 기기 등록. ID와 키는 기기의 `vpn_client.exe enroll`에서 나온 값 |
+| `enroll_create` | **기기를 올리는 보통의 방법.** 한 번 쓰는 등록 코드를 만든다. 터널 IP(생략하면 빈 주소 중 가장 낮은 것), 포스처 조건, 이름, 유효 시간. 코드는 이 응답에만 나온다 |
+| `enroll_list` / `enroll_revoke` | 아직 쓰이지 않은 코드의 목록 (코드 자체는 다시 볼 수 없다) / 취소 |
+| `device_add` | 손으로 등록. ID와 키는 기기의 `vpn_client.exe enroll`(코드 없이)에서 나온 값 |
 | `device_update` | 포스처 조건 / 터널 IP / 이름 변경 |
 | `device_remove` | 기기 폐기 |
 | `acl_get` / `acl_set` / `acl_clear` | ACL 조회 / 전체 교체 / 끄기. 규칙마다 `require`로 포스처 조건을 걸 수 있다 |

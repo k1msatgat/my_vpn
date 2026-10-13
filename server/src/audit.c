@@ -146,7 +146,8 @@ void audit_session_open(const peer_t *peer)
 
 void audit_session_close(const peer_t *peer, const char *reason)
 {
-	if (out == NULL) {
+	/* 등록용 세션이 닫히는 것은 기기의 세션이 닫힌 것이 아니다. 등록은 enrolled 로 따로 남는다. */
+	if (out == NULL || peer->enroll) {
 		return;
 	}
 
@@ -278,5 +279,24 @@ void audit_reload(const char *what, int ok, int count)
 	if (ok) {
 		field("\"count\":%d", count);
 	}
+	end();
+}
+
+void audit_enrolled(const uint8_t id[DEVICE_ID_LEN], struct in_addr tun_ip,
+		const struct sockaddr_in *src, const char *label)
+{
+	char ids[DEVICE_ID_STRLEN];
+	char ib[INET_ADDRSTRLEN];
+
+	if (out == NULL) {
+		return;
+	}
+
+	begin("enrolled");
+	field("\"device\":\"%s\"", device_id_str(id, ids));
+	field("\"tunnel_ip\":\"%s\"", ip_str(tun_ip, ib));
+	field("\"endpoint\":\"%s:%u\"", ip_str(src->sin_addr, ib), ntohs(src->sin_port));
+	/* 이름은 enroll.c 가 받는 글자를 정해 둔 값이라 그대로 적어도 JSON 이 깨지지 않는다. */
+	field("\"label\":\"%s\"", label);
 	end();
 }

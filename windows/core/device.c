@@ -94,20 +94,21 @@ int device_load(device_t *out)
 	return DEVICE_OK;
 }
 
-int device_enroll(device_t *out)
+int device_generate(device_t *out)
+{
+	/* rand() 는 쓸 수 없다. 시드와 출력 몇 개로 다음 값을 맞힐 수 있는 생성기라
+	 * 키가 예측된다. OS 의 암호학적 난수 생성기를 쓴다. */
+	return BCRYPT_SUCCESS(BCryptGenRandom(NULL, (PUCHAR)out, sizeof(*out),
+				BCRYPT_USE_SYSTEM_PREFERRED_RNG)) ? DEVICE_OK : DEVICE_ERROR;
+}
+
+int device_save(const device_t *dev)
 {
 	DATA_BLOB sealed = { 0 };
 	HKEY reg = NULL;
 	int ret = DEVICE_ERROR;
 
-	/* rand() 는 쓸 수 없다. 시드와 출력 몇 개로 다음 값을 맞힐 수 있는 생성기라
-	 * 키가 예측된다. OS 의 암호학적 난수 생성기를 쓴다. */
-	if (!BCRYPT_SUCCESS(BCryptGenRandom(NULL, (PUCHAR)out, sizeof(*out),
-			BCRYPT_USE_SYSTEM_PREFERRED_RNG))) {
-		return DEVICE_ERROR;
-	}
-
-	if (key_protect(out->key, &sealed) < 0) {
+	if (key_protect(dev->key, &sealed) < 0) {
 		goto out;
 	}
 
@@ -117,7 +118,7 @@ int device_enroll(device_t *out)
 	}
 
 	if (RegSetValueExW(reg, DEVICE_REG_ID, 0, REG_BINARY,
-				out->id, sizeof(out->id)) != ERROR_SUCCESS ||
+				dev->id, sizeof(dev->id)) != ERROR_SUCCESS ||
 			RegSetValueExW(reg, DEVICE_REG_KEY, 0, REG_BINARY,
 				sealed.pbData, sealed.cbData) != ERROR_SUCCESS) {
 		goto out;
@@ -132,9 +133,16 @@ out:
 	if (sealed.pbData) {
 		LocalFree(sealed.pbData);
 	}
-	if (ret != DEVICE_OK) {
-		SecureZeroMemory(out, sizeof(*out));
-	}
 
 	return ret;
+}
+
+int device_enroll(device_t *out)
+{
+	if (device_generate(out) != DEVICE_OK || device_save(out) != DEVICE_OK) {
+		SecureZeroMemory(out, sizeof(*out));
+		return DEVICE_ERROR;
+	}
+
+	return DEVICE_OK;
 }

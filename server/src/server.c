@@ -19,6 +19,7 @@
 #include "device.h"
 #include "status.h"
 #include "audit.h"
+#include "enroll.h"
 
 #define MAX_EVENTS 8
 
@@ -47,6 +48,9 @@ static int acl_enabled;
  * 클라이언트에게 그대로 내려간다. */
 static int tun_prefix = 24;
 static int tun_mtu = TUN_MTU;
+
+/* 기기 목록 파일. 등록이 끝나면 여기에 한 줄을 더하고 다시 읽는다. */
+static const char *device_path;
 
 static struct in_addr tun_subnet_of(struct in_addr ip)
 {
@@ -156,7 +160,12 @@ static void handle_request(int32_t sock, const uint8_t *packet, int32_t n,
 		return;
 	}
 
+	/* 등록된 기기가 아니면 등록하러 온 것일 수 있다. 등록 코드에서 뽑은 임시 ID 를
+	 * 대면 그 자리를 기기처럼 다룬다 — nonce 를 주고 서명을 받는 길이 같다. */
 	dev = device_find(body);
+	if (dev == NULL) {
+		dev = enroll_find(body);
+	}
 	if (dev == NULL) {
 		printf("[HS] unknown device %s\n", device_id_str(body, ids));
 		audit_auth_denied(body, src, DENY_UNKNOWN_DEVICE);
@@ -278,6 +287,7 @@ static void handle_auth(int32_t sock, const uint8_t *packet, int32_t n,
 	peer_t *peer;
 	int fresh;
 	int len;
+	int enrolling = 0;
 
 	if (n < (int32_t)AUTH_PACKET_LEN) {
 		printf("[HS] short auth (%d bytes)\n", n);
@@ -285,6 +295,10 @@ static void handle_auth(int32_t sock, const uint8_t *packet, int32_t n,
 	}
 
 	dev = device_find(body + AUTH_OFF_DEVICE_ID);
+	if (dev == NULL) {
+		dev = enroll_find(body + AUTH_OFF_DEVICE_ID);
+		enrolling = dev != NULL;
+	}
 	if (dev == NULL) {
 		printf("[HS] unknown device %s\n", device_id_str(body + AUTH_OFF_DEVICE_ID, ids));
 		audit_auth_denied(body + AUTH_OFF_DEVICE_ID, src, DENY_UNKNOWN_DEVICE);
@@ -321,8 +335,20 @@ static void handle_auth(int32_t sock, const uint8_t *packet, int32_t n,
 
 	/* 누구인지는 확인됐다. 이제 그 기기가 지금 믿을 만한 상태인지 본다. 포스처는
 	 * mac 의 서명 범위 안이라 전달 도중에 고쳐지지 않았다. */
+	/* 코드에 묶인 터널 주소를 그 사이에 다른 기기가 쓰게 됐으면 이 코드로는 등록할 수
+	 * 없다. 여기서 멈추지 않으면 아래에서 그 주소의 세션을 내리게 되어, 쓸 수 없는 코드
+	 * 하나가 멀쩡한 기기의 연결을 끊는다. */
+	if (enrolling && device_find_ip(dev->tun_ip) != NULL) {
+		printf("[enroll] code %s: its tunnel ip is already assigned to a device\n", ids);
+		send_deny(sock, src, srclen, DENY_UNKNOWN_DEVICE, dev, auth_mac);
+		return;
+	}
+
+	/* 등록하러 온 기기는 여기서 걸러내지 않는다. 정책은 그 기기가 등록을 마치고 자기
+	 * 키로 터널을 열 때 건다. 등록까지 막으면 "방화벽을 켜고 다시 오라"는 말을 등록
+	 * 실패로 듣게 되고, 등록용 세션으로는 어차피 어디에도 닿을 수 없다. */
 	posture_decode(body + AUTH_OFF_POSTURE, sizeof(posture), &posture);
-	if (!device_posture_ok(dev, &posture)) {
+	if (!enrolling && !device_posture_ok(dev, &posture)) {
 		printf("[HS] device %s posture rejected (build=%u firewall=%u antivirus=%u)\n",
 				ids, posture.os_build, posture.firewall, posture.antivirus);
 		audit_auth_denied(dev->id, src, DENY_POSTURE);
@@ -360,11 +386,20 @@ static void handle_auth(int32_t sock, const uint8_t *packet, int32_t n,
 		return;
 	}
 
-	stats.handshake_ok++;
-	audit_session_open(peer);
+	if (enrolling) {
+		/* 등록용 세션이다. 기기의 세션으로 세지 않고, 감사 로그에도 세션으로 남기지
+		 * 않는다. 받게 될 터널 주소의 자리를 미리 쓰지만 그 주소로는 아무것도 오가지
+		 * 않는다. */
+		peer->enroll = 1;
+		printf("[enroll] code %s accepted, waiting for the device (%s)\n", ids, ip_str(tun_ip, ib));
+	}
+	else {
+		stats.handshake_ok++;
+		audit_session_open(peer);
 
-	printf("[HS] device %s authenticated as %s (build=%u firewall=%u antivirus=%u)\n",
-			ids, ip_str(tun_ip, ib), posture.os_build, posture.firewall, posture.antivirus);
+		printf("[HS] device %s authenticated as %s (build=%u firewall=%u antivirus=%u)\n",
+				ids, ip_str(tun_ip, ib), posture.os_build, posture.firewall, posture.antivirus);
+	}
 
 	if (sendto(sock, res, len, 0, (const struct sockaddr *)&peer->outer, peer->outer_len) < 0){
 		perror("sendto handshake");
@@ -462,6 +497,80 @@ static void handle_keepalive(int32_t sock, peer_t *peer, const uint8_t *body, in
 	send_keepalive(sock, peer, dev);
 }
 
+/* ENROLL (C -> S): device_id(16) | device_key(32). 등록 코드로 연 세션에서만 온다.
+ *
+ * 여기까지 온 것은 코드를 아는 쪽이다. 기기가 스스로 만든 ID 와 키를 받아 기기 목록에
+ * 올린다. 터널 주소, 포스처 조건, 이름은 관리자가 코드를 만들 때 정해 둔 것을 쓴다 —
+ * 기기가 정할 수 있는 것은 자기 신원뿐이다.
+ *
+ * 코드는 한 번 쓰면 끝이다. 다만 답이 사라져 같은 요청이 다시 오는 것은 받아 준다. 같은
+ * ID 로 다시 오면 같은 답을 하고, 다른 ID 로 오면 거절한다. */
+static void handle_enroll(int32_t sock, peer_t *peer, const uint8_t *body, int32_t n,
+		const struct sockaddr_in *src, socklen_t srclen)
+{
+	char ids[DEVICE_ID_STRLEN];
+	char ib[INET_ADDRSTRLEN];
+	char label[64];
+	uint8_t res[PKT_OVERHEAD + 1];
+	uint8_t status;
+	struct in_addr tun_ip;
+	device_t *pending;
+
+	if (n < (int32_t)ENROLL_PAYLOAD_LEN) {
+		printf("[enroll] short request (%d bytes)\n", n);
+		return;
+	}
+
+	if (peer->enrolled) {
+		status = memcmp(peer->enrolled_id, body, DEVICE_ID_LEN) == 0 ? ENROLL_OK : ENROLL_GONE;
+	}
+	else {
+		pending = enroll_find(peer->device_id);
+
+		if (pending == NULL) {
+			status = ENROLL_GONE;
+		}
+		else if (device_find(body) != NULL || device_find_ip(pending->tun_ip) != NULL) {
+			status = ENROLL_CONFLICT;
+		}
+		else {
+			tun_ip = pending->tun_ip;
+			snprintf(label, sizeof(label), "%s", enroll_label(pending));
+
+			/* 파일에 적은 뒤 그 파일을 다시 읽어서 올린다. 표에 직접 끼워 넣으면 파일과
+			 * 표가 다른 길로 만들어져, 다음에 다시 읽었을 때 달라질 수 있다. 읽고 나서
+			 * 그 기기가 정말 있는지까지 본다. */
+			if (enroll_complete(pending, body, body + DEVICE_ID_LEN, device_path) < 0 ||
+					device_load(device_path) < 0 || device_find(body) == NULL) {
+				printf("[enroll] could not add device %s to %s\n",
+						device_id_str(body, ids), device_path);
+				status = ENROLL_FAILED;
+			}
+			else {
+				peer->enrolled = 1;
+				memcpy(peer->enrolled_id, body, DEVICE_ID_LEN);
+				status = ENROLL_OK;
+
+				printf("[enroll] device %s enrolled as %s\n",
+						device_id_str(body, ids), ip_str(tun_ip, ib));
+				printf("device: reloaded, %d devices\n", device_count());
+				audit_enrolled(body, tun_ip, src, label);
+			}
+		}
+	}
+
+	res[PKT_HDR_LEN] = status;
+	n = secure_seal(&peer->secure, MSG_TYPE_ENROLL, peer->session_idx, res, sizeof(res), 1);
+	if (n < 0) {
+		return;
+	}
+
+	peer_touch(peer, src, srclen);
+	if (sendto(sock, res, n, 0, (const struct sockaddr *)src, srclen) < 0) {
+		perror("sendto enroll");
+	}
+}
+
 int main(int argc, char *argv[])
 {
 	char ifname[IFNAMSIZ];
@@ -472,6 +581,7 @@ int main(int argc, char *argv[])
 	int opt;
 	int status_fd = -1;
 	const char *status_path = NULL;
+	const char *enroll_path = NULL;
 	int nd;
 	struct epoll_event ev, events[MAX_EVENTS];
 	struct sockaddr_in local_addr;
@@ -495,9 +605,12 @@ int main(int argc, char *argv[])
 		return crypt_selftest();
 	}
 
-	while ((opt = getopt(argc, argv, "s:n:m:a:")) != -1) {
+	while ((opt = getopt(argc, argv, "s:n:m:a:e:")) != -1) {
 		if (opt == 's') {
 			status_path = optarg;
+		}
+		else if (opt == 'e') {
+			enroll_path = optarg;
 		}
 		else if (opt == 'a') {
 			if (audit_open(optarg) < 0) {
@@ -533,7 +646,8 @@ int main(int argc, char *argv[])
 	}
 
 	if (argc != 3 && argc != 4) {
-		fprintf(stderr, "usage: %s [-s status-socket] [-a audit-log] [-n tunnel-prefix-len] [-m tunnel-mtu] <port> <device-file> [acl-file]\n", argv[0]);
+		fprintf(stderr, "usage: %s [-s status-socket] [-a audit-log] [-e enroll-file] [-n tunnel-prefix-len] [-m tunnel-mtu] <port> <device-file> [acl-file]\n", argv[0]);
+		fprintf(stderr, "       -e: pending enrollments; with it the server adds devices to <device-file> itself\n");
 		fprintf(stderr, "       -n, -m: what the tun device is configured with (default /24, mtu %d);\n", TUN_MTU);
 		fprintf(stderr, "               they are pushed to every client\n");
 		fprintf(stderr, "       %s selftest\n", argv[0]);
@@ -558,6 +672,19 @@ int main(int argc, char *argv[])
 	}
 	printf("device: %d devices loaded from %s\n", nd, argv[2]);
 	device_dump();
+	device_path = argv[2];
+
+	/* 등록은 파일을 줬을 때만 받는다. 주지 않은 서버는 기기 목록을 읽기만 하고, 바깥에서
+	 * 온 요청으로 그 파일이 바뀌는 일이 없다. */
+	enroll_init();
+	if (enroll_path != NULL) {
+		int ne = enroll_load(enroll_path);
+		if (ne < 0) {
+			fprintf(stderr, "enroll_load failed: %s\n", enroll_path);
+			return 1;
+		}
+		printf("enroll: %d pending from %s\n", ne, enroll_path);
+	}
 
 	if (argc == 4) {
 		int nr = acl_load(argv[3]);
@@ -673,6 +800,18 @@ int main(int argc, char *argv[])
 				}
 			}
 
+			/* 기기 목록보다 먼저 찍는다. 관리 도구는 "device:" 줄을 보고 다시 읽기가
+			 * 끝났다고 판단한다. */
+			if (enroll_path != NULL) {
+				int ne = enroll_load(enroll_path);
+				if (ne < 0) {
+					printf("enroll: reload failed, keeping the previous list\n");
+				}
+				else {
+					printf("enroll: reloaded, %d pending\n", ne);
+				}
+			}
+
 			nd = device_load(argv[2]);
 			if (nd < 0) {
 				printf("device: reload failed, keeping the previous list\n");
@@ -744,6 +883,20 @@ int main(int argc, char *argv[])
 				}
 
 				ip = packet + PKT_HDR_LEN;
+
+				/* 등록용 세션은 등록 말고는 아무것도 하지 못한다. 코드만 가진 쪽이
+				 * 그 세션으로 터널에 패킷을 넣을 수 있으면, 등록 코드가 곧 접속
+				 * 권한이 된다. */
+				if (peer->enroll) {
+					if (msg_header.type == MSG_TYPE_ENROLL) {
+						handle_enroll(sock, peer, ip, n, &src, srclen);
+					}
+					else {
+						printf("[drop] type %u on an enrollment session idx=%08x\n",
+								msg_header.type, peer->session_idx);
+					}
+					continue;
+				}
 
 				switch (msg_header.type) {
 					case MSG_TYPE_DATA:
@@ -832,7 +985,7 @@ int main(int argc, char *argv[])
 				memcpy(&inner, ip + IP_DST_OFF, IP_ADDR_LEN);
 
 				peer = peer_lookup(inner);
-				if (peer == NULL) {
+				if (peer == NULL || peer->enroll) {
 					printf("[drop] no peer for %s\n", ip_str(inner, ib));
 					continue;
 				}

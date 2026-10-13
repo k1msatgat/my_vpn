@@ -172,3 +172,46 @@ void CEnrollDlg::OnDestroy()
 
 	ui::DestroyFonts(&m_fonts);
 }
+
+/* ---- 등록 코드 ----------------------------------------------------------- */
+BEGIN_MESSAGE_MAP(CEnrollCodeDlg, CDialogEx)
+	ON_BN_CLICKED(IDC_ENROLL_MANUAL, &CEnrollCodeDlg::OnManual)
+END_MESSAGE_MAP()
+
+CEnrollCodeDlg::CEnrollCodeDlg(const CString &where, CWnd *parent)
+	: CDialogEx(IDD_ENROLL_CODE, parent)
+	, m_where(where)
+{
+}
+
+BOOL CEnrollCodeDlg::OnInitDialog()
+{
+	CDialogEx::OnInitDialog();
+
+	SetDlgItemText(IDC_ENROLL_ID, m_where);
+	GetDlgItem(IDC_ENROLL_CODE)->SendMessage(EM_SETCUEBANNER, TRUE, (LPARAM)L"XXXXX-XXXXX-XXXXX-XXXXX-XXXXX");
+	GetDlgItem(IDC_ENROLL_CODE)->SetFocus();
+
+	/* 포커스를 직접 옮겼으므로 FALSE 를 돌려준다. TRUE 면 첫 컨트롤로 되돌아간다. */
+	return FALSE;
+}
+
+void CEnrollCodeDlg::OnOK()
+{
+	GetDlgItemText(IDC_ENROLL_CODE, m_code);
+	m_code.Trim();
+
+	/* 빈 채로 누른 것은 닫으라는 뜻이 아니다. 형식이 맞는지는 코어가 본다. */
+	if (m_code.IsEmpty()) {
+		MessageBeep(MB_ICONWARNING);
+		GetDlgItem(IDC_ENROLL_CODE)->SetFocus();
+		return;
+	}
+
+	CDialogEx::OnOK();
+}
+
+void CEnrollCodeDlg::OnManual()
+{
+	EndDialog(RESULT_MANUAL);
+}

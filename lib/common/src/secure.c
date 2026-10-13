@@ -147,6 +147,66 @@ int secure_deny_mac(const uint8_t device_key[AUTH_KEY_LEN], uint8_t reason,
 	return crypt_hmac(device_key, AUTH_KEY_LEN, msg, sizeof(msg), out);
 }
 
+/* ---- 등록 코드 --------------------------------------------------------------
+ * 코드에서 등록용 임시 신원을 뽑는다. ID 는 서버가 "어느 코드인가"를 찾는 이름표이고
+ * 키는 그 코드를 아는 쪽만 만들 수 있는 비밀이다. 둘을 다른 라벨로 뽑아서, 와이어에
+ * 그대로 실리는 ID 를 본 사람이 키에 대해 알게 되는 것이 없다.
+ *
+ * 사람이 옮겨 적는 값이라 너그럽게 읽는다. 소문자, 끊는 줄표와 공백, 0 과 O / 1 과 I, L
+ * 을 섞어 적어도 같은 코드다. */
+static const char ENROLL_ALPHABET[] = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+static const char ENROLL_ID_LABEL[] = "my_vpn enroll id";
+static const char ENROLL_KEY_LABEL[] = "my_vpn enroll key";
+
+int secure_enroll_identity(const char *code, uint8_t id[DEVICE_ID_LEN], uint8_t key[AUTH_KEY_LEN])
+{
+	char norm[ENROLL_CODE_LEN];
+	uint8_t mac[VPN_HASH_LEN];
+	size_t n = 0;
+	char c;
+	int ret = -1;
+
+	for (; *code != '\0'; code++) {
+		c = *code;
+
+		if (c == '-' || c == ' ') {
+			continue;
+		}
+		if (c >= 'a' && c <= 'z') {
+			c = (char)(c - 'a' + 'A');
+		}
+		if (c == 'O') {
+			c = '0';
+		}
+		if (c == 'I' || c == 'L') {
+			c = '1';
+		}
+
+		if (n == sizeof(norm) || strchr(ENROLL_ALPHABET, c) == NULL) {
+			goto out;
+		}
+		norm[n++] = c;
+	}
+	if (n != sizeof(norm)) {
+		goto out;
+	}
+
+	if (crypt_hmac((const uint8_t *)ENROLL_ID_LABEL, sizeof(ENROLL_ID_LABEL) - 1,
+				(const uint8_t *)norm, sizeof(norm), mac) < 0) {
+		goto out;
+	}
+	memcpy(id, mac, DEVICE_ID_LEN);
+
+	ret = crypt_hmac((const uint8_t *)ENROLL_KEY_LABEL, sizeof(ENROLL_KEY_LABEL) - 1,
+			(const uint8_t *)norm, sizeof(norm), key);
+
+out:
+	crypt_wipe(norm, sizeof(norm));
+	crypt_wipe(mac, sizeof(mac));
+
+	return ret;
+}
+
 /* ---- 열린 세션 -------------------------------------------------------------- */
 
 int secure_session_open(secure_session_t *s, const uint8_t tx_key[VPN_KEY_LEN],
@@ -558,6 +618,41 @@ static int test_session(void)
 	return failed;
 }
 
+/* 등록 코드는 사람이 옮겨 적는다. 적는 방식이 달라도 같은 신원이 나와야 하고, 한 글자가
+ * 다르면 다른 신원이 나와야 한다. */
+static int test_enroll_code(void)
+{
+	uint8_t id[DEVICE_ID_LEN], key[AUTH_KEY_LEN];
+	uint8_t id2[DEVICE_ID_LEN], key2[AUTH_KEY_LEN];
+	uint8_t want[DEVICE_ID_LEN];
+	int failed = 0;
+	int ok;
+
+	/* HMAC-SHA256("my_vpn enroll id", "0123456789ABCDEFGHJKMNPQR") 의 앞 16B.
+	 * 서버의 관리 도구(mcp/ctl.cjs)와 검사 스크립트가 같은 값을 내야 한다. */
+	unhex("5c950b408adfa8c651fcfa3dbf27b614", want, sizeof(want));
+
+	ok = secure_enroll_identity("0123456789ABCDEFGHJKMNPQR", id, key) == 0 &&
+		crypt_equal(id, want, sizeof(want));
+	failed |= report("enroll code -> identity", ok);
+
+	ok = secure_enroll_identity("oL234-56789-abcde-fghjk-mnpqr", id2, key2) == 0 &&
+		crypt_equal(id, id2, sizeof(id)) && crypt_equal(key, key2, sizeof(key)) &&
+		secure_enroll_identity(" 01234 56789 ABCDE FGHJK MNPQR ", id2, key2) == 0 &&
+		crypt_equal(id, id2, sizeof(id));
+	failed |= report("enroll code is read leniently", ok);
+
+	ok = secure_enroll_identity("0123456789ABCDEFGHJKMNPQS", id2, key2) == 0 &&
+		!crypt_equal(id, id2, sizeof(id)) && !crypt_equal(key, key2, sizeof(key)) &&
+		secure_enroll_identity("0123456789ABCDEFGHJKMNPQ", id2, key2) < 0 &&
+		secure_enroll_identity("0123456789ABCDEFGHJKMNPQRS", id2, key2) < 0 &&
+		secure_enroll_identity("0123456789ABCDEFGHJKMNPQU", id2, key2) < 0 &&
+		secure_enroll_identity("", id2, key2) < 0;
+	failed |= report("enroll code rejects other input", ok);
+
+	return failed;
+}
+
 int crypt_selftest(void)
 {
 	int failed = 0;
@@ -568,6 +663,7 @@ int crypt_selftest(void)
 	failed |= test_aead();
 	failed |= test_ecdh();
 	failed |= test_session();
+	failed |= test_enroll_code();
 
 	return failed;
 }

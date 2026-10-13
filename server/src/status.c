@@ -87,7 +87,8 @@ static void build(int acl_enabled)
 	put("\"sessions\":[");
 	for (i = 0; i < MAX_PEERS; i++) {
 		p = peer_at(i);
-		if (p == NULL) {
+		/* 등록용 세션은 기기의 세션이 아니다. 목록에 섞이면 없는 기기가 붙어 있는 것처럼 보인다. */
+		if (p == NULL || p->enroll) {
 			continue;
 		}
 

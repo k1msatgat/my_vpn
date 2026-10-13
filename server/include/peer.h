@@ -57,6 +57,12 @@ typedef struct peer {
     uint64_t ka_counter;
     int32_t ka_seen;
 
+    /* 등록 코드로 연 세션. 기기의 ID 와 키를 받는 것 말고는 아무것도 하지 않는다 —
+     * 터널 패킷은 받지도 보내지도 않는다. device_id 에는 코드에서 뽑은 임시 ID 가 있다. */
+    int32_t enroll;
+    int32_t enrolled;			/* 이 세션으로 등록이 끝났다 */
+    uint8_t enrolled_id[DEVICE_ID_LEN];	/* 그때 올린 기기. 같은 요청이 다시 오면 같은 답을 한다 */
+
     audit_flow_t flows[AUDIT_FLOWS];
     int32_t flow_next;
 } peer_t;

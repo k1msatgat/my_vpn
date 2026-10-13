@@ -21,13 +21,14 @@ const UNIT = 'my_vpn.service';
 const ETC = '/etc/my_vpn';
 const DEVICE_FILE = `${ETC}/devices.conf`;
 const ACL_FILE = `${ETC}/acl.conf`;
+const ENROLL_FILE = `${ETC}/enroll.conf`;
 const ENV_FILE = `${ETC}/server.env`;
 const ACL_APPLIED = '/run/my_vpn/acl.applied';
 const STATUS_SOCK = '/run/my_vpn/status.sock';
 const SERVER_BIN = '/opt/my_vpn/server/bin/vpn_server';
 const AUTH_CHECK = '/opt/my_vpn/test/auth_check.py';
 const AUDIT_FILE = '/var/log/my_vpn/audit.log';
-const AUDIT_EVENTS = ['session_open', 'session_close', 'auth_denied', 'access', 'reload'];
+const AUDIT_EVENTS = ['session_open', 'session_close', 'auth_denied', 'access', 'reload', 'enrolled'];
 
 /* 감사 로그는 계속 자란다. 통째로 읽지 않고 끝에서 이만큼만 본다. */
 const AUDIT_TAIL_BYTES = 4 * 1024 * 1024;
@@ -35,6 +36,9 @@ const AUDIT_TAIL_BYTES = 4 * 1024 * 1024;
 /* server/include 의 값과 같아야 한다. */
 const MAX_DEVICES = 16;
 const MAX_RULES = 32;
+const MAX_PENDING = 16;	/* server/include/enroll.h */
+const ENROLL_CODE_LEN = 25;	/* lib/common/include/proto.h */
+const ENROLL_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 const LINE_MAX = 255;	/* device.c / alc.c 가 한 줄을 char[256] 으로 읽는다 */
 
 const ENV = { PATH: '/usr/sbin:/usr/bin', LC_ALL: 'C' };
@@ -298,6 +302,132 @@ function writeDevices(devices) {
 /* 키는 어떤 응답에도 넣지 않는다. */
 function publicDevice(d) {
 	return { id: d.id, label: d.label, tunnel_ip: d.tunnel_ip, requirements: d.requirements };
+}
+
+/* ---- 등록 코드 -------------------------------------------------------------
+ * 기기의 ID 와 키를 손으로 옮기는 대신, 관리자가 코드 하나를 만들어 건넨다. 코드에서
+ * 뽑은 임시 신원을 대기 목록에 적어 두면 서버가 그 코드로 온 기기를 받아 기기 목록에
+ * 올리고 그 줄을 지운다 (server/include/enroll.h, lib/common/include/proto.h). */
+
+/* secure.c 의 secure_enroll_identity 와 같아야 한다. 양쪽 selftest 와 auth_check.py 가
+ * 같은 값을 확인한다. */
+function enrollIdentity(code) {
+	const hmac = (label) => crypto.createHmac('sha256', label).update(code, 'ascii').digest();
+
+	return {
+		id: hmac('my_vpn enroll id').subarray(0, 16).toString('hex'),
+		key: hmac('my_vpn enroll key').toString('hex'),
+	};
+}
+
+/* 0-9 와 헷갈리는 글자(I L O U)를 뺀 대문자 32개, 25자. 한 글자가 5비트라 125비트다.
+ * randomInt 는 치우침 없이 뽑는다 (Math.random 은 암호용이 아니다). */
+function newEnrollCode() {
+	let code = '';
+
+	for (let i = 0; i < ENROLL_CODE_LEN; i++) {
+		code += ENROLL_ALPHABET[crypto.randomInt(ENROLL_ALPHABET.length)];
+	}
+
+	return code;
+}
+
+function readEnroll() {
+	const now = Math.floor(Date.now() / 1000);
+	const list = [];
+	let text;
+
+	try {
+		text = fs.readFileSync(ENROLL_FILE, 'utf8');
+	} catch (e) {
+		if (e.code === 'ENOENT') {
+			return list;
+		}
+		throw e;
+	}
+
+	for (const raw of text.split('\n')) {
+		const hash = raw.indexOf('#');
+		const tok = (hash < 0 ? raw : raw.slice(0, hash)).trim().split(/\s+/).filter(Boolean);
+		const label = hash < 0 ? '' : raw.slice(hash + 1).trim();
+
+		if (tok.length < 4 || !/^[0-9a-f]{32}$/.test(tok[0]) || !/^[0-9a-f]{64}$/.test(tok[1]) ||
+				!isIPv4(tok[2]) || !/^\d+$/.test(tok[3])) {
+			continue;
+		}
+		/* 만료된 줄은 여기서 빠진다. 다음에 쓸 때 파일에서도 사라진다. */
+		if (Number(tok[3]) <= now) {
+			continue;
+		}
+
+		list.push({
+			id: tok[0],
+			key: tok[1],
+			tunnel_ip: tok[2],
+			expires: Number(tok[3]),
+			requirements: parseReq(tok.slice(4)) || { firewall: false, antivirus: false, min_build: 0 },
+			label: /^[A-Za-z0-9 _.-]{1,32}$/.test(label) ? label : '',
+		});
+	}
+
+	return list;
+}
+
+function writeEnroll(list) {
+	const lines = [
+		'# my_vpn 등록 대기 목록. 관리 도구가 줄을 더하고 서버가 쓰인 줄을 지운다.',
+		'# id (32 hex)  key (64 hex)  tunnel-ip  expires (unix)  requirements  # label',
+	];
+
+	for (const e of list) {
+		let line = [e.id, e.key, e.tunnel_ip, e.expires, ...reqTokens(e.requirements)].join(' ');
+
+		if (e.label) {
+			line += `  # ${e.label}`;
+		}
+		lines.push(line);
+	}
+
+	writeAtomic(ENROLL_FILE, lines.join('\n') + '\n');
+}
+
+/* 키는 어떤 응답에도 넣지 않는다. id 는 코드가 아니라 코드에서 뽑은 이름표라 내줘도
+ * 그것으로 등록할 수는 없다. 대기 중인 코드를 가리켜 취소할 때 쓴다. */
+function publicEnroll(e) {
+	return {
+		id: e.id,
+		label: e.label,
+		tunnel_ip: e.tunnel_ip,
+		requirements: e.requirements,
+		expires_in_sec: e.expires - Math.floor(Date.now() / 1000),
+	};
+}
+
+function ipToInt(s) {
+	return s.split('.').reduce((n, o) => n * 256 + Number(o), 0);
+}
+
+function intToIp(n) {
+	return [n >>> 24, (n >>> 16) & 255, (n >>> 8) & 255, n & 255].join('.');
+}
+
+/* 터널 대역에서 아직 아무도 쓰지 않는 가장 낮은 주소. 서버의 주소, 등록된 기기의 주소,
+ * 다른 코드가 맡아 둔 주소를 뺀다. */
+function freeTunnelIp(devices, pending) {
+	const env = readEnv();
+	const prefix = Number(env.PREFIX);
+	const size = 2 ** (32 - prefix);
+	const net = Math.floor(ipToInt(env.TUN_IP) / size) * size;
+	const used = new Set([env.TUN_IP, ...devices.map((d) => d.tunnel_ip), ...pending.map((e) => e.tunnel_ip)]);
+
+	/* 첫 주소(대역 자신)와 마지막 주소(브로드캐스트)는 기기에 주지 않는다. */
+	for (let n = net + 1; n < net + size - 1; n++) {
+		if (!used.has(intToIp(n))) {
+			return intToIp(n);
+		}
+	}
+
+	fail('no free address left in the tunnel subnet');
 }
 
 function readAcl() {
@@ -722,6 +852,10 @@ const COMMANDS = {
 		if (devices.some((x) => x.tunnel_ip === d.tunnel_ip)) {
 			fail(`tunnel_ip ${d.tunnel_ip} is already assigned`);
 		}
+		/* 발급해 둔 등록 코드가 맡아 둔 주소. 여기에 다른 기기를 올리면 그 코드는 쓸 수 없게 된다. */
+		if (readEnroll().some((x) => x.tunnel_ip === d.tunnel_ip)) {
+			fail(`tunnel_ip ${d.tunnel_ip} is reserved by a pending enrollment code (enroll_list)`);
+		}
 
 		devices.push(d);
 		writeDevices(devices);
@@ -759,6 +893,74 @@ const COMMANDS = {
 		writeDevices(devices);
 
 		return { device: publicDevice(d), ...reload() };
+	},
+
+	/* 코드는 이 응답에서 한 번만 나온다. 파일에는 코드에서 뽑은 값만 남는다. */
+	enroll_create(a) {
+		const devices = readDevices();
+		const pending = readEnroll();
+		const ttl = a.ttl_minutes === undefined ? 15 : wantInt(a.ttl_minutes, 'ttl_minutes', 1, 1440);
+		const requirements = wantRequirements(a.requirements);
+		const label = wantLabel(a.label);
+		const code = newEnrollCode();
+		let tunnelIp = a.tunnel_ip;
+
+		if (devices.length + pending.length >= MAX_DEVICES) {
+			fail(`device list is full (max ${MAX_DEVICES}, counting pending enrollments)`);
+		}
+		if (pending.length >= MAX_PENDING) {
+			fail(`too many pending enrollments (max ${MAX_PENDING}); revoke one or wait for it to expire`);
+		}
+
+		if (tunnelIp === undefined) {
+			tunnelIp = freeTunnelIp(devices, pending);
+		} else {
+			if (!isIPv4(tunnelIp)) {
+				fail('tunnel_ip must be an IPv4 address');
+			}
+			if (tunnelIp === readEnv().TUN_IP) {
+				fail(`tunnel_ip ${tunnelIp} is the server's own tunnel address`);
+			}
+			if (devices.some((x) => x.tunnel_ip === tunnelIp) || pending.some((x) => x.tunnel_ip === tunnelIp)) {
+				fail(`tunnel_ip ${tunnelIp} is already assigned`);
+			}
+		}
+
+		const entry = {
+			...enrollIdentity(code),
+			tunnel_ip: tunnelIp,
+			expires: Math.floor(Date.now() / 1000) + ttl * 60,
+			requirements,
+			label,
+		};
+
+		writeEnroll([...pending, entry]);
+
+		return {
+			/* 다섯 자씩 끊어 준다. 사람이 읽어 주거나 받아 적는 값이다. */
+			code: code.match(/.{5}/g).join('-'),
+			enrollment: publicEnroll(entry),
+			how: 'On the device: "vpn_client.exe enroll <server-ip> <port> <code>", or the GUI posture tab -> enroll. The code works once.',
+			...reload(),
+		};
+	},
+
+	enroll_list() {
+		return { pending: readEnroll().map(publicEnroll) };
+	},
+
+	enroll_revoke(a) {
+		const pending = readEnroll();
+		const id = wantId(a.id);
+		const left = pending.filter((e) => e.id !== id);
+
+		if (left.length === pending.length) {
+			fail('no pending enrollment with this id (it may have been used or expired)');
+		}
+
+		writeEnroll(left);
+
+		return { revoked: id, ...reload() };
 	},
 
 	device_remove(a) {

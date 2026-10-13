@@ -37,11 +37,11 @@ SERVER = os.path.join(ROOT, "server", "bin", "vpn_server")
 PORT = int(next((a for a in sys.argv[1:] if a.isdigit()), 19000))
 VERSION = 4
 
-REQ_HANDSHAKE, RES_HANDSHAKE, DATA, KEEPALIVE, CHALLENGE, AUTH, DENY = range(1, 8)
+REQ_HANDSHAKE, RES_HANDSHAKE, DATA, KEEPALIVE, CHALLENGE, AUTH, DENY, ENROLL = range(1, 9)
 DENY_UNKNOWN_DEVICE, DENY_BAD_AUTH, DENY_TUN_IP, DENY_POSTURE = range(1, 5)
 STATE_UNKNOWN, STATE_OFF, STATE_ON = range(3)
 TYPE_NAME = {RES_HANDSHAKE: "RES_HANDSHAKE", DATA: "DATA", KEEPALIVE: "KEEPALIVE",
-             CHALLENGE: "CHALLENGE", DENY: "DENY"}
+             CHALLENGE: "CHALLENGE", DENY: "DENY", ENROLL: "ENROLL"}
 
 HDR_LEN, PUB_LEN, TAG_LEN, MAC_LEN = 8, 64, 16, 32
 
@@ -274,7 +274,7 @@ class Client:
         except socket.timeout:
             return None
         version, msg_type, _, idx = struct.unpack("!BBHI", self.raw[:HDR_LEN])
-        if idx != 0 and msg_type in (DATA, KEEPALIVE, DENY):
+        if idx != 0 and msg_type in (DATA, KEEPALIVE, DENY, ENROLL):
             return msg_type, idx, unseal(self.raw)
         return msg_type, idx, self.raw[HDR_LEN:]
 
@@ -338,6 +338,8 @@ def describe(r):
     name = TYPE_NAME.get(msg_type, "type %d" % msg_type)
     if body is None:
         return name + "(bad tag)"
+    if msg_type in (DENY, ENROLL):
+        return "%s(%d)" % (name, body[0])
     if msg_type == DENY:
         return "DENY(%d)" % body[0]
     if msg_type == RES_HANDSHAKE:
@@ -713,7 +715,9 @@ class Server:
         self.log = tempfile.TemporaryFile()
         self.status_path = tempfile.mktemp(prefix="vpn_status.", suffix=".sock")
         self.audit_path = tempfile.mktemp(prefix="vpn_audit.", suffix=".log")
+        self.enroll_path = tempfile.mktemp(prefix="vpn_enroll.", suffix=".conf")
         self.proc = subprocess.Popen(["stdbuf", "-oL", SERVER, "-s", self.status_path, "-a", self.audit_path,
+                                      "-e", self.enroll_path,
                                       str(PORT)] + list(args),
                                      stdout=self.log, stderr=subprocess.STDOUT)
         time.sleep(0.7)
@@ -752,6 +756,8 @@ class Server:
         self.proc.terminate()
         self.proc.wait()
         self.socket_left = os.path.exists(self.status_path)
+        if os.path.exists(self.enroll_path):
+            os.unlink(self.enroll_path)
         if os.path.exists(self.audit_path):
             os.unlink(self.audit_path)
 
@@ -1066,6 +1072,129 @@ def audit_tests(srv):
            "counted" if any(e.get("suppressed", 0) > 0 for e in flood) else "lost", "counted")
 
 
+def enroll_identity(code):
+    """등록 코드에서 뽑는 임시 신원 (ID, 키). secure.h 의 secure_enroll_identity."""
+    norm = code.upper().replace("-", "").replace(" ", "").replace("O", "0").replace("I", "1").replace("L", "1")
+    return mac(b"my_vpn enroll id", norm.encode())[:16], mac(b"my_vpn enroll key", norm.encode())
+
+
+def enroll_tests(srv, dev_path):
+    """등록 코드로 기기를 올린다. 관리 도구가 하는 일(대기 목록에 줄을 쓰고 SIGHUP)을 여기서 흉내 낸다."""
+    c = Client()
+    new_id, new_key = bytes(range(0x70, 0x80)), bytes(range(0x80, 0xa0))
+
+    def pending(*entries):
+        """entries: (코드, 터널 주소, 지금부터 몇 초 뒤 만료, 포스처 조건, 이름)"""
+        fd = os.open(srv.enroll_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            for code, ip, ttl, reqs, label in entries:
+                eid, ekey = enroll_identity(code)
+                f.write("%s %s %s %d %s  # %s\n" % (eid.hex(), ekey.hex(), ip, time.time() + ttl, reqs, label))
+        srv.reload()
+
+    def open_with(code, **post):
+        """코드로 핸드셰이크한다. 열리면 세션 번호, 아니면 서버의 답을 글로."""
+        eid, ekey = enroll_identity(code)
+        r = c.request(dev_id=eid)
+        if not r or r[0] != CHALLENGE:
+            return describe(r)
+        r = c.auth(r[2], key=ekey, dev_id=eid, post=posture(**post))
+        return r[1] if r and r[0] == RES_HANDSHAKE and r[2] is not None else describe(r)
+
+    def enroll(idx, dev_id, dev_key):
+        c.send(seal(ENROLL, idx, dev_id + dev_key))
+        return c.recv()
+
+    code = "7K2QF-9XWM4-ABCDE-FGHJK-MNPQR"
+
+    # 관리 도구(node)와 서버 / 클라이언트(C)와 이 스크립트가 같은 코드에서 같은 신원을 뽑아야 한다.
+    expect("enroll: the identity derived from a code",
+           enroll_identity("0123456789ABCDEFGHJKMNPQR")[0].hex(), "5c950b408adfa8c651fcfa3dbf27b614")
+
+    expect("enroll: a code nobody issued", open_with(code), "DENY(1)")
+
+    pending((code, "10.0.0.9", 600, "firewall=on", "laptop-kim"))
+    idx = open_with(code, firewall=STATE_OFF)
+    expect("enroll: an issued code opens a session (posture is not judged yet)",
+           "session" if isinstance(idx, int) else idx, "session")
+    expect("enroll: the session shows the address the device will get",
+           c.config, "10.0.0.9/24 mtu 1400 routes -")
+    expect("enroll: that session is not listed as a device session",
+           [s["tunnel_ip"] for s in srv.status()["sessions"] if s["tunnel_ip"] == "10.0.0.9"], [])
+
+    # 등록용 세션으로는 등록 말고 아무것도 하지 못한다.
+    check_data("enroll: the session cannot carry tunnel packets",
+               (c.send(data(idx, None, echo_request(socket.inet_aton("10.0.0.9"), socket.inet_aton("10.0.0.1"), 990))),
+                c.recv())[1], "no response")
+    check("enroll: nor keepalives", (c.send(keepalive(idx)), c.recv())[1], "no response")
+
+    other = Client()
+    didx = session(other)
+    check("enroll: a device session cannot enroll anything",
+          (other.send(seal(ENROLL, didx, new_id + new_key)), other.recv())[1], "no response")
+
+    check("enroll: request too short", (c.send(seal(ENROLL, idx, new_id)), c.recv())[1], "no response")
+    check("enroll: an id that is already registered", enroll(idx, DEV_ID, new_key), "ENROLL(2)")
+
+    check("enroll: the device hands in its id and key", enroll(idx, new_id, new_key), "ENROLL(0)")
+    with open(dev_path) as f:
+        added = [line.split("#") for line in f if line.startswith(new_id.hex())]
+    expect("enroll: the device list has the new line, as the admin set it up",
+           added and (added[0][0].split()[1:], added[0][1].strip()),
+           ([new_key.hex(), "10.0.0.9", "firewall=on"], "laptop-kim"))
+    expect("enroll: the device list keeps its mode", "%03o" % (os.stat(dev_path).st_mode & 0o777), "600")
+    with open(dev_path) as f:
+        expect("enroll: the devices that were there are still there",
+               sum(line.startswith((DEV_ID.hex(), DEV2_ID.hex())) for line in f), 2)
+
+    # 답이 사라져 같은 요청이 다시 가는 경우와, 같은 세션으로 다른 기기를 올리려는 경우
+    check("enroll: the same request again gets the same answer", enroll(idx, new_id, new_key), "ENROLL(0)")
+    check("enroll: a second device on the same code", enroll(idx, bytes(16), new_key), "ENROLL(1)")
+    with open(dev_path) as f:
+        expect("enroll: still one line for that device", sum(line.startswith(new_id.hex()) for line in f), 1)
+
+    expect("enroll: the code cannot be used again", open_with(code), "DENY(1)")
+    with open(srv.enroll_path) as f:
+        expect("enroll: the used code is gone from the pending list",
+               enroll_identity(code)[0].hex() in f.read(), False)
+
+    # 등록된 기기는 자기 키로 붙는다. 주소와 포스처 조건은 코드를 만들 때 정한 것이다.
+    r = c.request(dev_id=new_id)
+    check("enroll: the new device connects with its own key",
+          c.auth(r[2], key=new_key, dev_id=new_id), "RES_HANDSHAKE")
+    expect("enroll: and gets the address tied to the code", c.config, "10.0.0.9/24 mtu 1400 routes -")
+    r = c.request(dev_id=new_id)
+    check("enroll: the posture requirement came along",
+          c.auth(r[2], key=new_key, dev_id=new_id, post=posture(firewall=STATE_OFF)), "DENY(4)")
+
+    events = [e for e in srv.events() if e["event"] == "enrolled"]
+    expect("enroll: audit says which device, where, under what name",
+           events and (events[-1]["device"], events[-1]["tunnel_ip"], events[-1]["label"]),
+           (new_id.hex(), "10.0.0.9", "laptop-kim"))
+
+    # 만료된 코드, 그리고 그 사이에 다른 기기가 쓰게 된 주소에 묶인 코드
+    pending(("AAAAA-BBBBB-CCCCC-DDDDD-EEEEE", "10.0.0.10", -5, "", "late"),
+            ("FFFFF-GGGGG-HHHHH-JJJJJ-KKKKK", "10.0.0.3", 600, "", "clash"))
+    expect("enroll: an expired code", open_with("AAAAA-BBBBB-CCCCC-DDDDD-EEEEE"), "DENY(1)")
+    didx = session(other)
+    expect("enroll: a code whose address now belongs to a device",
+           open_with("FFFFF-GGGGG-HHHHH-JJJJJ-KKKKK"), "DENY(1)")
+    check("enroll: that device's session is untouched",
+          (other.send(keepalive(didx)), other.recv())[1], "KEEPALIVE")
+
+    # 대기 목록의 권한이 열려 있으면 읽지 않는다 (등록용 세션을 열 수 있는 키가 들어 있다).
+    pending(("MMMMM-NNNNN-PPPPP-QQQQQ-RRRRR", "10.0.0.11", 600, "", "open-file"))
+    os.chmod(srv.enroll_path, 0o644)
+    srv.reload()
+    expect("enroll: a pending list readable by others is refused, the previous one stays",
+           ("enroll: reload failed" in srv.text(), isinstance(open_with("MMMMM-NNNNN-PPPPP-QQQQQ-RRRRR"), int)),
+           (True, True))
+
+    os.unlink(srv.enroll_path)
+    write_devices(dev_path, LINE1, LINE2)
+    srv.reload()
+
+
 def acl_loader_tests(dev_path):
     """ACL 파일의 실수를 조용히 넘기지 않는지. 서버는 tun 을 만들기 전에 끝난다."""
     global failed
@@ -1124,6 +1253,7 @@ def main():
             config_tests(srv, acl_path, path)
             status_tests(srv)
             audit_tests(srv)
+            enroll_tests(srv, path)
         finally:
             srv.stop()
             logs.append(srv.text())

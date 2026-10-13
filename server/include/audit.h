@@ -17,6 +17,7 @@
  *   auth_denied     핸드셰이크가 거절됐다 (이유)
  *   access          세션이 어떤 목적지에 닿았다 / 막혔다 (목적지마다 한 번씩)
  *   reload          기기 목록이나 ACL 을 다시 읽었다
+ *   enrolled        등록 코드로 기기가 목록에 올랐다
  *
  * 값은 전부 주소, 숫자, 16진수, 우리가 정한 단어라 따옴표를 이스케이프할 일이 없다.
  * 바깥에서 온 문자열은 적지 않는다.
@@ -53,5 +54,9 @@ void audit_auth_denied(const uint8_t id[DEVICE_ID_LEN], const struct sockaddr_in
 void audit_access(peer_t *peer, const uint8_t *ip, int len, int allowed, const char *why);
 
 void audit_reload(const char *what, int ok, int count);
+
+/* 등록 코드로 기기가 목록에 올랐다. label 은 관리자가 코드를 만들 때 붙인 이름이다. */
+void audit_enrolled(const uint8_t id[DEVICE_ID_LEN], struct in_addr tun_ip,
+		const struct sockaddr_in *src, const char *label);
 
 #endif

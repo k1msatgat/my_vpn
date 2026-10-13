@@ -30,6 +30,16 @@ typedef struct device {
 /* 저장된 신원을 읽는다. */
 int device_load(device_t *out);
 
+/* 새 ID 와 키를 만들기만 한다. 저장하지 않는다. */
+int device_generate(device_t *out);
+
+/* 신원을 저장한다. 이미 있으면 덮어쓴다.
+ *
+ * 만드는 것과 저장하는 것을 나눈 것은 등록 코드 때문이다. 서버가 받아 준 뒤에 저장해야
+ * 한다. 먼저 저장하면 서버에 닿지 못했을 때 예전 신원은 지워졌고 새 신원은 어디에도
+ * 등록되지 않은 채로 남는다. */
+int device_save(const device_t *dev);
+
 /* 새 ID 와 키를 만들어 저장한다. 이미 있으면 덮어쓴다 — 서버에 등록된 예전 키는
  * 더 이상 맞지 않게 되므로 호출자가 사용자에게 확인받아야 한다. */
 int device_enroll(device_t *out);

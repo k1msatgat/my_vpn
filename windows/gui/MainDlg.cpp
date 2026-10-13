@@ -442,21 +442,114 @@ void CMainDlg::OnEnroll()
 		}
 	}
 
-	if (device_enroll(&dev) != DEVICE_OK) {
-		AfxMessageBox(_T("기기 등록에 실패했습니다."), MB_ICONERROR);
+	/* 보통은 관리자가 준 등록 코드로 올린다. 어느 서버에 올리는지는 위의 연결 설정을
+	 * 그대로 쓴다 — 등록한 서버와 연결할 서버가 다를 이유가 없다. */
+	CString server;
+	CString port;
+
+	GetDlgItemText(IDC_SERVER, server);
+	GetDlgItemText(IDC_PORT, port);
+	server.Trim();
+	port.Trim();
+
+	CEnrollCodeDlg ask(_T("올릴 서버  ") + server + _T(" : ") + port, this);
+	INT_PTR choice = ask.DoModal();
+
+	if (choice == CEnrollCodeDlg::RESULT_MANUAL) {
+		/* 코드 없이: ID 와 키를 만들어 보여 주고, 관리자가 손으로 서버에 옮겨 적는다. */
+		if (device_enroll(&dev) != DEVICE_OK) {
+			AfxMessageBox(_T("기기 등록에 실패했습니다."), MB_ICONERROR);
+			return;
+		}
+
+		{
+			CEnrollDlg dlg(dev, this);
+
+			SecureZeroMemory(&dev, sizeof(dev));
+			dlg.DoModal();
+		}
+
+		LoadDeviceId();
+		RefreshPosture(false);
+		AppendLog(_T("[gui] 기기 등록 (수동): ") + m_device_id);
+		return;
+	}
+	if (choice != IDOK) {
 		return;
 	}
 
-	{
-		CEnrollDlg dlg(dev, this);
+	tunnel_config_t cfg;
+	int port_num = _ttoi(port);
 
-		SecureZeroMemory(&dev, sizeof(dev));
-		dlg.DoModal();
+	ZeroMemory(&cfg, sizeof(cfg));
+	if (InetPtonW(AF_INET, server, &cfg.server_ip) != 1) {
+		FieldError(IDC_SERVER, _T("등록할 서버의 IPv4 주소를 먼저 적어 주세요. 예) 203.0.113.10"));
+		return;
+	}
+	if (port_num <= 0 || port_num > 65535) {
+		FieldError(IDC_PORT, _T("1 부터 65535 사이의 숫자여야 합니다."));
+		return;
+	}
+	cfg.server_port = static_cast<uint16_t>(port_num);
+
+	if (device_generate(&dev) != DEVICE_OK) {
+		AfxMessageBox(_T("기기 신원을 만들지 못했습니다."), MB_ICONERROR);
+		return;
+	}
+
+	HANDLE stop = CreateEventW(NULL, TRUE, FALSE, NULL);
+	int result = TUNNEL_ENROLL_ERROR;
+
+	if (stop) {
+		/* 서버의 답을 기다리는 동안 창이 멈춘다. 길어야 십여 초이고, 그동안 할 수 있는
+		 * 일도 없다. 터널처럼 워커 스레드로 빼지 않았다. */
+		CWaitCursor wait;
+		CStringA code(ask.m_code);
+
+		result = tunnel_enroll(&cfg, code, dev.id, dev.key, stop);
+		CloseHandle(stop);
+	}
+
+	/* 신원은 서버가 받아 준 뒤에 저장한다. 먼저 저장하면 서버에 닿지 못했을 때 예전
+	 * 신원은 지워졌고 새 신원은 어디에도 등록되지 않은 채로 남는다. */
+	bool saved = result == TUNNEL_ENROLL_OK && device_save(&dev) == DEVICE_OK;
+
+	SecureZeroMemory(&dev, sizeof(dev));
+
+	switch (result) {
+	case TUNNEL_ENROLL_OK:
+		if (!saved) {
+			AfxMessageBox(_T("서버에는 등록됐지만 이 PC 에 신원을 저장하지 못했습니다.\n\n")
+					_T("관리자에게 그 기기를 지우고 새 코드를 달라고 하세요."), MB_ICONERROR);
+			return;
+		}
+		break;
+	case TUNNEL_ENROLL_BAD_CODE:
+		AfxMessageBox(_T("등록 코드가 아닙니다. 글자와 숫자 25자입니다."), MB_ICONWARNING);
+		return;
+	case TUNNEL_ENROLL_NO_RESPONSE:
+		AfxMessageBox(_T("서버가 답하지 않습니다. 서버 주소와 포트를 확인하세요."), MB_ICONWARNING);
+		return;
+	case TUNNEL_ENROLL_REJECTED:
+		AfxMessageBox(_T("서버가 이 코드를 받지 않습니다.\n\n")
+				_T("잘못 적었거나, 만료됐거나, 이미 쓰인 코드입니다."), MB_ICONWARNING);
+		return;
+	case TUNNEL_ENROLL_CONFLICT:
+		AfxMessageBox(_T("이 기기나 이 코드에 묶인 터널 주소가 이미 서버에 있습니다.\n\n")
+				_T("관리자에게 새 코드를 달라고 하세요."), MB_ICONWARNING);
+		return;
+	case TUNNEL_ENROLL_SERVER_FAILED:
+		AfxMessageBox(_T("서버가 기기를 저장하지 못했습니다. 관리자에게 알려 주세요."), MB_ICONERROR);
+		return;
+	default:
+		AfxMessageBox(_T("기기 등록에 실패했습니다."), MB_ICONERROR);
+		return;
 	}
 
 	LoadDeviceId();
 	RefreshPosture(false);
 	AppendLog(_T("[gui] 기기 등록: ") + m_device_id);
+	AfxMessageBox(_T("등록됐습니다. 이제 [연결]을 누르면 됩니다."), MB_ICONINFORMATION);
 }
 
 void CMainDlg::ApplyFilter()

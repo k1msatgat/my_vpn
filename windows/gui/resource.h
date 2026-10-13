@@ -24,6 +24,10 @@
 #define IDC_ENROLL_KEY		1051
 #define IDC_ENROLL_COPY		1052
 
+#define IDD_ENROLL_CODE		102
+#define IDC_ENROLL_CODE		1053
+#define IDC_ENROLL_MANUAL	1054
+
 /* 필터와 도구 */
 #define IDC_FILTER_DIR		1020
 #define IDC_HIDE_KA		1021

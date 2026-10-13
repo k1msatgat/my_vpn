@@ -75,3 +75,19 @@ BEGIN
     DEFPUSHBUTTON   "한 줄로 복사", IDC_ENROLL_COPY, 196, 122, 76, 18
     PUSHBUTTON      "닫기", IDOK, 278, 122, 62, 18
 END
+
+/* 등록 코드를 받는 창. 꾸미지 않은 표준 다이얼로그다 — 칸 하나와 버튼 셋이다. */
+IDD_ENROLL_CODE DIALOGEX 0, 0, 300, 112
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "기기 등록"
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    LTEXT           "관리자에게 받은 등록 코드를 적어 주세요. 이 기기의 ID 와 키를 만들어 서버에 올립니다. 키는 암호화된 채로 가고, 화면에 나오지 않습니다.", IDC_STATIC, 14, 10, 272, 27
+    LTEXT           "등록 코드", IDC_STATIC, 14, 46, 40, 9
+    EDITTEXT        IDC_ENROLL_CODE, 58, 44, 228, 13, ES_AUTOHSCROLL | ES_UPPERCASE
+    LTEXT           "", IDC_ENROLL_ID, 14, 64, 272, 9
+
+    PUSHBUTTON      "코드 없이...", IDC_ENROLL_MANUAL, 14, 86, 66, 18
+    DEFPUSHBUTTON   "서버에 등록", IDOK, 150, 86, 70, 18
+    PUSHBUTTON      "취소", IDCANCEL, 224, 86, 62, 18
+END

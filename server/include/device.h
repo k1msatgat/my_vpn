@@ -52,6 +52,7 @@ void device_init(void);
 int device_load(const char *path);
 
 device_t *device_find(const uint8_t id[DEVICE_ID_LEN]);
+device_t *device_find_ip(struct in_addr tun_ip);
 
 /* 보고된 포스처가 이 기기의 정책을 채우면 1. */
 int device_posture_ok(const device_t *dev, const posture_report_t *posture);

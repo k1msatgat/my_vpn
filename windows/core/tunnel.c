@@ -1287,6 +1287,132 @@ static int pump_udp(tunnel_t *t)
 	return wire == RECV_ERROR ? -1 : 0;
 }
 
+/* ---- enrollment ---------------------------------------------------------- */
+#define ENROLL_TRIES 3
+#define ENROLL_TIMEOUT_MSEC 1500
+
+/* 등록 코드로 서버에 이 기기를 올린다 (proto.h 의 "기기 등록").
+ *
+ * 코드에서 뽑은 임시 신원으로 평소의 핸드셰이크를 그대로 돈다. 그러면 코드를 아는
+ * 서버인지가 확인되고(수락의 tag), 세션 키가 생긴다. 그 세션으로 이 기기가 만든 ID 와
+ * 키를 보낸다. 어댑터는 만들지 않는다 — 등록용 세션으로는 터널을 쓸 수 없고, 그래서
+ * 관리자 권한도 필요 없다. */
+int tunnel_enroll(const tunnel_config_t *base, const char *code,
+		const uint8_t id[DEVICE_ID_LEN], const uint8_t key[AUTH_KEY_LEN], HANDLE stop_event)
+{
+	tunnel_config_t cfg = *base;
+	tunnel_t tunnel;
+	tunnel_t *t = &tunnel;
+	uint8_t packet[BUF_SIZE];
+	msg_header_t h;
+	WSADATA wsa;
+	uint64_t deadline;
+	int ret = TUNNEL_ENROLL_ERROR;
+	int tries;
+	int n;
+
+	/* 패킷 이벤트는 올리지 않는다. 화면의 패킷 목록은 터널의 것이다. */
+	cfg.on_packet = NULL;
+	cfg.on_state = NULL;
+
+	if (secure_enroll_identity(code, cfg.device_id, cfg.device_key) < 0) {
+		return TUNNEL_ENROLL_BAD_CODE;
+	}
+
+	memset(t, 0, sizeof(*t));
+	t->cfg = &cfg;
+	t->stop_event = stop_event;
+	t->sock = INVALID_SOCKET;
+	t->t0_ms = GetTickCount64();
+	t->session.server.sin_family = AF_INET;
+	t->session.server.sin_addr = cfg.server_ip;
+	t->session.server.sin_port = htons(cfg.server_port);
+
+	if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+		crypt_wipe(&cfg, sizeof(cfg));
+		return TUNNEL_ENROLL_ERROR;
+	}
+
+	if (socket_open(t) < 0) {
+		goto out;
+	}
+
+	switch (do_handshake(t)) {
+	case HS_OK:
+		break;
+	case HS_DENIED:
+		/* 서버가 그 코드를 모른다: 잘못 적었거나, 만료됐거나, 이미 쓰였다. */
+		ret = TUNNEL_ENROLL_REJECTED;
+		goto out;
+	default:
+		ret = TUNNEL_ENROLL_NO_RESPONSE;
+		goto out;
+	}
+
+	ret = TUNNEL_ENROLL_NO_RESPONSE;
+
+	for (tries = 1; tries <= ENROLL_TRIES; tries++) {
+		/* 다시 보낼 때마다 새로 감싼다. counter 가 달라져야 서버가 재전송으로 버리지
+		 * 않는다. 내용이 같으므로 서버는 같은 답을 한다. */
+		memcpy(packet + PKT_HDR_LEN, id, DEVICE_ID_LEN);
+		memcpy(packet + PKT_HDR_LEN + DEVICE_ID_LEN, key, AUTH_KEY_LEN);
+		n = secure_seal(&t->session.secure, MSG_TYPE_ENROLL, t->session.idx,
+				packet, sizeof(packet), ENROLL_PAYLOAD_LEN);
+		if (n < 0) {
+			ret = TUNNEL_ENROLL_ERROR;
+			goto out;
+		}
+		udp_send(t, packet, n);
+		tlog(t, "[enroll] sent %d/%d", tries, ENROLL_TRIES);
+
+		deadline = GetTickCount64() + ENROLL_TIMEOUT_MSEC;
+		for (;;) {
+			n = hs_recv(t, deadline, packet, (int)sizeof(packet), &h);
+			if (n == HS_FAIL) {
+				ret = TUNNEL_ENROLL_ERROR;
+				goto out;
+			}
+			if (n == 0) {
+				break;
+			}
+			if (h.type != MSG_TYPE_ENROLL || h.session_idx != t->session.idx) {
+				continue;
+			}
+
+			/* 세션 키로 열려야 서버의 답이다. */
+			n = secure_open(&t->session.secure, packet, (size_t)n, NULL);
+			if (n < 1) {
+				continue;
+			}
+
+			switch (packet[PKT_HDR_LEN]) {
+			case ENROLL_OK:		ret = TUNNEL_ENROLL_OK; break;
+			case ENROLL_GONE:	ret = TUNNEL_ENROLL_REJECTED; break;
+			case ENROLL_CONFLICT:	ret = TUNNEL_ENROLL_CONFLICT; break;
+			default:		ret = TUNNEL_ENROLL_SERVER_FAILED; break;
+			}
+			tlog(t, "[enroll] server answered %u", packet[PKT_HDR_LEN]);
+			goto out;
+		}
+	}
+
+out:
+	secure_session_close(&t->session.secure);
+	if (t->sock != INVALID_SOCKET) {
+		closesocket(t->sock);
+	}
+	if (t->sock_event) {
+		CloseHandle(t->sock_event);
+	}
+	WSACleanup();
+
+	/* 기기의 키가 지나간 자리와, 코드에서 뽑은 키가 든 설정의 사본. */
+	crypt_wipe(packet, sizeof(packet));
+	crypt_wipe(&cfg, sizeof(cfg));
+
+	return ret;
+}
+
 /* ---- entry --------------------------------------------------------------- */
 int tunnel_run(const tunnel_config_t *cfg, HANDLE stop_event)
 {

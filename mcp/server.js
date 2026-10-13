@@ -116,10 +116,10 @@ server.registerTool('server_logs', {
 }, (a) => call('logs', a));
 
 server.registerTool('audit_log', {
-	description: 'Read the audit log, oldest first: one JSON event per thing that happened. session_open (device, tunnel ip, endpoint, posture), session_close (reason: expired / posture / device_removed / replaced / evicted, with packet and byte counts), auth_denied (reason: unknown_device / bad_auth / posture), access (the first packet a session sends to each destination: dst, proto, dport, allow or deny and why), reload. Use it to answer "who connected, what did they reach, why were they refused". Unlike server_logs it is per event rather than per packet and it survives server restarts.',
+	description: 'Read the audit log, oldest first: one JSON event per thing that happened. session_open (device, tunnel ip, endpoint, posture), session_close (reason: expired / posture / device_removed / replaced / evicted, with packet and byte counts), auth_denied (reason: unknown_device / bad_auth / posture), access (the first packet a session sends to each destination: dst, proto, dport, allow or deny and why), reload, enrolled (a device registered itself with an enrollment code). Use it to answer "who connected, what did they reach, why were they refused". Unlike server_logs it is per event rather than per packet and it survives server restarts.',
 	inputSchema: {
 		lines: z.number().int().min(1).max(500).optional().describe('how many events to return (default 50)'),
-		event: z.enum(['session_open', 'session_close', 'auth_denied', 'access', 'reload']).optional().describe('only this kind of event'),
+		event: z.enum(['session_open', 'session_close', 'auth_denied', 'access', 'reload', 'enrolled']).optional().describe('only this kind of event'),
 		device: deviceId.optional().describe('only events of this device (32 hex digits)'),
 		since_seconds: z.number().int().min(1).max(2592000).optional().describe('only events from the last N seconds'),
 	},
@@ -135,7 +135,7 @@ server.registerTool('device_list', {
 }, () => call('device_list'));
 
 server.registerTool('device_add', {
-	description: 'Register a device so it may connect. The id and key come from the device itself ("vpn_client.exe enroll", or the GUI posture tab -> enroll). Applied to the running server immediately.',
+	description: 'Register a device by hand from an id and key printed on the device ("vpn_client.exe enroll" without a code). Prefer enroll_create, which avoids copying the key. Applied to the running server immediately.',
 	inputSchema: {
 		id: deviceId.describe('device id, 32 hex digits, as printed by enroll'),
 		key: z.string().regex(/^[0-9a-fA-F]{64}$/).describe('device key, 64 hex digits, as printed by enroll'),
@@ -145,6 +145,29 @@ server.registerTool('device_add', {
 	},
 	annotations: WRITE,
 }, (a) => call('device_add', a));
+
+server.registerTool('enroll_create', {
+	description: 'Create a one-time enrollment code for a new device. This is the normal way to add a device: hand the code to the person at the device, they type it into the client ("vpn_client.exe enroll <server-ip> <port> <code>" or the GUI), and the device registers its own id and key over an encrypted session, so no key is ever copied by hand. The code works once and expires. The tunnel IP, posture requirements and label you set here are what the device gets. The code is returned only in this answer.',
+	inputSchema: {
+		label: label.optional(),
+		tunnel_ip: tunnelIp.optional().describe('tunnel IPv4 address for the device; omit to take the lowest free address in the tunnel subnet'),
+		requirements: requirements.optional(),
+		ttl_minutes: z.number().int().min(1).max(1440).optional().describe('how long the code stays valid (default 15)'),
+	},
+	annotations: WRITE,
+}, (a) => call('enroll_create', a));
+
+server.registerTool('enroll_list', {
+	description: 'List enrollment codes that were created and not yet used or expired: id (a handle for enroll_revoke, not the code), label, reserved tunnel IP, requirements and seconds left. The codes themselves cannot be read back.',
+	inputSchema: {},
+	annotations: READ,
+}, () => call('enroll_list'));
+
+server.registerTool('enroll_revoke', {
+	description: 'Cancel a pending enrollment code before it is used, e.g. when it was sent to the wrong person.',
+	inputSchema: { id: deviceId.describe('id of the pending enrollment, from enroll_list') },
+	annotations: WRITE,
+}, (a) => call('enroll_revoke', a));
 
 server.registerTool('device_update', {
 	description: 'Change a device\'s posture requirements, tunnel IP or label. "requirements" replaces the whole set. Applied immediately: a connected device that no longer meets the policy is dropped at its next keepalive (within 10s).',

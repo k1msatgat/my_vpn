@@ -84,7 +84,8 @@ typedef enum MSG_TYPE {
 	MSG_TYPE_KEEPALIVE,
 	MSG_TYPE_CHALLENGE,
 	MSG_TYPE_AUTH,
-	MSG_TYPE_DENY
+	MSG_TYPE_DENY,
+	MSG_TYPE_ENROLL
 } msg_type_t;
 
 #define DEVICE_ID_LEN	16
@@ -112,6 +113,41 @@ typedef struct posture_report {
 	uint8_t antivirus;	/* POSTURE_STATE_* */
 	uint8_t reserved[2];
 } posture_report_t;
+
+/* 기기 등록.
+ *
+ * 기기를 서버에 올리려면 기기에서 만든 ID(32자)와 키(64자)를 관리자가 서버의 목록에
+ * 손으로 옮겨 적어야 했다. 키가 화면과 클립보드와 메신저를 거치고, 한 글자만 틀려도
+ * "인증 실패"만 돌아온다.
+ *
+ * 이제 관리자는 등록 코드 하나를 만들어 건넨다. 코드는 한 번만 쓸 수 있고 곧 만료된다.
+ * 기기는 코드로 서버와 세션을 열고, 그 세션 안에서 자기가 만든 ID 와 키를 보낸다.
+ *
+ * 새 핸드셰이크를 만들지 않았다. 코드에서 임시 신원(ID 와 키)을 뽑아 평소의 핸드셰이크를
+ * 그대로 돈다 (secure.h 의 secure_enroll_identity). 그러면 이미 있는 것이 전부 따라온다 —
+ * 코드를 모르는 쪽은 세션을 열지 못하고, 서버인 척하는 쪽은 코드를 모르므로 수락을
+ * 만들지 못하고, 기기의 진짜 키는 그 세션의 키로 감싸여 가므로 코드를 나중에 알게 된
+ * 사람도 녹화해 둔 등록에서 키를 꺼내지 못한다.
+ *
+ * 등록용 세션으로는 아래 한 가지만 할 수 있다. 터널 패킷은 받지 않는다.
+ *
+ *   C -> S  ENROLL   세션 패킷. 암호문 = device_id(16) | device_key(32)
+ *   S -> C  ENROLL   세션 패킷. 암호문 = status(1)
+ *
+ * 답이 사라지면 클라이언트는 같은 것을 다시 보낸다. 서버는 같은 ID 로 다시 온 요청에
+ * 같은 답을 한다 — 한 번 더 등록하지 않는다. */
+typedef enum ENROLL_STATUS {
+	ENROLL_OK = 0,
+	ENROLL_GONE,		/* 코드가 그 사이에 만료됐거나 다른 기기가 먼저 썼다 */
+	ENROLL_CONFLICT,	/* 그 ID 나 그 터널 주소가 이미 목록에 있다 */
+	ENROLL_FAILED		/* 서버가 목록에 적지 못했다 */
+} enroll_status_t;
+
+#define ENROLL_PAYLOAD_LEN	(DEVICE_ID_LEN + AUTH_KEY_LEN)
+
+/* 등록 코드: 0-9 와 헷갈리는 글자(I L O U)를 뺀 대문자, 25자 (125비트).
+ * 보여 줄 때는 다섯 자씩 끊는다: 7K2QF-9XWM4-... */
+#define ENROLL_CODE_LEN		25
 
 #define ECDH_PUB_LEN	64	/* P-256 공개키 X(32) | Y(32) */
 #define AEAD_TAG_LEN	16

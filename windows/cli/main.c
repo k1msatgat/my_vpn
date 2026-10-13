@@ -120,6 +120,92 @@ static int enroll(int force)
 	return 0;
 }
 
+/* 관리자가 준 등록 코드로 서버에 이 기기를 올린다. ID 와 키를 손으로 옮기지 않는다.
+ *
+ * 신원은 서버가 받아 준 뒤에 저장한다. 먼저 저장하면 서버에 닿지 못했을 때 예전 신원은
+ * 지워졌고 새 신원은 어디에도 등록되지 않은 채로 남는다. */
+static int enroll_with_code(const char *server, const char *port, const char *code, int force)
+{
+	tunnel_config_t cfg;
+	device_t dev;
+	HANDLE stop;
+	char *end;
+	long port_num;
+	int ret = 1;
+	int r;
+
+	if (!force && device_load(&dev) != DEVICE_NOT_ENROLLED) {
+		SecureZeroMemory(&dev, sizeof(dev));
+		fprintf(stderr, "already enrolled. a new key invalidates the one registered on the server.\n");
+		fprintf(stderr, "to replace it anyway, add --force\n");
+		return 1;
+	}
+
+	memset(&cfg, 0, sizeof(cfg));
+	cfg.on_log = on_log;
+
+	if (inet_pton(AF_INET, server, &cfg.server_ip) != 1) {
+		fprintf(stderr, "invalid server ip : %s\n", server);
+		return 1;
+	}
+	port_num = strtol(port, &end, 10);
+	if (*end != '\0' || port_num <= 0 || port_num > 65535) {
+		fprintf(stderr, "invalid port : %s\n", port);
+		return 1;
+	}
+	cfg.server_port = (uint16_t)port_num;
+
+	if (device_generate(&dev) != DEVICE_OK) {
+		fprintf(stderr, "could not create a device identity\n");
+		return 1;
+	}
+
+	stop = CreateEventW(NULL, TRUE, FALSE, NULL);
+	if (!stop) {
+		SecureZeroMemory(&dev, sizeof(dev));
+		return 1;
+	}
+
+	r = tunnel_enroll(&cfg, code, dev.id, dev.key, stop);
+	CloseHandle(stop);
+
+	switch (r) {
+	case TUNNEL_ENROLL_OK:
+		if (device_save(&dev) != DEVICE_OK) {
+			/* 서버에는 올라갔는데 이 PC 에 남기지 못했다. 그 등록은 쓸 수 없다. */
+			fprintf(stderr, "the server accepted the device but the identity could not be stored here.\n");
+			fprintf(stderr, "ask the administrator to remove the device and issue a new code.\n");
+			break;
+		}
+		printf("enrolled.\n");
+		print_hex("device id  ", dev.id, sizeof(dev.id));
+		ret = 0;
+		break;
+	case TUNNEL_ENROLL_BAD_CODE:
+		fprintf(stderr, "that is not an enrollment code (25 letters and digits)\n");
+		break;
+	case TUNNEL_ENROLL_NO_RESPONSE:
+		fprintf(stderr, "no answer from the server\n");
+		break;
+	case TUNNEL_ENROLL_REJECTED:
+		fprintf(stderr, "the server does not accept this code: mistyped, expired or already used\n");
+		break;
+	case TUNNEL_ENROLL_CONFLICT:
+		fprintf(stderr, "the server already has this device or the address reserved for it\n");
+		break;
+	case TUNNEL_ENROLL_SERVER_FAILED:
+		fprintf(stderr, "the server could not save the device\n");
+		break;
+	default:
+		fprintf(stderr, "enrollment failed\n");
+		break;
+	}
+
+	SecureZeroMemory(&dev, sizeof(dev));
+
+	return ret;
+}
+
 /* 저장된 기기 신원을 설정에 싣는다. 등록하지 않은 기기는 서버가 어차피 거절하므로
  * 패킷을 보내기 전에 여기서 멈추고 무엇을 해야 하는지 알려 준다. */
 static int load_identity(tunnel_config_t *cfg)
@@ -161,6 +247,19 @@ int main(int argc, char *argv[])
 	if (argc == 2 && strcmp(argv[1], "device") == 0) {
 		return show_device();
 	}
+	if ((argc == 5 || argc == 6) && strcmp(argv[1], "enroll") == 0) {
+		if (argc == 6 && strcmp(argv[5], "--force") != 0) {
+			fprintf(stderr, "usage: %s enroll <server-ip> <port> <code> [--force]\n", argv[0]);
+			return 1;
+		}
+		if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+			fprintf(stderr, "WSAStartup failed\n");
+			return 1;
+		}
+		ret = enroll_with_code(argv[2], argv[3], argv[4], argc == 6);
+		WSACleanup();
+		return ret;
+	}
 	if ((argc == 2 || argc == 3) && strcmp(argv[1], "enroll") == 0) {
 		if (argc == 3 && strcmp(argv[2], "--force") != 0) {
 			fprintf(stderr, "usage: %s enroll [--force]\n", argv[0]);
@@ -173,7 +272,8 @@ int main(int argc, char *argv[])
 		fprintf(stderr, "usage: %s <adapter-name> <server-ip> <port>\n", argv[0]);
 		fprintf(stderr, "       %s posture\n", argv[0]);
 		fprintf(stderr, "       %s selftest\n", argv[0]);
-		fprintf(stderr, "       %s enroll [--force]\n", argv[0]);
+		fprintf(stderr, "       %s enroll <server-ip> <port> <code> [--force]   enroll with a code from the administrator\n", argv[0]);
+		fprintf(stderr, "       %s enroll [--force]                             print an id and key to register by hand\n", argv[0]);
 		fprintf(stderr, "       %s device\n", argv[0]);
 		fprintf(stderr, " e.g. %s my_vpn 49.247.139.39 9000\n", argv[0]);
 		fprintf(stderr, " the tunnel address and the routes come from the server\n");

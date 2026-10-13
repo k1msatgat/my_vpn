@@ -37,3 +37,31 @@ private:
 	ui::Fonts m_fonts;
 	CBrush m_card_brush;
 };
+
+/* 등록 코드를 받는 창.
+ *
+ * 기기를 서버에 올리는 보통의 길이다. 관리자가 만든 코드를 적으면 이 기기가 ID 와 키를
+ * 만들어 암호화된 세션으로 서버에 올린다. 키가 화면이나 클립보드를 거치지 않는다.
+ * 코드 없이 ID 와 키를 보고 손으로 옮기는 예전 방식은 [코드 없이...] 로 남겨 뒀다 —
+ * 서버가 등록 코드를 받지 않게 떠 있을 때 쓴다. */
+class CEnrollCodeDlg : public CDialogEx
+{
+public:
+	/* DoModal 의 결과. IDOK 면 m_code 에 적은 코드가 있다. */
+	enum { RESULT_MANUAL = 100 };
+
+	/* where 는 어느 서버에 올리는지를 창에 보여 줄 글이다. */
+	CEnrollCodeDlg(const CString &where, CWnd *parent);
+
+	CString m_code;
+
+protected:
+	BOOL OnInitDialog() override;
+	void OnOK() override;
+	afx_msg void OnManual();
+
+	DECLARE_MESSAGE_MAP()
+
+private:
+	CString m_where;
+};
