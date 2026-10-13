@@ -42,6 +42,7 @@ Zero Trust Network Access(ZTNA)의 기반 구조를 학습하는 것을 목표�
 - **세션 암호화** — 핸드셰이크마다 일회용 ECDH(P-256)로 키를 합의하고, 세션의 모든 패킷을 AES-256-GCM으로 감싼다. 내용은 보이지 않고, 고치거나 다시 보낸 패킷은 열리지 않는다
 - **서로를 확인** — 세션 키에 기기 키가 들어간다. 그 키를 모르는 쪽은 서버인 척해도 클라이언트가 받아들일 수락을 만들지 못한다
 - **서버가 내려 주는 터널 설정** — 터널 주소와 터널로 보낼 대역을 클라이언트에 적지 않는다. 서버가 기기 목록과 ACL에서 뽑아 내려 주고, 정책을 고치면 붙어 있는 기기의 경로가 다음 keepalive에서 따라 바뀐다
+- **서버 뒤의 네트워크로 전달** — ACL에 적어서 연 대역만 터널을 지나 서버 뒤로 나간다. 규칙이 없으면 터널 대역 안까지만. 반대 방향은 안에서 시작한 연결의 답만 들인다
 - **포스처 기반 접근 제어** — 클라이언트가 OS 빌드 / 방화벽 / 백신 상태를 보고하고, 서버가 기기별 정책에 대 본다
 - **지속 검증** — keepalive마다 포스처를 다시 보고·평가하고, 정책에 못 미치면 세션 중에도 차단
 - **정책 무중단 변경** — `kill -HUP`으로 기기 목록과 ACL을 다시 읽는다. 지워진 기기는 다음 keepalive에서 끊기고, 새 ACL은 다음 패킷부터 적용된다
@@ -347,7 +348,8 @@ my_vpn/
 |---|---|---|
 | 등록되지 않은 클라이언트의 데이터 주입 | 방어 | 유효한 `session_idx` 필요 |
 | 오래된 세션 idx 재사용 | 방어 | slot 재사용 시 난수 부분 변경 |
-| 정책 외 목적지 접근 | 방어 | ACL default deny |
+| 정책 외 목적지 접근 | 방어 | ACL default deny. 규칙 파일 없이 뜬 서버는 터널 대역 안까지만 통과시킴 |
+| 사내에서 기기로 먼저 거는 연결 | 방어 | 전달 규칙이 안에서 시작한 연결의 답만 들임 (`FORWARD_OUT`을 켠 서비스 / `docs/linux.md`의 nft 규칙) |
 | 세션 내 inner src IP 위조 | 방어 | inner src가 피어의 터널 IP와 다르면 폐기 |
 | 클라이언트의 비서버 출발지 패킷 수신 | 방어 | 출발지 주소/포트가 서버와 다르면 폐기 |
 | 죽은 세션이 테이블을 계속 점유 | 방어 | 60초 무응답 세션 만료 |
@@ -402,6 +404,7 @@ my_vpn/
 - [x] 시나리오 테스트 스크립트
 - [x] 암호화 & 키 교환 — 일회용 ECDH(P-256) + 기기 키로 세션 키 유도, AES-256-GCM, `counter`를 nonce 및 재전송 방지에 사용 (`test/auth_check.py` 119개 통과)
 - [x] 서버가 내려 주는 터널 설정 — 터널 주소 / prefix / MTU와 ACL에서 뽑은 경로를 `RES_HANDSHAKE`와 keepalive 응답에 싣고, 클라이언트가 달라진 부분만 어댑터에 맞춤 (`test/auth_check.py` 130개 통과, 실제 Windows 클라이언트로 주소 / 경로 적용과 그 경로로의 ping 확인)
+- [x] 서버 뒤의 네트워크로 전달 — 규칙 파일이 없으면 터널 대역 안까지만, 서비스의 `FORWARD_OUT`으로 IP 전달 / 주소 변환 / 되돌아오는 답만 허용 (`test/auth_check.py` 136개 통과, 실제 Windows 클라이언트로 서버 뒤의 게이트웨이까지 ping, 규칙을 빼면 경로와 함께 끊기고 넣으면 돌아오는 것 확인)
 - [x] 신원 기반 인증 — 기기 키 챌린지-응답, 포스처 기반 정책 (ZTNA)
   - [x] 와이어 포맷 정의 (`CHALLENGE` / `AUTH` / `DENY`, 포스처 보고)
   - [x] Windows 클라이언트 — 포스처 수집, 기기 등록, 인증 핸드셰이크
@@ -444,6 +447,7 @@ my_vpn/
 | AI 작성 | 서버의 ZTNA 확장 (2차) — `server/src/policy.c`, `server/src/status.c`, `alc.c`의 다시 읽기(임시 표)와 규칙별 포스처 조건 / 줄 형식 검사, `server.c`의 nonce 재사용과 상태 소켓 연결 / 카운터, `peer.c`의 단조 시계와 세션별 카운터. ACL의 매칭 로직과 피어 테이블의 구조는 직접 구현한 것 그대로 |
 | AI 작성 | 세션 암호화 — `lib/common`의 `crypt.h` / `secure.{h,c}`, `server/src/crypt.c`(OpenSSL), `windows/core/crypt.c`(CNG), `server.c`와 `tunnel.c`의 핸드셰이크 / 데이터 / keepalive 경로를 세션 키로 감싸도록 고친 것, `test/auth_check.py`의 암호화 검사. 키를 어떻게 뽑고 무엇을 tag로 덮을지는 AI가 제안했고, 기존의 `auth.c` / `hmac.c` / `mock_server.py`는 이 과정에서 대체돼 지웠음 |
 | AI 작성 | 서버가 내려 주는 터널 설정 — `proto.{h,c}`의 `net_config`, `alc.c`의 `acl_routes`, `server.c`의 `net_config_for`와 keepalive 응답, `tunnel.c`의 `netcfg_apply` / `netcfg_refresh`(주소 · MTU · 경로를 달라진 만큼만 고침), GUI의 터널 IP 칸을 입력에서 표시로 바꾼 것. 경로를 ACL에서 뽑는 방식은 AI가 제안 |
+| AI 작성 | 서버 뒤의 네트워크로 전달 — `server.c`의 규칙 파일이 없을 때의 판정, `mcp/service.sh`의 `forward_up` / `forward-down`(nftables), `docs/linux.md`의 해당 절 |
 | AI 작성 | `mcp/` MCP 서버 전체 — `server.js`(도구 선언), `ctl.cjs`(root 헬퍼), systemd 유닛, 설치 스크립트, `docs/mcp.md` |
 | AI 작성 | GUI 재설계 — `gui/ui_theme.cpp`, `gui/ui_controls.cpp`, `MainDlg`의 배치와 그리기, `EnrollDlg`의 그리기, `vpn_gui.rc`, 앱 아이콘(`windows/tools/mkicon.py`). Linux 장비에서 작성했고 MSVC 빌드는 CI로 확인, 실행은 아직 확인하지 못함 |
 | AI 작성 | `.github/workflows/ci.yml`, CI가 찾은 `posture.c`의 `wscapi.dll` 동적 로드 |

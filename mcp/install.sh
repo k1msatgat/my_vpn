@@ -50,7 +50,8 @@ printf '#!/bin/sh\nexec /usr/bin/node %s/mcp/server.js\n' "$OPT" | sudo install 
 # 설정은 처음 한 번만 만든다. 기기 목록에는 키가 있어 서버가 600 이 아니면 읽지 않는다.
 sudo install -d -m 700 "$ETC"
 if ! sudo test -e "$ETC/server.env"; then
-	printf 'PORT=9000\nTUN_IP=10.0.0.1\nPREFIX=24\nMTU=1400\n' | sudo install -m 600 /dev/stdin "$ETC/server.env"
+	# 터널 밖으로의 전달은 꺼 둔 채로 만든다. 켜려면 관리자가 나가는 인터페이스를 적는다.
+	printf 'PORT=9000\nTUN_IP=10.0.0.1\nPREFIX=24\nMTU=1400\n# FORWARD_OUT=eth0\n' | sudo install -m 600 /dev/stdin "$ETC/server.env"
 fi
 if ! sudo test -e "$ETC/devices.conf"; then
 	printf '# id (32 hex)  key (64 hex)  tunnel-ip  requirements  # label\n' | sudo install -m 600 /dev/stdin "$ETC/devices.conf"

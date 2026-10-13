@@ -556,7 +556,7 @@ int main(int argc, char *argv[])
 		acl_dump();
 		acl_enabled = 1;
 	} else {
-		printf("acl: disabled (no rule file)\n");
+		printf("acl: no rule file, only the tunnel subnet is reachable\n");
 	}
 
 	signal(SIGINT, on_signal);
@@ -748,12 +748,27 @@ int main(int argc, char *argv[])
 					continue;
 				}
 
-				verdict = acl_enabled ? acl_check(ip, n, &peer->posture) : ACL_ALLOW;
+				/* 규칙 파일 없이 뜬 서버는 터널 대역 안까지만 통과시킨다. 전에는 "ACL 이
+				 * 없으면 전부 허용"이었는데, 그때는 터널 대역 밖으로 가는 길 자체가
+				 * 없어서 결과가 같았다. 이제 서버가 뒤쪽 네트워크로 전달할 수 있으므로,
+				 * 규칙을 적지 않았다는 이유로 그 네트워크 전체가 열려서는 안 된다.
+				 * 터널 밖으로 내보낼 곳은 규칙으로 적어서 연다. */
+				memcpy(&inner_dst, ip + IP_DST_OFF, IP_ADDR_LEN);
+				if (acl_enabled) {
+					verdict = acl_check(ip, n, &peer->posture);
+				}
+				else {
+					verdict = tun_subnet_of(inner_dst).s_addr == tun_subnet_of(peer->inner).s_addr
+						? ACL_ALLOW : ACL_DENY;
+				}
+
 				if (verdict != ACL_ALLOW) {
-					memcpy(&inner_dst, ip + IP_DST_OFF, IP_ADDR_LEN);
 					printf("[deny] %s -> %s proto=%d (%d bytes)",
 							ip_str(inner, ib), ip_str(inner_dst, ob),
 							ip[IP_PROTO_OFF], n);
+					if (!acl_enabled) {
+						printf(" outside the tunnel subnet (no acl file)");
+					}
 					stats.acl_denied++;
 					peer->acl_denied++;
 					if (verdict == ACL_DENY_POSTURE) {

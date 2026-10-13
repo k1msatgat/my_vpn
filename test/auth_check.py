@@ -638,6 +638,28 @@ def write_devices(path, *lines):
         f.write("\n".join(lines) + "\n")
 
 
+def tunnel_only_tests(srv):
+    """규칙 파일 없이 뜬 서버는 터널 대역 안까지만 통과시킨다. 판정은 서버 로그에서 읽는다."""
+    c = Client()
+    idx = session(c)
+
+    def verdict(dst):
+        before = len(srv.text())
+        c.send(data(idx, None, echo_request(TUN_IP, socket.inet_aton(dst), 700)))
+        time.sleep(0.3)
+        c.drain()
+        new = srv.text()[before:]
+        return "denied" if "[deny]" in new else "passed" if "[udp->tun]" in new else "no trace"
+
+    expect("no acl file: the server's tunnel address", verdict("10.0.0.1"), "passed")
+    expect("no acl file: another address in the tunnel subnet", verdict("10.0.0.200"), "passed")
+    expect("no acl file: just outside the tunnel subnet", verdict("10.0.1.1"), "denied")
+    expect("no acl file: the server's other networks", verdict("192.168.0.1"), "denied")
+    expect("no acl file: the internet", verdict("8.8.8.8"), "denied")
+    ok = "outside the tunnel subnet (no acl file)" in srv.text()
+    expect("no acl file: the denial says why", "logged" if ok else "silent", "logged")
+
+
 def reload_tests(srv, path):
     """서버를 끄지 않고 기기 목록을 바꾼다 (kill -HUP)."""
     c = Client()
@@ -997,6 +1019,7 @@ def main():
             posture_tests()
             keepalive_tests()
             data_tests()
+            tunnel_only_tests(srv)
             reload_tests(srv.proc, path)
         finally:
             srv.stop()

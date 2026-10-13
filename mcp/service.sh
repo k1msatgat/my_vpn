@@ -4,11 +4,67 @@
 #
 #   service.sh run            vpn_server 로 exec (ExecStart)
 #   service.sh tun-up <pid>   서버가 만든 tun 에 주소를 붙이고 올린다 (ExecStartPost)
+#   service.sh forward-down   터널 밖으로의 전달 규칙을 뺀다 (ExecStopPost)
+#
+# server.env 에 FORWARD_OUT=<인터페이스> 가 있으면 tun-up 이 그 인터페이스로의 전달을 켠다.
 
 set -eu
 
 ETC=/etc/my_vpn
 SERVER=/opt/my_vpn/server/bin/vpn_server
+
+# 터널로 들어온 패킷을 이 장비 뒤의 네트워크로 내보낸다 (FORWARD_OUT=<나가는 인터페이스>).
+#
+# vpn_server 는 패킷을 tun 에 쓰는 데까지만 한다. 그 뒤 어디로 보낼지는 커널의 일이라
+# 여기서 켠다. 누가 어디로 갈 수 있는지는 여전히 vpn_server 의 ACL 이 정한다 — 규칙에
+# 없는 목적지는 tun 에 쓰이지도 않는다. 아래 규칙은 그 뒤의 길을 터 주는 것과, 반대
+# 방향을 막는 것이다.
+#
+#   주소 변환  터널 주소(10.0.0.x)는 이 장비만 아는 주소다. 그대로 내보내면 받은 쪽이
+#             답을 돌려보낼 길이 없다. 나갈 때 이 장비의 주소로 바꾼다.
+#   반대 방향  바깥에서 터널 쪽으로는 안에서 시작한 연결의 답만 들인다. 기기가 사내
+#             자원에 닿게 하려는 것이지, 사내에서 기기로 들어오게 하려는 것이 아니다.
+#   그 밖      터널에서 들어와 다른 인터페이스로 나가는 것은 막는다. FORWARD_OUT 하나만
+#             연다.
+#
+# 규칙은 우리 표(table ip my_vpn) 하나에 모은다. 장비에 이미 있는 방화벽 규칙을 고치지
+# 않고, 지울 때도 그 표만 지우면 된다. firewalld 같은 다른 방화벽이 전달을 막고 있으면
+# 그쪽에서도 열어야 한다 (docs/mcp.md).
+forward_up() {
+	local dev=$1 net
+
+	ip link show "$FORWARD_OUT" > /dev/null 2>&1 ||
+		{ echo "FORWARD_OUT=$FORWARD_OUT: no such interface" >&2; exit 1; }
+
+	# 터널 대역은 방금 붙인 주소에서 커널이 만든 경로로 읽는다. TUN_IP 와 PREFIX 로 다시
+	# 계산하면 같은 값을 두 군데서 따로 구하게 된다.
+	net=$(ip -4 -o route show dev "$dev" proto kernel | awk '{ print $1; exit }')
+	[ -n "$net" ] || { echo "no tunnel subnet on $dev" >&2; exit 1; }
+
+	sysctl -qw net.ipv4.ip_forward=1
+
+	# 표를 선언한 뒤 지우고 다시 만든다. 한 번에 적용되므로 규칙이 반쯤 들어간 순간이 없고,
+	# 이전 실행이 남긴 표가 있어도 겹치지 않는다.
+	nft -f - <<EOF
+table ip my_vpn
+delete table ip my_vpn
+table ip my_vpn {
+	chain forward {
+		type filter hook forward priority filter; policy accept;
+		iifname "$dev" oifname "$dev" accept
+		iifname "$dev" oifname "$FORWARD_OUT" accept
+		iifname "$FORWARD_OUT" oifname "$dev" ct state established,related accept
+		iifname "$dev" drop
+		oifname "$dev" drop
+	}
+	chain postrouting {
+		type nat hook postrouting priority srcnat; policy accept;
+		ip saddr $net oifname "$FORWARD_OUT" masquerade
+	}
+}
+EOF
+	echo "forward: $net -> $FORWARD_OUT (masquerade), replies only on the way back"
+}
 
 case "${1:-}" in
 run)
@@ -46,10 +102,21 @@ tun-up)
 	ip addr add "$TUN_IP/$PREFIX" dev "$dev"
 	ip link set "$dev" mtu "$MTU" up
 	echo "tun up: $dev $TUN_IP/$PREFIX mtu $MTU"
+
+	# 터널 밖으로의 전달은 server.env 에 FORWARD_OUT 을 적은 경우에만 켠다.
+	if [ -n "${FORWARD_OUT:-}" ]; then
+		forward_up "$dev"
+	fi
+	;;
+
+forward-down)
+	# 서비스가 내려가면 우리가 넣은 규칙도 뺀다. 남겨 두면 다음에 같은 이름으로 뜬 다른
+	# 인터페이스에 걸린다. 표 하나에 모아 뒀으므로 그 표만 지우면 된다.
+	nft delete table ip my_vpn 2>/dev/null || true
 	;;
 
 *)
-	echo "usage: $0 run | tun-up <pid>" >&2
+	echo "usage: $0 run | tun-up <pid> | forward-down" >&2
 	exit 1
 	;;
 esac

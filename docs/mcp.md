@@ -24,7 +24,7 @@ AI 클라이언트 ──ssh──▶ my_vpn_mcp (mcp/server.js, 일반 계정)
 | `mcp/server.js` | `/opt/my_vpn/mcp/`, 실행 이름 `my_vpn_mcp` | MCP(stdio). 도구의 입력 형식만 선언하고 요청을 헬퍼로 넘긴다. 권한 없음 |
 | `mcp/ctl.cjs` | `/usr/local/sbin/my_vpn_ctl` | root 헬퍼. 입력을 다시 검증하고 실제 일을 한다. npm 의존성 없음 |
 | `mcp/my_vpn.service`, `mcp/service.sh` | `/etc/systemd/system/`, `/opt/my_vpn/libexec/` | `vpn_server` 실행, 서버가 만든 tun에 주소 부여 |
-| 설정 | `/etc/my_vpn/` (root 전용) | `server.env`(포트, 터널 주소, MTU), `devices.conf`, `acl.conf` |
+| 설정 | `/etc/my_vpn/` (root 전용) | `server.env`(포트, 터널 주소, MTU, 전달), `devices.conf`, `acl.conf` |
 
 - **셸을 열어 주지 않습니다.** 할 수 있는 일은 아래 도구가 전부입니다. sudoers는 `my_vpn_ctl`을 인자 없이 부르는 것 하나만 허용합니다.
 - **기기 키는 들어가기만 하고 나오지 않습니다.** `device_add`로 받은 키는 `devices.conf`에만 쓰이고 어떤 응답에도 실리지 않습니다. 요청을 argv가 아니라 stdin으로 넘기는 것도 키가 `ps`나 sudo 로그에 남지 않게 하기 위해서입니다.
@@ -44,6 +44,7 @@ mcp/uninstall.sh          # 제거. --purge 를 붙이면 /etc/my_vpn (기기 �
 - 요구사항: systemd, Node.js 18 이상, 그리고 [서버 빌드](linux.md#build)에 필요한 것
 - 서버나 MCP 소스를 고친 뒤에는 다시 실행해야 설치본이 바뀝니다. 설정과 기기 목록은 건드리지 않습니다.
 - 서비스는 부팅 시 자동 시작으로 등록하지 않습니다. 원하면 `sudo systemctl enable my_vpn`.
+- **터널 밖으로의 전달은 꺼진 채로 설치됩니다.** 기기가 서버 뒤의 네트워크에 닿게 하려면 `/etc/my_vpn/server.env`에 `FORWARD_OUT=<나가는 인터페이스>`(예: `eth0`)를 적고 서비스를 다시 시작하세요. 서비스가 뜰 때 IP 전달을 켜고 주소 변환과 "안에서 시작한 연결의 답만 들인다"는 규칙을 자기 표(`table ip my_vpn`)에 넣고, 내려갈 때 그 표를 지웁니다. 누가 어디로 갈 수 있는지는 여전히 ACL이 정합니다 ([docs/linux.md](linux.md#서버-뒤의-네트워크로-내보내기)). firewalld가 전달을 막고 있으면 tun 인터페이스를 전달이 허용된 영역에 넣어야 합니다.
 - `test/server.sh`와 같은 포트·터널 대역을 쓰므로 둘을 동시에 띄울 수 없습니다.
 
 ## 연결
