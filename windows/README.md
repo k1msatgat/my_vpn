@@ -196,7 +196,7 @@ MFC 래퍼만 얹지 않고 Win32 수준에서 처리한 부분입니다.
 [`proto.h`](../lib/common/include/proto.h)의 주석에 있습니다.
 
 > **현재 상태**: Windows 클라이언트와 서버(Linux) 모두 구현됐고, GUI로 실제 서버와 터널을 열어 전체 경로를
-> 확인했습니다 (아래 "실제 서버와의 확인"). `test/mock_server.py`는 서버 없이 클라이언트만 볼 때 씁니다.
+> 확인했습니다 (아래 "실제 서버와의 확인").
 
 ```
 C -> S  REQ_HANDSHAKE   tun_ip | device_id         "나는 이 기기다"
@@ -209,8 +209,9 @@ S -> C  RES_HANDSHAKE   또는 DENY(reason)
 |---|---|
 | `core/posture.c` | 단말 상태를 읽습니다. OS 빌드는 `RtlGetVersion`, 방화벽은 COM `INetFwPolicy2`(활성 프로필 기준), 백신은 Windows 보안 센터(`WscGetSecurityProviderHealth`). 읽기만 하고 통과 여부는 서버 정책이 정합니다. |
 | `core/device.c` | 기기 ID(16B)와 키(32B)를 `BCryptGenRandom`으로 만들고, 키는 DPAPI로 감싸 `HKCU\Software\my_vpn\device`에 둡니다. |
-| `core/hmac.c` | HMAC-SHA256. 직접 구현하지 않고 CNG(`BCrypt`)를 씁니다. |
-| `core/tunnel.c` | `do_handshake()`가 위 네 메시지를 주고받습니다. 인증(`AUTH`)을 보내기 전에 온 `RES_HANDSHAKE`는 받지 않습니다. |
+| `core/crypt.c` | SHA-256 / HMAC, ECDH P-256, AES-256-GCM, 난수. 직접 구현하지 않고 CNG(`BCrypt`)를 씁니다. 서버의 OpenSSL 구현과 같은 선언(`lib/common/include/crypt.h`)을 채웁니다. |
+| `lib/common/src/secure.c` | 세션 키 유도와 패킷 감싸기 / 풀기, 재전송 창. 서버와 같은 파일을 빌드합니다. |
+| `core/tunnel.c` | `do_handshake()`가 위 네 메시지를 주고받습니다. 인증(`AUTH`)을 보내기 전에 온 `RES_HANDSHAKE`와 tag가 맞지 않는 `RES_HANDSHAKE`는 받지 않습니다. |
 
 ### 지속 검증
 
@@ -228,7 +229,7 @@ S -> C  KEEPALIVE                                통과
 - 거부 상태에서 나가려던 패킷은 보내지 않고 `접근 거부`로 패킷 목록에 올립니다.
 - 포스처가 바뀌면 바로, 그렇지 않아도 30초마다 다시 핸드셰이크해서 받아 주는지 물어봅니다.
 
-모의 서버의 정책 파일을 실행 중에 고쳐 확인한 기록입니다.
+모의 서버의 정책 파일을 실행 중에 고쳐 확인한 기록입니다. (세션 암호화 이전의 기록입니다. 모의 서버는 진짜 서버가 인증을 구현하기 전에 쓰던 것이라 이후 지웠고, 같은 경로는 아래 "실제 서버와의 확인"이 대신합니다.)
 
 | 시각 | 사건 | 클라이언트 |
 |---|---|---|
@@ -281,17 +282,15 @@ vpn_client.exe enroll
 :: 지금 서버에 보고될 포스처
 vpn_client.exe posture
 
-:: HMAC-SHA256 이 RFC 4231 테스트 벡터와 맞는지
+:: 암호 도구와 세션 암호화가 표준 테스트 벡터와 맞는지 (서버의 vpn_server selftest 와 같은 벡터)
 vpn_client.exe selftest
 
 :: 실제 서버에 등록하는 방법은 docs/linux.md 의 "기기 등록과 포스처 정책"
-:: 서버 없이 핸드셰이크 확인 (다른 창에서 클라이언트를 127.0.0.1 로 실행)
-python windows\test\mock_server.py --device <id>:<key>:10.0.0.3 --require-firewall
 ```
 
 막지 못하는 것:
-- 데이터 패킷은 여전히 평문이고 인증되지 않습니다. 인증은 세션을 여는 시점과 포스처 보고에만 걸립니다.
-- 서버는 클라이언트에게 자신을 증명하지 않습니다. 서버 주소를 위조할 수 있는 공격자는 가짜 `DENY`로 접속을 방해할 수 있습니다.
+- 누가(기기 ID) 언제 얼마나 주고받는지는 가려지지 않습니다. 암호화되는 것은 세션이 열린 뒤의 패킷 내용이고, 핸드셰이크의 기기 ID와 포스처는 서명만 됩니다.
+- 인증 전의 거절(모르는 기기, 인증 실패)은 서버가 보낸 것인지 확인할 수 없습니다. 클라이언트는 이런 거절을 곧바로 믿지 않고 진짜 답을 끝까지 기다리지만, 경로 위에서 진짜 답을 지울 수 있는 공격자는 접속을 방해할 수 있습니다.
 - Windows Server에는 보안 센터가 없어 백신 상태가 늘 "확인 불가"로 보고됩니다. 서버는 이를 통과로 치지 않으므로, Server를 붙이려면 그 기기의 정책에서 `antivirus=on`을 빼야 합니다. (클라이언트는 `wscapi.dll`을 import로 묶지 않고 부를 때 System32에서만 찾습니다. 묶으면 DLL이 없는 곳에서는 프로세스가 뜨지도 못합니다.)
 - DPAPI는 다른 사용자와 다른 PC로부터 키를 지키지만, 같은 사용자로 도는 다른 프로세스는 키를 풀 수 있습니다.
 - 포스처는 클라이언트의 자기 보고입니다. 키를 가진 변조된 클라이언트는 거짓으로 보고할 수 있습니다.

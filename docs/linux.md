@@ -12,7 +12,7 @@ make clean      # 오브젝트/산출물 삭제
 make distclean  # bin/ 디렉터리 전체 삭제
 ```
 
-- 요구사항: Linux, GCC, `/dev/net/tun`, OpenSSL 개발 헤더 (`openssl-devel` / `libssl-dev`) — 서버가 HMAC-SHA256에 씁니다
+- 요구사항: Linux, GCC, `/dev/net/tun`, OpenSSL 3.0 이상의 개발 헤더 (`openssl-devel` / `libssl-dev`) — 서버가 기기 인증과 세션 암호화에 씁니다
 - `-Wall -Wextra` 경고 없이 빌드됩니다.
 
 | 산출물 | 경로 |
@@ -36,7 +36,7 @@ sudo ./server/bin/vpn_server [-s status-socket] <port> <device-file> [acl-file]
 sudo ip addr add 10.0.0.1/24 dev tun0
 sudo ip link set tun0 mtu 1400 up
 
-./server/bin/vpn_server selftest      # HMAC-SHA256 이 RFC 4231 벡터와 맞는지 (root 불필요)
+./server/bin/vpn_server selftest      # 암호 도구와 세션 암호화가 표준 벡터와 맞는지 (root 불필요)
 sudo kill -HUP $(pidof vpn_server)    # 기기 목록과 ACL 을 다시 읽는다 (세션은 유지)
 ```
 
@@ -107,11 +107,11 @@ sudo python3 test/auth_check.py        # -v 를 붙이면 서버 로그도 출�
 
 | 묶음 | 확인하는 것 |
 |---|---|
-| 핸드셰이크 | 모르는 기기, 틀린 키, `AUTH` 재전송, 만료된 nonce, 서명 뒤 포스처 변조, 배정되지 않은 터널 IP |
+| 핸드셰이크 | 모르는 기기, 틀린 키, 이전 버전, `AUTH` 재전송, 만료된 nonce, 서명 뒤 포스처 변조 / 일회용 공개키 바꿔치기, 곡선 위에 없는 공개키, 배정되지 않은 터널 IP, 거절에 붙는 mac, 핸드셰이크마다 다른 세션 키 |
 | 핸드셰이크 방해 | 다른 곳에서 온 `REQ` 20개 / 엉터리 `AUTH` 뒤에도 진짜 기기가 통과, 쓰인 nonce는 다시 나오지 않음 |
 | 포스처 | 방화벽 꺼짐 / 모름, 백신 꺼짐, 빌드 미달 / 경계값 / 모름, 조건이 없는 기기 |
-| keepalive | 재전송, 예전 counter, 틀린 키, 다른 기기의 키, 위조 패킷 뒤에도 세션 유지, 재인증 시 새 세션, 세션 중 거절 |
-| 데이터 | 인증된 세션으로 ping 왕복, 모르는 idx, inner src 위조, 거절된 뒤의 ping |
+| keepalive | 재전송, 예전 counter, 합의한 적 없는 키 / 다른 세션의 키 / 반대 방향의 키, 한 비트 변조, 세션 번호와 종류 바꿔치기, 위조 패킷 뒤에도 세션 유지, 재인증 시 새 세션과 새 키, 세션 키로 감싼 거절 |
+| 데이터 | 인증된 세션으로 ping 왕복, 내용이 와이어에 보이지 않음, 재전송 / 한 비트 변조 / 틀린 키, 순서가 바뀐 패킷과 창 밖으로 밀려난 패킷, 모르는 idx, inner src 위조, 거절된 뒤의 ping |
 | 다시 읽기 | 정책 강화 / 완화, 기기 삭제, 깨진 파일일 때 이전 목록 유지 |
 | ACL | 규칙 파일의 실수(deny에 붙은 조건, 오타, 빠진 필드), `SIGHUP`으로 규칙 교체, 깨진 파일일 때 이전 규칙 유지 |
 | 규칙별 포스처 | keepalive로 포스처만 바꿔 가며 같은 패킷의 판정 — 꺼짐 / 모름 / 빌드 미달, 조건 없는 규칙은 통과, 아래쪽의 넓은 allow가 구해 주지 않음 |

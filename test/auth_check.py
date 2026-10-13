@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""서버의 기기 인증을 프로토콜 수준에서 확인한다.
+"""서버의 기기 인증과 세션 암호화를 프로토콜 수준에서 확인한다.
 
 임시 기기 목록으로 vpn_server 를 띄우고, 클라이언트인 척 UDP 패킷을 직접 만들어
 보내 응답을 본다. 서버의 tun 에 10.0.0.1/24 를 붙여 터널로 들어간 ping 에 커널이
@@ -8,9 +8,18 @@ TUN 을 만들고 주소를 붙여야 해서 root 로 돌린다.
 
     sudo python3 test/auth_check.py [port] [-v]      (-v: 서버 로그도 출력)
 
-와이어 포맷은 lib/common/include/proto.h 의 주석과 같아야 한다.
+와이어 포맷은 lib/common/include/proto.h 의 주석과, 세션 키를 뽑는 방법은
+lib/common/include/secure.h 의 주석과 같아야 한다. 여기서는 그 둘을 서버의 코드를
+거치지 않고 따로 구현한다 — 같은 코드를 불러 쓰면 양쪽이 같은 방식으로 틀려도
+맞는 것으로 나온다.
+
+ECDH 와 AES-GCM 은 파이썬 표준 라이브러리에 없다. 서버가 이미 링크하는 libcrypto 를
+ctypes 로 직접 부른다. 패키지를 따로 설치하지 않아도 되고, 서버가 도는 곳이면
+어디서나 돈다.
 """
 
+import ctypes
+import ctypes.util
 import hashlib
 import json
 import hmac
@@ -26,11 +35,15 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SERVER = os.path.join(ROOT, "server", "bin", "vpn_server")
 PORT = int(next((a for a in sys.argv[1:] if a.isdigit()), 19000))
-VERSION = 2
+VERSION = 3
 
 REQ_HANDSHAKE, RES_HANDSHAKE, DATA, KEEPALIVE, CHALLENGE, AUTH, DENY = range(1, 8)
 DENY_UNKNOWN_DEVICE, DENY_BAD_AUTH, DENY_TUN_IP, DENY_POSTURE = range(1, 5)
 STATE_UNKNOWN, STATE_OFF, STATE_ON = range(3)
+TYPE_NAME = {RES_HANDSHAKE: "RES_HANDSHAKE", DATA: "DATA", KEEPALIVE: "KEEPALIVE",
+             CHALLENGE: "CHALLENGE", DENY: "DENY"}
+
+HDR_LEN, PUB_LEN, TAG_LEN, MAC_LEN = 8, 64, 16, 32
 
 DEV_ID = bytes(range(0x10, 0x20))
 DEV_KEY = bytes(range(0x40, 0x60))
@@ -44,6 +57,133 @@ TUN2_IP = socket.inet_aton("10.0.0.4")
 failed = 0
 
 
+# ---- libcrypto ------------------------------------------------------------------
+
+def _load_libcrypto():
+    for name in (ctypes.util.find_library("crypto"), "libcrypto.so.3"):
+        if name:
+            try:
+                return ctypes.CDLL(name)
+            except OSError:
+                pass
+    sys.exit("libcrypto not found (vpn_server links it as well)")
+
+
+_lib = _load_libcrypto()
+_ptr, _int, _size, _buf = ctypes.c_void_p, ctypes.c_int, ctypes.c_size_t, ctypes.c_char_p
+
+
+def _fn(name, restype, *argtypes):
+    f = getattr(_lib, name)
+    f.restype, f.argtypes = restype, argtypes
+    return f
+
+
+# 포인터를 돌려주는 함수는 restype 을 적어야 한다. 적지 않으면 ctypes 가 int 로 받아
+# 64비트 주소의 위쪽 절반을 잘라 버린다.
+_pkey_ctx_new_id = _fn("EVP_PKEY_CTX_new_id", _ptr, _int, _ptr)
+_pkey_ctx_new = _fn("EVP_PKEY_CTX_new", _ptr, _ptr, _ptr)
+_pkey_ctx_free = _fn("EVP_PKEY_CTX_free", None, _ptr)
+_keygen_init = _fn("EVP_PKEY_keygen_init", _int, _ptr)
+_set_curve = _fn("EVP_PKEY_CTX_set_ec_paramgen_curve_nid", _int, _ptr, _int)
+_keygen = _fn("EVP_PKEY_keygen", _int, _ptr, ctypes.POINTER(_ptr))
+_pkey_new = _fn("EVP_PKEY_new", _ptr)
+_pkey_free = _fn("EVP_PKEY_free", None, _ptr)
+_copy_params = _fn("EVP_PKEY_copy_parameters", _int, _ptr, _ptr)
+_set_pub = _fn("EVP_PKEY_set1_encoded_public_key", _int, _ptr, _buf, _size)
+_get_octets = _fn("EVP_PKEY_get_octet_string_param", _int, _ptr, _buf, _buf, _size, ctypes.POINTER(_size))
+_derive_init = _fn("EVP_PKEY_derive_init", _int, _ptr)
+_derive_set_peer = _fn("EVP_PKEY_derive_set_peer", _int, _ptr, _ptr)
+_derive = _fn("EVP_PKEY_derive", _int, _ptr, _buf, ctypes.POINTER(_size))
+
+_cipher_ctx_new = _fn("EVP_CIPHER_CTX_new", _ptr)
+_cipher_ctx_free = _fn("EVP_CIPHER_CTX_free", None, _ptr)
+_cipher_ctrl = _fn("EVP_CIPHER_CTX_ctrl", _int, _ptr, _int, _int, _buf)
+_aes_256_gcm = _fn("EVP_aes_256_gcm", _ptr)
+_enc_init = _fn("EVP_EncryptInit_ex", _int, _ptr, _ptr, _ptr, _buf, _buf)
+_enc_update = _fn("EVP_EncryptUpdate", _int, _ptr, _buf, ctypes.POINTER(_int), _buf, _int)
+_enc_final = _fn("EVP_EncryptFinal_ex", _int, _ptr, _buf, ctypes.POINTER(_int))
+_dec_init = _fn("EVP_DecryptInit_ex", _int, _ptr, _ptr, _ptr, _buf, _buf)
+_dec_update = _fn("EVP_DecryptUpdate", _int, _ptr, _buf, ctypes.POINTER(_int), _buf, _int)
+_dec_final = _fn("EVP_DecryptFinal_ex", _int, _ptr, _buf, ctypes.POINTER(_int))
+
+EVP_PKEY_EC, NID_P256 = 408, 415
+GCM_GET_TAG, GCM_SET_TAG = 0x10, 0x11
+
+
+def _must(ok, what):
+    if not ok or ok <= 0:
+        raise RuntimeError("libcrypto: %s failed" % what)
+
+
+class Ecdh:
+    """한 번 쓰고 버리는 P-256 키 쌍. pub 은 와이어 형식 X(32) | Y(32)."""
+
+    def __init__(self):
+        ctx = _pkey_ctx_new_id(EVP_PKEY_EC, None)
+        self.key = _ptr()
+        _must(_keygen_init(ctx), "keygen_init")
+        _must(_set_curve(ctx, NID_P256), "set_curve")
+        _must(_keygen(ctx, ctypes.byref(self.key)), "keygen")
+        _pkey_ctx_free(ctx)
+
+        point = ctypes.create_string_buffer(1 + PUB_LEN)
+        n = _size(0)
+        _must(_get_octets(self.key, b"pub", point, len(point), ctypes.byref(n)), "get pub")
+        assert n.value == 1 + PUB_LEN and point.raw[0] == 4
+        self.pub = point.raw[1:]
+
+    def secret(self, peer_pub):
+        """SHA-256(공유점의 X 좌표). 상대의 점이 곡선 위에 없으면 예외."""
+        peer = _pkey_new()
+        _must(_copy_params(peer, self.key), "copy_parameters")
+        _must(_set_pub(peer, b"\x04" + peer_pub, 1 + PUB_LEN), "set peer public key")
+        ctx = _pkey_ctx_new(self.key, None)
+        _must(_derive_init(ctx), "derive_init")
+        _must(_derive_set_peer(ctx, peer), "derive_set_peer")
+        x = ctypes.create_string_buffer(32)
+        n = _size(32)
+        _must(_derive(ctx, x, ctypes.byref(n)), "derive")
+        _pkey_ctx_free(ctx)
+        _pkey_free(peer)
+        return hashlib.sha256(x.raw[:n.value]).digest()
+
+
+def gcm_seal(key, nonce, aad, plain):
+    ctx = _cipher_ctx_new()
+    out = ctypes.create_string_buffer(len(plain) + 16)
+    tag = ctypes.create_string_buffer(TAG_LEN)
+    n = _int(0)
+    _must(_enc_init(ctx, _aes_256_gcm(), None, key, nonce), "EncryptInit")
+    _must(_enc_update(ctx, None, ctypes.byref(n), aad, len(aad)), "aad")
+    if plain:
+        _must(_enc_update(ctx, out, ctypes.byref(n), plain, len(plain)), "EncryptUpdate")
+    _must(_enc_final(ctx, tag, ctypes.byref(n)), "EncryptFinal")
+    _must(_cipher_ctrl(ctx, GCM_GET_TAG, TAG_LEN, tag), "get tag")
+    _cipher_ctx_free(ctx)
+    return out.raw[:len(plain)] + tag.raw
+
+
+def gcm_open(key, nonce, aad, sealed):
+    """평문, tag 가 맞지 않으면 None."""
+    if len(sealed) < TAG_LEN:
+        return None
+    body, tag = sealed[:-TAG_LEN], sealed[-TAG_LEN:]
+    ctx = _cipher_ctx_new()
+    out = ctypes.create_string_buffer(len(body) + 16)
+    n = _int(0)
+    _must(_dec_init(ctx, _aes_256_gcm(), None, key, nonce), "DecryptInit")
+    _must(_dec_update(ctx, None, ctypes.byref(n), aad, len(aad)), "aad")
+    if body:
+        _must(_dec_update(ctx, out, ctypes.byref(n), body, len(body)), "DecryptUpdate")
+    _must(_cipher_ctrl(ctx, GCM_SET_TAG, TAG_LEN, tag), "set tag")
+    ok = _dec_final(ctx, tag, ctypes.byref(n)) > 0
+    _cipher_ctx_free(ctx)
+    return out.raw[:len(body)] if ok else None
+
+
+# ---- 프로토콜 ---------------------------------------------------------------------
+
 def header(msg_type, session_idx=0):
     return struct.pack("!BBHI", VERSION, msg_type, 0, session_idx)
 
@@ -56,23 +196,74 @@ def mac(key, data):
     return hmac.new(key, data, hashlib.sha256).digest()
 
 
+def session_keys(dev_key, secret, auth_pkt, res_head):
+    """(C->S 키, S->C 키, RES_HANDSHAKE 키). secure.h 의 "세션 키"."""
+    info = b"my_vpn v3 session" + hashlib.sha256(auth_pkt + res_head).digest()
+    prk = mac(dev_key, secret)                  # HKDF-Extract(salt = 기기 키, ikm = secret)
+    okm, block = b"", b""
+    for i in (1, 2, 3):                         # HKDF-Expand, 96 바이트
+        block = mac(prk, block + info + bytes([i]))
+        okm += block
+    return okm[0:32], okm[32:64], okm[64:96]
+
+
+def nonce(counter):
+    return bytes(4) + struct.pack("!Q", counter)
+
+
+# 열린 세션: idx -> [C->S 키, S->C 키, 다음에 보낼 counter]. 서버는 한 세션의 데이터와
+# keepalive 를 같은 counter 로 세므로 여기서도 세션마다 하나로 센다.
+SESSIONS = {}
+
+
+def seal(msg_type, idx, plain, counter=None, key=None, as_idx=None):
+    """세션 패킷 한 개: 헤더(8) | counter(8) | 암호문 | tag(16).
+
+    counter 를 주지 않으면 그 세션의 다음 값을 쓴다. key 는 다른 키로 감싼 패킷을,
+    as_idx 는 헤더의 세션 번호만 다른 패킷을 만들 때 준다."""
+    sess = SESSIONS.get(idx)
+    if counter is None:
+        counter = sess[2]
+    if sess is not None:
+        sess[2] = max(sess[2], counter + 1)
+    head = header(msg_type, idx if as_idx is None else as_idx) + struct.pack("!Q", counter)
+    return head + gcm_seal(key or sess[0], nonce(counter), head, plain)
+
+
+def unseal(pkt):
+    """서버가 보낸 세션 패킷의 평문. 모르는 세션이거나 tag 가 맞지 않으면 None."""
+    idx = struct.unpack("!I", pkt[4:8])[0]
+    sess = SESSIONS.get(idx)
+    if sess is None or len(pkt) < 16 + TAG_LEN:
+        return None
+    counter = struct.unpack("!Q", pkt[8:16])[0]
+    return gcm_open(sess[1], nonce(counter), pkt[:16], pkt[16:])
+
+
 class Client:
     def __init__(self):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.settimeout(1.0)
         self.addr = ("127.0.0.1", PORT)
+        self.raw = b""          # 마지막으로 받은 패킷 그대로
+        self.auth_tag = b""     # 마지막으로 보낸 AUTH 의 mac
 
     def send(self, pkt):
         self.sock.sendto(pkt, self.addr)
 
     def recv(self):
-        """(type, session_idx, body) 또는 응답이 없으면 None."""
+        """(type, session_idx, body) 또는 응답이 없으면 None.
+
+        세션 패킷은 세션 키로 풀어 평문을 body 에 준다. 열리지 않으면 body 는 None 이다 —
+        서버가 보낸 것이라고 볼 수 없는 패킷이다."""
         try:
-            pkt, _ = self.sock.recvfrom(2048)
+            self.raw, _ = self.sock.recvfrom(2048)
         except socket.timeout:
             return None
-        version, msg_type, _, idx = struct.unpack("!BBHI", pkt[:8])
-        return msg_type, idx, pkt[8:]
+        version, msg_type, _, idx = struct.unpack("!BBHI", self.raw[:HDR_LEN])
+        if idx != 0 and msg_type in (DATA, KEEPALIVE, DENY):
+            return msg_type, idx, unseal(self.raw)
+        return msg_type, idx, self.raw[HDR_LEN:]
 
     def drain(self):
         self.sock.setblocking(False)
@@ -87,33 +278,56 @@ class Client:
         self.send(header(REQ_HANDSHAKE) + tun_ip + dev_id)
         return self.recv()
 
-    def auth(self, nonce, key=DEV_KEY, dev_id=DEV_ID, tun_ip=TUN_IP, post=None, tamper=None):
-        signed = tun_ip + dev_id + nonce + (post or posture())
-        tag = mac(key, signed)
+    def auth(self, challenge, key=DEV_KEY, dev_id=DEV_ID, tun_ip=TUN_IP, post=None, tamper=None, pub=None):
+        """AUTH 를 보내고 답을 받는다. 수락이면 세션 키를 뽑아 SESSIONS 에 넣는다.
+
+        수락의 tag 가 맞지 않으면 body 를 None 으로 돌려준다. 진짜 클라이언트는 그런
+        수락을 받지 않는다."""
+        ecdh = Ecdh()
+        signed = header(AUTH) + tun_ip + dev_id + challenge + (pub or ecdh.pub) + (post or posture())
+        self.auth_tag = mac(key, signed)
         if tamper:
             signed = tamper(signed)
-        self.send(header(AUTH) + signed + tag)
-        return self.recv()
+        pkt = signed + self.auth_tag
+        self.send(pkt)
+
+        r = self.recv()
+        if r is None or r[0] != RES_HANDSHAKE:
+            return r
+
+        head, rest = self.raw[:HDR_LEN + PUB_LEN], self.raw[HDR_LEN + PUB_LEN:]
+        try:
+            c2s, s2c, res_key = session_keys(key, ecdh.secret(head[HDR_LEN:]), pkt, head)
+        except RuntimeError:
+            return r[0], r[1], None
+        if gcm_open(res_key, bytes(12), head, rest) is None:
+            return r[0], r[1], None
+        SESSIONS[r[1]] = [c2s, s2c, 0]
+        return r
 
     def handshake(self, **kw):
         r = self.request()
         assert r and r[0] == CHALLENGE, "no challenge: %r" % (r,)
         return self.auth(r[2], **kw)
 
+    def deny_mac_ok(self, r, key=DEV_KEY):
+        """핸드셰이크 중의 DENY 에 붙은 mac 이 이 기기의 키로 확인되는가."""
+        want = mac(key, b"my_vpn deny" + r[2][:1] + self.auth_tag)
+        return hmac.compare_digest(r[2][1:1 + MAC_LEN], want)
+
 
 def describe(r):
     if r is None:
         return "no response"
     msg_type, idx, body = r
+    name = TYPE_NAME.get(msg_type, "type %d" % msg_type)
+    if body is None:
+        return name + "(bad tag)"
     if msg_type == DENY:
         return "DENY(%d)" % body[0]
     if msg_type == RES_HANDSHAKE:
         return "RES_HANDSHAKE" if idx else "RES_HANDSHAKE(idx=0)"
-    if msg_type == CHALLENGE:
-        return "CHALLENGE"
-    if msg_type == KEEPALIVE:
-        return "KEEPALIVE"
-    return "type %d" % msg_type
+    return name
 
 
 def check(name, got, want):
@@ -124,21 +338,30 @@ def check(name, got, want):
     failed += not ok
 
 
+def expect(name, got, want):
+    global failed
+    ok = got == want
+    print("%-4s %-52s %s%s" % ("ok" if ok else "FAIL", name, got, "" if ok else "   (want %s)" % (want,)))
+    failed += not ok
+
+
 def handshake_tests():
     c = Client()
 
     check("unknown device id", c.request(dev_id=bytes(16)), "DENY(1)")
     check("request too short", (c.send(header(REQ_HANDSHAKE) + TUN_IP + DEV_ID[:8]), c.recv())[1], "no response")
     check("old client (tunnel ip only, no device id)", (c.send(header(REQ_HANDSHAKE) + TUN_IP), c.recv())[1], "no response")
+    c.send(struct.pack("!BBHI", 2, REQ_HANDSHAKE, 0, 0) + TUN_IP + DEV_ID)
+    check("previous protocol version", c.recv(), "no response")
     check("registered device gets a challenge", c.request(), "CHALLENGE")
 
-    check("correct key", c.handshake(), "RES_HANDSHAKE")
+    check("correct key (and the server's answer verifies)", c.handshake(), "RES_HANDSHAKE")
     check("wrong key", c.handshake(key=bytes(32)), "DENY(2)")
 
     r = c.request()
-    nonce = r[2]
-    check("first AUTH with this nonce", c.auth(nonce), "RES_HANDSHAKE")
-    check("same AUTH sent again (replay)", c.auth(nonce), "DENY(2)")
+    challenge = r[2]
+    check("first AUTH with this nonce", c.auth(challenge), "RES_HANDSHAKE")
+    check("same nonce used again (replay)", c.auth(challenge), "DENY(2)")
 
     check("AUTH with a nonce the server never issued", (c.request(), c.auth(os.urandom(16)))[1], "DENY(2)")
 
@@ -149,27 +372,39 @@ def handshake_tests():
     flip = lambda s: s[:-8] + posture(firewall=STATE_OFF)
     check("posture changed after signing", c.handshake(tamper=flip), "DENY(2)")
 
-    check("tunnel ip not assigned to this device (properly signed)",
-          c.handshake(tun_ip=socket.inet_aton("10.0.0.9")), "DENY(3)")
+    # 사이에 낀 쪽이 일회용 공개키를 자기 것으로 바꿔 끼운 경우. mac 이 공개키까지 덮는다.
+    swap = lambda s: s[:HDR_LEN + 36] + Ecdh().pub + s[HDR_LEN + 36 + PUB_LEN:]
+    check("ephemeral key replaced after signing", c.handshake(tamper=swap), "DENY(2)")
+
+    # 서명은 맞는데 공개키가 곡선 위의 점이 아니다. 계산해 주지 않는다.
+    check("ephemeral key that is not on the curve", c.handshake(pub=bytes(PUB_LEN - 1) + b"\x01"), "no response")
+
+    r = c.handshake(tun_ip=socket.inet_aton("10.0.0.9"))
+    check("tunnel ip not assigned to this device (properly signed)", r, "DENY(3)")
+    expect("that denial is signed with the device key", c.deny_mac_ok(r), True)
+
+    r = c.handshake(key=bytes(32))
+    expect("a denial before authentication carries no mac",
+           "zeros" if r[2][1:1 + MAC_LEN] == bytes(MAC_LEN) else "present", "zeros")
 
     c.send(header(AUTH) + TUN_IP + DEV_ID)
     check("AUTH too short", c.recv(), "no response")
 
+    # 세션 키는 핸드셰이크마다 새로 뽑힌다.
+    a = SESSIONS[c.handshake()[1]]
+    b = SESSIONS[c.handshake()[1]]
+    expect("two handshakes of one device, session keys", "differ" if a[0] != b[0] and a[1] != b[1] else "same", "differ")
+    expect("the two directions of one session, keys", "differ" if a[0] != a[1] else "same", "differ")
+
 
 def disruption_tests():
     """기기 ID 만 아는 제3자가 진짜 기기의 핸드셰이크를 깨뜨릴 수 없는지."""
-    global failed
     victim, attacker = Client(), Client()
-
-    def report(name, ok, text):
-        global failed
-        print("%-4s %-52s %s" % ("ok" if ok else "FAIL", name, text))
-        failed += not ok
 
     r = victim.request()
     again = attacker.request()
-    report("REQ from elsewhere does not replace a live nonce", again[2] == r[2],
-           "same nonce" if again[2] == r[2] else "nonce replaced")
+    expect("REQ from elsewhere does not replace a live nonce",
+           "same nonce" if again[2] == r[2] else "nonce replaced", "same nonce")
     check("victim's AUTH after 20 foreign REQs",
           ([attacker.request() for _ in range(20)], victim.auth(r[2]))[1], "RES_HANDSHAKE")
 
@@ -179,8 +414,8 @@ def disruption_tests():
 
     # 재사용은 서명이 맞는 AUTH 가 올 때까지만이다. 한 번 쓰인 nonce 는 다시 나오지 않는다.
     after = victim.request()
-    report("a used nonce is not handed out again", after[2] != r[2],
-           "new nonce" if after[2] != r[2] else "same nonce")
+    expect("a used nonce is not handed out again",
+           "new nonce" if after[2] != r[2] else "same nonce", "new nonce")
 
     # 서명은 맞지만 거절된 AUTH 도 nonce 를 쓴 것이다 (엿들은 AUTH 의 재전송 방지).
     wrong_ip = socket.inet_aton("10.0.0.9")
@@ -200,7 +435,9 @@ def posture_tests():
 
     # 두 번째 기기: firewall=on antivirus=on min-build=22000
     check("strict device, everything on", strict(c), "RES_HANDSHAKE")
-    check("strict device, firewall off", strict(c, firewall=STATE_OFF), "DENY(4)")
+    r = strict(c, firewall=STATE_OFF)
+    check("strict device, firewall off", r, "DENY(4)")
+    expect("that denial is signed with the device key", c.deny_mac_ok(r, DEV2_KEY), True)
     check("strict device, firewall unknown", strict(c, firewall=STATE_UNKNOWN), "DENY(4)")
     check("strict device, antivirus off", strict(c, antivirus=STATE_OFF), "DENY(4)")
     check("strict device, build below minimum", strict(c, build=19045), "DENY(4)")
@@ -212,18 +449,15 @@ def posture_tests():
           c.handshake(post=posture(firewall=STATE_OFF, antivirus=STATE_OFF, build=0)), "RES_HANDSHAKE")
 
 
-def keepalive(idx, counter, key=DEV_KEY, post=None, tamper=None):
-    """KEEPALIVE: header | counter(8) | posture(8) | mac(32). mac 은 헤더부터 포스처까지."""
-    signed = header(KEEPALIVE, idx) + struct.pack("!Q", counter) + (post or posture())
-    tag = mac(key, signed)
-    if tamper:
-        signed = tamper(signed)
-    return signed + tag
+def keepalive(idx, counter=None, key=None, post=None, tamper=None, as_idx=None):
+    """KEEPALIVE: header | counter(8) | 세션 키로 감싼 posture(8) | tag(16)."""
+    pkt = seal(KEEPALIVE, idx, post or posture(), counter, key, as_idx)
+    return tamper(pkt) if tamper else pkt
 
 
 def session(c, strict_dev=False):
     r = strict(c) if strict_dev else c.handshake()
-    assert r and r[0] == RES_HANDSHAKE, "handshake failed: %s" % describe(r)
+    assert r and r[0] == RES_HANDSHAKE and r[2] is not None, "handshake failed: %s" % describe(r)
     return r[1]
 
 
@@ -232,42 +466,42 @@ def keepalive_tests():
     ka = lambda pkt: (c.send(pkt), c.recv())[1]
 
     idx = session(c)
-    check("keepalive, counter 0", ka(keepalive(idx, 0)), "KEEPALIVE")
+    check("keepalive, counter 0 (and the answer verifies)", ka(keepalive(idx, 0)), "KEEPALIVE")
     check("keepalive, counter 5", ka(keepalive(idx, 5)), "KEEPALIVE")
     good = keepalive(idx, 6)
     check("keepalive, counter 6", ka(good), "KEEPALIVE")
     check("the same packet again (replay)", ka(good), "no response")
-    check("older counter (3), properly signed", ka(keepalive(idx, 3)), "no response")
-    check("old-style keepalive (header only)", ka(header(KEEPALIVE, idx)), "no response")
-    check("signed with the wrong key", ka(keepalive(idx, 7, key=bytes(32))), "no response")
-    check("signed with another device's key", ka(keepalive(idx, 7, key=DEV2_KEY)), "no response")
-    flip = lambda s: s[:-8] + posture(build=99999)
-    check("posture changed after signing", ka(keepalive(idx, 7, tamper=flip)), "no response")
+    check("older counter (3), properly sealed", ka(keepalive(idx, 3)), "no response")
+    check("header only, nothing sealed", ka(header(KEEPALIVE, idx)), "no response")
+    check("sealed with a key the server never agreed to", ka(keepalive(idx, 7, key=bytes(32))), "no response")
+    other = SESSIONS[session(Client(), strict_dev=True)]
+    check("sealed with another session's key", ka(keepalive(idx, 7, key=other[0])), "no response")
+    check("sealed with this session's other direction", ka(keepalive(idx, 7, key=SESSIONS[idx][1])), "no response")
+    flip = lambda p: p[:16] + bytes([p[16] ^ 0x01]) + p[17:]
+    check("one bit of the sealed posture changed", ka(keepalive(idx, 7, tamper=flip)), "no response")
     check("session survives the forged packets", ka(keepalive(idx, 7)), "KEEPALIVE")
 
-    # 다른 세션의 keepalive 를 끼워 넣기: mac 이 헤더의 idx 까지 덮으므로 통하지 않는다.
-    other = keepalive(idx, 8)
-    swapped = header(KEEPALIVE, idx ^ 0x100) + other[8:]
-    check("keepalive replayed under another session idx", ka(swapped), "no response")
+    # 다른 세션 번호를 적어 끼워 넣기: tag 가 헤더까지 덮으므로 통하지 않는다.
+    check("keepalive under another session idx", ka(keepalive(idx, 8, as_idx=idx ^ 0x100)), "no response")
+    retype = lambda p: p[:1] + bytes([DATA]) + p[2:]
+    check("keepalive relabelled as DATA", ka(keepalive(idx, 8, tamper=retype)), "no response")
 
-    # 다시 인증하면 새 세션이다. idx 가 바뀌고 counter 는 0 부터 다시 받는다.
+    # 다시 인증하면 새 세션이다. idx 와 키가 바뀌고 counter 는 0 부터 다시 받는다.
+    old = SESSIONS[idx]
     idx2 = session(c)
-    global failed
-    ok = idx2 != idx
-    print("%-4s %-52s %s" % ("ok" if ok else "FAIL", "re-authentication opens a new session",
-                             "idx %08x -> %08x" % (idx, idx2)))
-    failed += not ok
+    expect("re-authentication opens a new session", "new idx" if idx2 != idx else "same idx", "new idx")
     check("new session accepts counter 0", ka(keepalive(idx2, 0)), "KEEPALIVE")
     check("old session idx no longer answers", ka(keepalive(idx, 9)), "no response")
+    check("old session's key under the new idx", ka(keepalive(idx2, 1, key=old[0])), "no response")
 
     # 세션 중에 포스처가 나빠진 경우 (포스처 조건이 걸린 기기)
     sidx = session(c, strict_dev=True)
-    sk = lambda n, **post: ka(keepalive(sidx, n, key=DEV2_KEY, post=posture(**post)))
-    check("strict device, keepalive with everything on", sk(0), "KEEPALIVE")
-    check("strict device, keepalive reports firewall off", sk(1, firewall=STATE_OFF), "DENY(4)")
-    check("that session is gone", sk(2), "no response")
+    sk = lambda **post: ka(keepalive(sidx, post=posture(**post)))
+    check("strict device, keepalive with everything on", sk(), "KEEPALIVE")
+    check("strict device, keepalive reports firewall off (sealed denial)", sk(firewall=STATE_OFF), "DENY(4)")
+    check("that session is gone", sk(), "no response")
     sidx = session(c, strict_dev=True)
-    check("strict device can come back once the posture is fine", sk(0), "KEEPALIVE")
+    check("strict device can come back once the posture is fine", sk(), "KEEPALIVE")
 
 
 def checksum(data):
@@ -288,18 +522,19 @@ def echo_request(src, dst, seq):
     return ip + icmp
 
 
-def data(idx, counter, inner):
-    return header(DATA, idx) + struct.pack("!Q", counter) + inner
+def data(idx, counter, inner, key=None, tamper=None):
+    """DATA: header | counter(8) | 세션 키로 감싼 inner 패킷 | tag(16)."""
+    pkt = seal(DATA, idx, inner, counter, key)
+    return tamper(pkt) if tamper else pkt
 
 
 def describe_data(r):
     """DATA 로 돌아온 inner 패킷이 ICMP echo reply 인지."""
     if r is None:
         return "no response"
-    msg_type, idx, body = r
-    if msg_type != DATA:
+    msg_type, idx, inner = r
+    if msg_type != DATA or inner is None:
         return describe(r)
-    inner = body[8:]
     if len(inner) >= 28 and inner[9] == 1 and inner[20] == 0:
         return "echo reply"
     return "DATA (not an echo reply)"
@@ -318,23 +553,48 @@ def data_tests():
     c = Client()
     send = lambda pkt: (c.send(pkt), c.recv())[1]
     server_ip = socket.inet_aton("10.0.0.1")
+    ping = lambda seq, src=TUN_IP: echo_request(src, server_ip, seq)
 
     idx = session(c)
-    check_data("ping through an authenticated session",
-               send(data(idx, 0, echo_request(TUN_IP, server_ip, 1))), "echo reply")
+    check_data("ping through an authenticated session (reply verifies)",
+               send(data(idx, 0, ping(1))), "echo reply")
+
+    # 터널 안의 내용이 와이어에 그대로 보이지 않는지. 보낸 것도, 돌아온 것도.
+    marker = b"my_vpn auth_check"
+    sent = data(idx, 1, ping(2))
+    r = send(sent)
+    expect("the payload is not readable on the wire",
+           "hidden" if marker not in sent and marker not in c.raw and marker in (r[2] or b"") else "visible", "hidden")
+
+    check_data("the same packet again (replay)", send(sent), "no response")
+    flip = lambda p: p[:40] + bytes([p[40] ^ 0x01]) + p[41:]
+    check_data("one bit of the sealed packet changed", send(data(idx, 2, ping(3), tamper=flip)), "no response")
+    check_data("sealed with a key the server never agreed to",
+               send(data(idx, 2, ping(3), key=bytes(32))), "no response")
+    check_data("session survives those, same counter now valid", send(data(idx, 2, ping(3))), "echo reply")
+
+    # UDP 는 순서를 바꿔 전달할 수 있다. 늦게 온 패킷도 처음 보는 counter 면 받는다.
+    late = data(idx, 10, ping(4))
+    check_data("counter 11 arrives first", send(data(idx, 11, ping(5))), "echo reply")
+    check_data("counter 10 arrives late", send(late), "echo reply")
+    check_data("counter 10 again", send(late), "no response")
+    old = data(idx, 20, ping(6))
+    check_data("counter 120 (the window moves on)", send(data(idx, 120, ping(7))), "echo reply")
+    check_data("counter 20, now older than the window", send(old), "no response")
+
     check_data("same ping under a session idx nobody was given",
-               send(data(idx ^ 0x100, 1, echo_request(TUN_IP, server_ip, 2))), "no response")
+               send(seal(DATA, idx, ping(8), as_idx=idx ^ 0x100)), "no response")
     check_data("inner source is another device's tunnel ip",
-               send(data(idx, 2, echo_request(TUN2_IP, server_ip, 3))), "no response")
+               send(data(idx, None, ping(9, TUN2_IP))), "no response")
 
     # 세션 중에 포스처 때문에 거절되면 데이터 길도 같이 닫힌다.
     sidx = session(c, strict_dev=True)
     check_data("strict device, ping while the posture is fine",
-               send(data(sidx, 0, echo_request(TUN2_IP, server_ip, 4))), "echo reply")
+               send(data(sidx, None, ping(10, TUN2_IP))), "echo reply")
     check("strict device, keepalive reports firewall off",
-          send(keepalive(sidx, 1, key=DEV2_KEY, post=posture(firewall=STATE_OFF))), "DENY(4)")
+          send(keepalive(sidx, post=posture(firewall=STATE_OFF))), "DENY(4)")
     check_data("strict device, ping after being denied",
-               send(data(sidx, 2, echo_request(TUN2_IP, server_ip, 5))), "no response")
+               send(data(sidx, None, ping(11, TUN2_IP))), "no response")
 
 
 def setup_tun(log):
@@ -369,23 +629,25 @@ def reload_tests(srv, path):
         time.sleep(1.5)
 
     idx = session(c)
-    check("before reload", ka(keepalive(idx, 0)), "KEEPALIVE")
+    check("before reload", ka(keepalive(idx)), "KEEPALIVE")
     reload(LINE1 + " min-build=99999", LINE2)
-    check("policy tightened: next keepalive of the open session", ka(keepalive(idx, 1)), "DENY(4)")
+    check("policy tightened: next keepalive of the open session", ka(keepalive(idx)), "DENY(4)")
     check("policy tightened: new handshake", c.handshake(), "DENY(4)")
 
     reload(LINE1, LINE2)
     idx = session(c)
-    check("policy relaxed: device is accepted again", ka(keepalive(idx, 0)), "KEEPALIVE")
+    check("policy relaxed: device is accepted again", ka(keepalive(idx)), "KEEPALIVE")
 
+    # 기기가 목록에서 사라지면 서버에는 그 기기의 키가 없다. 그래도 세션 키는 남아 있어
+    # 거절을 세션 키로 감싸 보낼 수 있다.
     reload(LINE2)
-    check("device removed: next keepalive of the open session", ka(keepalive(idx, 1)), "DENY(1)")
+    check("device removed: next keepalive of the open session", ka(keepalive(idx)), "DENY(1)")
     check("device removed: new handshake", c.request(), "DENY(1)")
 
     reload(LINE1, LINE2)
     idx = session(c)
     reload(LINE1 + " firewal=on", LINE2)
-    check("broken file: previous list stays in effect", ka(keepalive(idx, 0)), "KEEPALIVE")
+    check("broken file: previous list stays in effect", ka(keepalive(idx)), "KEEPALIVE")
 
 
 def loader_tests():
@@ -460,7 +722,7 @@ def acl_tests(srv, acl_path):
     def verdict(inner, idx):
         seq[0] += 1
         before = len(srv.text())
-        c.send(data(idx, seq[0], inner))
+        c.send(data(idx, None, inner))
         time.sleep(0.3)
         c.drain()       # 통과한 패킷에는 서버의 커널이 답한다. 다음 검사가 그걸 읽지 않게 비운다.
         new = srv.text()[before:]
@@ -488,7 +750,7 @@ def acl_tests(srv, acl_path):
     expect("acl reloaded: udp/53 now allowed", verdict(udp(53), idx), "passed")
     expect("acl reloaded: icmp no longer allowed", verdict(ping(), idx), "denied")
     check("acl reloaded: the session itself stays open",
-          (c.send(keepalive(idx, 0)), c.recv())[1], "KEEPALIVE")
+          (c.send(keepalive(idx)), c.recv())[1], "KEEPALIVE")
 
     rules("10.0.0.0/24 10.0.0.1 udp 53 deny", "10.0.0.0/24 10.0.0.1 icmp any allow", "any any any any allwo")
     expect("broken acl file: previous rules stay (udp/53)", verdict(udp(53), idx), "passed")
@@ -501,7 +763,7 @@ def acl_tests(srv, acl_path):
     rules("10.0.0.0/24 10.0.0.1 udp 53 allow firewall=on min-build=22000",
           "10.0.0.0/24 10.0.0.1 icmp any allow",
           "any any any any allow")
-    ka = lambda n, **post: (c.send(keepalive(idx, n, post=posture(**post))), c.recv())[1]
+    ka = lambda n, **post: (c.send(keepalive(idx, post=posture(**post))), c.recv())[1]
 
     idx = session(c)
     expect("rule requires firewall: reported on", verdict(udp(53), idx), "passed")
@@ -527,18 +789,14 @@ def acl_tests(srv, acl_path):
 
 def status_tests(srv):
     """상태 소켓이 서버의 피어 테이블과 판정 횟수를 그대로 보여 주는지. ACL 을 켠 서버로 돌린다."""
-    global failed
     c = Client()
     server_ip = socket.inet_aton("10.0.0.1")
 
-    def expect(name, got, want):
-        global failed
-        ok = got == want
-        print("%-4s %-52s %s%s" % ("ok" if ok else "FAIL", name, got, "" if ok else "   (want %s)" % (want,)))
-        failed += not ok
-
     def find(st, ip):
         return next((s for s in st["sessions"] if s["tunnel_ip"] == ip), None)
+
+    def counted(st, before, *names):
+        return tuple(st["counters"][n] - before["counters"][n] for n in names)
 
     mode = os.stat(srv.status_path).st_mode & 0o777
     expect("status: socket file mode", "%03o" % mode, "600")
@@ -556,38 +814,43 @@ def status_tests(srv):
     expect("status: session idx", s and s["session_idx"], "%08x" % idx)
     expect("status: posture from the handshake", s and s["posture"],
            {"os_build": 26200, "firewall": "on", "antivirus": "on"})
-    expect("status: handshake_ok counted",
-           st["counters"]["handshake_ok"] - before["counters"]["handshake_ok"], 1)
+    expect("status: handshake_ok counted", counted(st, before, "handshake_ok"), (1,))
 
-    c.send(keepalive(idx, 0, post=posture(firewall=STATE_OFF)))
+    c.send(keepalive(idx, post=posture(firewall=STATE_OFF)))
     c.recv()
     s = find(srv.status(), "10.0.0.3")
     expect("status: posture follows the keepalive", s and s["posture"]["firewall"], "off")
 
-    c.send(data(idx, 0, echo_request(TUN_IP, server_ip, 900)))
+    c.send(data(idx, None, echo_request(TUN_IP, server_ip, 900)))
     c.recv()
-    c.send(data(idx, 1, udp_packet(TUN_IP, server_ip, 53, 901)))
+    c.send(data(idx, None, udp_packet(TUN_IP, server_ip, 53, 901)))
     time.sleep(0.3)
     st = srv.status()
     s = find(st, "10.0.0.3")
     expect("status: one packet in, one out, one denied",
            s and (s["rx_packets"], s["tx_packets"], s["acl_denied"]), (1, 1, 1))
-    expect("status: acl_denied counted",
-           st["counters"]["acl_denied"] - before["counters"]["acl_denied"], 1)
+    expect("status: acl_denied counted", counted(st, before, "acl_denied"), (1,))
 
+    # 키가 틀린 핸드셰이크, 세션 키로 열리지 않는 패킷, 다시 보낸 패킷, 순서가 뒤바뀐 포스처 보고
     c.handshake(key=bytes(32))
-    c.send(keepalive(idx, 1, key=bytes(32)))
+    c.send(keepalive(idx, key=bytes(32)))
+    c.recv()
+    good = keepalive(idx)
+    c.send(good)
+    c.recv()
+    c.send(good)
+    c.recv()
+    c.send(keepalive(idx, 3))       # 서버가 아직 받아들인 적 없는 counter 지만 마지막 보고보다 앞이다
     c.recv()
     st = srv.status()
-    expect("status: bad auth and forged keepalive counted",
-           (st["counters"]["deny_bad_auth"] - before["counters"]["deny_bad_auth"],
-            st["counters"]["keepalive_dropped"] - before["counters"]["keepalive_dropped"]), (1, 1))
-    expect("status: the forged keepalive did not touch the session",
+    expect("status: bad auth / bad tag / replayed / out of order counted",
+           counted(st, before, "deny_bad_auth", "bad_tag", "replayed", "keepalive_dropped"), (1, 1, 1, 1))
+    expect("status: none of those touched the session",
            find(st, "10.0.0.3")["session_idx"], "%08x" % idx)
 
     sidx = session(c, strict_dev=True)
     expect("status: two sessions", len(srv.status()["sessions"]), 2)
-    c.send(keepalive(sidx, 0, key=DEV2_KEY, post=posture(firewall=STATE_OFF)))
+    c.send(keepalive(sidx, post=posture(firewall=STATE_OFF)))
     c.recv()
     st = srv.status()
     expect("status: the dropped session is gone", find(st, "10.0.0.4"), None)
@@ -599,7 +862,7 @@ def status_tests(srv):
         s.connect(srv.status_path)
         s.close()
     check("status: server still answers after 50 abandoned connections",
-          (c.send(keepalive(idx, 2)), c.recv())[1], "KEEPALIVE")
+          (c.send(keepalive(idx)), c.recv())[1], "KEEPALIVE")
 
     # 접속한 쪽이 보낸 것은 읽지 않는다.
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

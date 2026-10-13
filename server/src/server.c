@@ -14,7 +14,8 @@
 #include "common.h"
 #include "peer.h"
 #include "acl.h"
-#include "auth.h"
+#include "crypt.h"
+#include "secure.h"
 #include "device.h"
 #include "status.h"
 
@@ -38,28 +39,64 @@ static void on_reload(int sig)
 	reload_requested = 1;
 }
 
-/* 거절하고 이유를 알려 준다. 응답이 없는 것과 거절된 것을 클라이언트가 구분해야
- * 사용자에게 무엇을 고치라고 말할 수 있다. */
+/* 핸드셰이크를 거절하고 이유를 알려 준다. 응답이 없는 것과 거절된 것을 클라이언트가
+ * 구분해야 사용자에게 무엇을 고치라고 말할 수 있다.
+ *
+ * DENY: reason(1) | mac(32)
+ *
+ * dev 와 auth_mac 을 주면 그 기기의 키로 mac 을 만든다. 서명이 맞는 AUTH 를 받은 뒤의
+ * 거절에만 줄 수 있다. 그 전에는 상대가 그 기기인지 모르고, 틀린 키로 온 상대에게는
+ * 우리가 만든 mac 이 어차피 맞지 않는다. 그때는 0 으로 채워 보낸다 — 클라이언트는 mac 이
+ * 맞는 거절만 서버의 답으로 믿고, 맞지 않는 것은 다른 답이 오지 않을 때에만 받아들인다. */
 static void send_deny(int32_t sock, const struct sockaddr_in *dst, socklen_t dstlen,
-		uint32_t session_idx, uint8_t reason)
+		uint8_t reason, const device_t *dev, const uint8_t *auth_mac)
 {
-	uint8_t res[sizeof(msg_header_t) + 1];
+	uint8_t res[DENY_HS_LEN];
 	msg_header_t msg_header;
 	int32_t off;
 
+	memset(res, 0, sizeof(res));
 	memset(&msg_header, 0, sizeof(msg_header));
 	msg_header.version = PROTOCOL_VERSION;
 	msg_header.type = MSG_TYPE_DENY;
-	msg_header.session_idx = session_idx;
 
 	off = msg_encode(res, sizeof(res), &msg_header);
 	res[off++] = reason;
+
+	if (dev != NULL && auth_mac != NULL &&
+			secure_deny_mac(dev->key, reason, auth_mac, res + off) < 0) {
+		return;
+	}
 
 	if (reason <= DENY_POSTURE) {
 		stats.deny[reason]++;
 	}
 
-	if (sendto(sock, res, off, 0, (const struct sockaddr *)dst, dstlen) < 0) {
+	if (sendto(sock, res, sizeof(res), 0, (const struct sockaddr *)dst, dstlen) < 0) {
+		perror("sendto deny");
+	}
+}
+
+/* 열려 있는 세션을 거절한다. 세션 키로 감싸므로 서버만 만들 수 있다 — 세션 번호를
+ * 엿본 제3자가 가짜 거절로 남의 접속을 끊을 수 없다. 보낸 뒤 세션을 내리는 것은
+ * 부르는 쪽의 일이다. */
+static void send_session_deny(int32_t sock, peer_t *peer, const struct sockaddr_in *dst,
+		socklen_t dstlen, uint8_t reason)
+{
+	uint8_t res[PKT_OVERHEAD + 1];
+	int n;
+
+	res[PKT_HDR_LEN] = reason;
+	n = secure_seal(&peer->secure, MSG_TYPE_DENY, peer->session_idx, res, sizeof(res), 1);
+	if (n < 0) {
+		return;
+	}
+
+	if (reason <= DENY_POSTURE) {
+		stats.deny[reason]++;
+	}
+
+	if (sendto(sock, res, n, 0, (const struct sockaddr *)dst, dstlen) < 0) {
 		perror("sendto deny");
 	}
 }
@@ -67,7 +104,9 @@ static void send_deny(int32_t sock, const struct sockaddr_in *dst, socklen_t dst
 /* REQ_HANDSHAKE: tun_ip(4) | device_id(16)
  *
  * 여기서는 아무것도 믿지 않는다. ID 는 공개된 이름표라 누구나 댈 수 있다. 그래서
- * 세션을 주지 않고 "그 기기라면 이 nonce 에 서명해 봐라"만 돌려준다. */
+ * 세션을 주지 않고 "그 기기라면 이 nonce 에 서명해 봐라"만 돌려준다. 키를 만들고
+ * 합의하는 비싼 계산도 여기서는 하지 않는다 — 출발지를 위조한 REQ 를 쏟아부어 서버를
+ * 바쁘게 만들 수 없다. */
 static void handle_request(int32_t sock, const uint8_t *packet, int32_t n,
 		const struct sockaddr_in *src, socklen_t srclen)
 {
@@ -86,7 +125,7 @@ static void handle_request(int32_t sock, const uint8_t *packet, int32_t n,
 	dev = device_find(body + IP_ADDR_LEN);
 	if (dev == NULL) {
 		printf("[HS] unknown device %s\n", device_id_str(body + IP_ADDR_LEN, ids));
-		send_deny(sock, src, srclen, 0, DENY_UNKNOWN_DEVICE);
+		send_deny(sock, src, srclen, DENY_UNKNOWN_DEVICE, NULL, NULL);
 		return;
 	}
 
@@ -95,7 +134,7 @@ static void handle_request(int32_t sock, const uint8_t *packet, int32_t n,
 	 * REQ 를 계속 보내는 것만으로 진짜 기기가 서명 중인 nonce 를 무효로 만들 수 있다.
 	 * nonce 는 비밀이 아니다 — 남이 받아 가도 키가 없으면 서명하지 못한다. */
 	if (!dev->nonce_valid || mono_now() - dev->nonce_at > NONCE_TTL_SEC) {
-		if (auth_random(dev->nonce, sizeof(dev->nonce)) < 0) {
+		if (crypt_random(dev->nonce, sizeof(dev->nonce)) < 0) {
 			perror("getrandom");
 			return;
 		}
@@ -116,55 +155,106 @@ static void handle_request(int32_t sock, const uint8_t *packet, int32_t n,
 	}
 }
 
-/* AUTH: tun_ip(4) | device_id(16) | nonce(16) | posture(8) | mac(32)
+/* 인증이 끝난 기기와 세션 키를 합의하고 RES_HANDSHAKE 를 만든다.
+ *
+ *   RES_HANDSHAKE: pub_s(64) | tag(16)
+ *
+ * 일회용 키 쌍을 새로 만들어 클라이언트의 것과 합의하고, 거기에 기기 키와 주고받은
+ * 패킷의 해시를 섞어 세션 키를 뽑는다 (secure.h). tag 는 그 키로 만든다 — 클라이언트는
+ * tag 가 맞는 것을 보고 상대가 이 기기의 키를 아는 서버임을 안다.
+ *
+ * res 에 보낼 패킷을 채우고 길이를 돌려준다. 실패하면 -1. */
+static int open_session(peer_t *peer, const device_t *dev, const uint8_t *auth, uint8_t *res, size_t cap)
+{
+	uint8_t secret[VPN_SECRET_LEN];
+	secure_keys_t keys;
+	msg_header_t msg_header;
+	crypt_ecdh_t *ecdh;
+	int len = -1;
+
+	memset(&msg_header, 0, sizeof(msg_header));
+	msg_header.version = PROTOCOL_VERSION;
+	msg_header.type = MSG_TYPE_RES_HANDSHAKE;
+	msg_header.session_idx = peer->session_idx;
+	msg_encode(res, cap, &msg_header);
+
+	ecdh = crypt_ecdh_new(res + sizeof(msg_header_t));
+	if (ecdh == NULL) {
+		return -1;
+	}
+
+	/* 클라이언트의 공개키가 곡선 위의 점이 아니면 여기서 실패한다. */
+	if (crypt_ecdh_derive(ecdh, auth + sizeof(msg_header_t) + AUTH_OFF_PUB, secret) < 0 ||
+			secure_derive(dev->key, secret, auth, res, &keys) < 0) {
+		goto out;
+	}
+
+	/* 서버는 S->C 키로 보내고 C->S 키로 받는다. */
+	if (secure_session_open(&peer->secure, keys.s2c, keys.c2s) < 0) {
+		goto out;
+	}
+
+	len = secure_res_seal(keys.res, res, cap, 0);
+
+out:
+	crypt_ecdh_free(ecdh);
+	crypt_wipe(secret, sizeof(secret));
+	crypt_wipe(&keys, sizeof(keys));
+
+	return len;
+}
+
+/* AUTH: tun_ip(4) | device_id(16) | nonce(16) | pub_c(64) | posture(8) | mac(32)
  *
  * 검사 순서에 뜻이 있다. 키를 가졌다는 것(mac)을 확인하기 전에는 "터널 IP 가
  * 틀렸다" 같은 구체적인 이유를 알려 주지 않는다. 인증되지 않은 상대에게 설정
- * 내용을 흘리지 않기 위해서다. */
+ * 내용을 흘리지 않기 위해서다. 키 합의도 그 뒤에 한다. */
 static void handle_auth(int32_t sock, const uint8_t *packet, int32_t n,
 		const struct sockaddr_in *src, socklen_t srclen)
 {
 	char ids[DEVICE_ID_STRLEN];
 	char ib[INET_ADDRSTRLEN];
-	uint8_t res[sizeof(msg_header_t)];
+	uint8_t res[RES_HS_MIN_LEN];
 	uint8_t mac[AUTH_MAC_LEN];
 	const uint8_t *body = packet + sizeof(msg_header_t);
-	const uint8_t *nonce = body + IP_ADDR_LEN + DEVICE_ID_LEN;
-	msg_header_t msg_header;
+	const uint8_t *auth_mac = body + AUTH_OFF_MAC;
 	posture_report_t posture;
 	struct in_addr tun_ip;
 	device_t *dev;
 	peer_t *peer;
 	int fresh;
+	int len;
 
-	if (n < (int32_t)(sizeof(msg_header_t) + AUTH_PAYLOAD_LEN)) {
+	if (n < (int32_t)AUTH_PACKET_LEN) {
 		printf("[HS] short auth (%d bytes)\n", n);
 		return;
 	}
 
-	memcpy(&tun_ip, body, IP_ADDR_LEN);
+	memcpy(&tun_ip, body + AUTH_OFF_TUN_IP, IP_ADDR_LEN);
 
-	dev = device_find(body + IP_ADDR_LEN);
+	dev = device_find(body + AUTH_OFF_DEVICE_ID);
 	if (dev == NULL) {
-		printf("[HS] unknown device %s\n", device_id_str(body + IP_ADDR_LEN, ids));
-		send_deny(sock, src, srclen, 0, DENY_UNKNOWN_DEVICE);
+		printf("[HS] unknown device %s\n", device_id_str(body + AUTH_OFF_DEVICE_ID, ids));
+		send_deny(sock, src, srclen, DENY_UNKNOWN_DEVICE, NULL, NULL);
 		return;
 	}
 	device_id_str(dev->id, ids);
 
 	fresh = dev->nonce_valid &&
 		mono_now() - dev->nonce_at <= NONCE_TTL_SEC &&
-		memcmp(nonce, dev->nonce, AUTH_NONCE_LEN) == 0;
+		memcmp(body + AUTH_OFF_NONCE, dev->nonce, AUTH_NONCE_LEN) == 0;
 
 	/* 틀린 AUTH 는 nonce 를 건드리지 않는다. 받기만 하면 버리던 때에는 아무 값이나
-	 * 채운 AUTH 한 통으로 진짜 기기의 핸드셰이크를 깨뜨릴 수 있었다. 위조 keepalive 로
-	 * 남의 세션을 끊지 못하게 한 것과 같은 원칙이다 — 그 기기가 보냈다고 확인되지 않은
-	 * 패킷은 그 기기의 상태를 바꾸지 못한다. */
+	 * 채운 AUTH 한 통으로 진짜 기기의 핸드셰이크를 깨뜨릴 수 있었다. 그 기기가 보냈다고
+	 * 확인되지 않은 패킷은 그 기기의 상태를 바꾸지 못한다.
+	 *
+	 * mac 은 헤더부터 덮는다. 일회용 공개키도 그 안이라, 사이에 낀 쪽이 자기 공개키로
+	 * 바꿔 끼우면 여기서 걸린다. */
 	if (!fresh ||
-			auth_hmac(dev->key, body, AUTH_SIGNED_LEN, mac) < 0 ||
-			!auth_mac_equal(mac, body + AUTH_SIGNED_LEN)) {
+			crypt_hmac(dev->key, AUTH_KEY_LEN, packet, AUTH_SIGNED_LEN, mac) < 0 ||
+			!crypt_equal(mac, auth_mac, AUTH_MAC_LEN)) {
 		printf("[HS] bad auth from device %s\n", ids);
-		send_deny(sock, src, srclen, 0, DENY_BAD_AUTH);
+		send_deny(sock, src, srclen, DENY_BAD_AUTH, NULL, NULL);
 		return;
 	}
 
@@ -175,25 +265,22 @@ static void handle_auth(int32_t sock, const uint8_t *packet, int32_t n,
 
 	if (tun_ip.s_addr != dev->tun_ip.s_addr) {
 		printf("[HS] device %s asked for %s, not its tunnel ip\n", ids, ip_str(tun_ip, ib));
-		send_deny(sock, src, srclen, 0, DENY_TUN_IP);
+		send_deny(sock, src, srclen, DENY_TUN_IP, dev, auth_mac);
 		return;
 	}
 
 	/* 누구인지는 확인됐다. 이제 그 기기가 지금 믿을 만한 상태인지 본다. 포스처는
 	 * mac 의 서명 범위 안이라 전달 도중에 고쳐지지 않았다. */
-	posture_decode(body + AUTH_SIGNED_LEN - sizeof(posture), sizeof(posture), &posture);
+	posture_decode(body + AUTH_OFF_POSTURE, sizeof(posture), &posture);
 	if (!device_posture_ok(dev, &posture)) {
 		printf("[HS] device %s posture rejected (build=%u firewall=%u antivirus=%u)\n",
 				ids, posture.os_build, posture.firewall, posture.antivirus);
-		send_deny(sock, src, srclen, 0, DENY_POSTURE);
+		send_deny(sock, src, srclen, DENY_POSTURE, dev, auth_mac);
 		return;
 	}
 
-	/* 새로 인증하면 새 세션이다. peer_register 는 같은 주소에서 다시 온 요청에 기존
-	 * 세션(같은 idx)을 그대로 돌려주는데, 그러면 keepalive counter 도 이어져서
-	 * 재시작한 클라이언트가 0 부터 보내는 keepalive 가 전부 "예전 값"으로 버려진다.
-	 * 먼저 내리고 등록해 idx 와 counter 를 함께 새로 시작한다. idx 가 바뀌므로 예전
-	 * 세션에서 엿들은 keepalive 도 새 세션에는 쓸 수 없다. */
+	/* 새로 인증하면 새 세션이다. 번호도, 키도, counter 도 새로 시작한다. 예전 세션에서
+	 * 엿들은 패킷은 번호가 달라 찾지 못하고, 찾더라도 키가 달라 열리지 않는다. */
 	peer = peer_lookup(tun_ip);
 	if (peer != NULL) {
 		peer_drop(peer);
@@ -205,6 +292,13 @@ static void handle_auth(int32_t sock, const uint8_t *packet, int32_t n,
 		return;
 	}
 
+	len = open_session(peer, dev, packet, res, sizeof(res));
+	if (len < 0) {
+		printf("[HS] key agreement failed for device %s\n", ids);
+		peer_drop(peer);
+		return;
+	}
+
 	memcpy(peer->device_id, dev->id, DEVICE_ID_LEN);
 	peer->posture = posture;
 	stats.handshake_ok++;
@@ -212,57 +306,45 @@ static void handle_auth(int32_t sock, const uint8_t *packet, int32_t n,
 	printf("[HS] device %s authenticated as %s (build=%u firewall=%u antivirus=%u)\n",
 			ids, ip_str(tun_ip, ib), posture.os_build, posture.firewall, posture.antivirus);
 
-	memset(&msg_header, 0, sizeof(msg_header));
-	msg_header.version = PROTOCOL_VERSION;
-	msg_header.type = MSG_TYPE_RES_HANDSHAKE;
-	msg_header.session_idx = peer->session_idx;
-	msg_encode(res, sizeof(res), &msg_header);
-
-	if (sendto(sock, res, sizeof(res), 0, (const struct sockaddr *)&peer->outer, peer->outer_len) < 0){
+	if (sendto(sock, res, len, 0, (const struct sockaddr *)&peer->outer, peer->outer_len) < 0){
 		perror("sendto handshake");
 	}
 }
 
-static void send_keepalive(int32_t sock, const peer_t *peer){
-	int32_t sent;
-	int32_t off;
-	uint8_t packet[sizeof(msg_header_t)];
-	msg_header_t msg_header;
+/* KEEPALIVE (S -> C): 암호문 없이 tag 만. 클라이언트는 이것으로 서버가 살아 있고 세션이
+ * 그대로임을 안다. tag 가 붙으므로 서버인 척하는 쪽이 대신 보내 줄 수 없다. */
+static void send_keepalive(int32_t sock, peer_t *peer)
+{
+	uint8_t packet[PKT_OVERHEAD];
+	int n;
 
-	memset(&msg_header, 0, sizeof(msg_header));
-	msg_header.version = PROTOCOL_VERSION;
-	msg_header.session_idx = peer->session_idx;
-	msg_header.type = MSG_TYPE_KEEPALIVE;
+	n = secure_seal(&peer->secure, MSG_TYPE_KEEPALIVE, peer->session_idx, packet, sizeof(packet), 0);
+	if (n < 0) {
+		return;
+	}
 
-	off = msg_encode(packet, sizeof(packet), &msg_header);
-	sent = sendto(sock, packet, off, 0,
-			(const struct sockaddr *)&peer->outer, peer->outer_len);
-	if (sent < 0) {
+	if (sendto(sock, packet, n, 0, (const struct sockaddr *)&peer->outer, peer->outer_len) < 0) {
 		perror("sendto");
 	}
 }
 
-/* KEEPALIVE (C -> S): counter(8) | posture(8) | mac(32)
+/* KEEPALIVE (C -> S). 세션 키로 푼 뒤의 내용은 posture(8) 이다.
  *
  * 핸드셰이크에서 한 번 통과했다고 세션이 끝날 때까지 믿지 않는다. 클라이언트는
  * keepalive 마다 지금의 포스처를 다시 싣고, 서버는 받을 때마다 정책에 다시 대 본다.
  *
- * 버리는 것과 끊는 것을 구분한다.
- *   mac 이 틀렸거나 counter 가 예전 값이면  -> 조용히 버린다. 세션은 그대로다.
- *     이 패킷은 그 기기가 보낸 것이 아닐 수 있다. 위조 패킷 하나로 남의 세션을
- *     끊을 수 있어서는 안 된다.
- *   mac 이 맞는데 포스처가 못 미치면         -> DENY 로 알리고 세션을 내린다.
- *     기기 스스로 "지금 방화벽이 꺼져 있다"고 서명해서 말한 것이다. */
-static void handle_keepalive(int32_t sock, peer_t *peer, const uint8_t *packet, int32_t n,
-		const struct sockaddr_in *src, socklen_t srclen)
+ * 여기까지 온 패킷은 tag 가 맞았으므로 그 기기가 이 세션에 보낸 것이다. 위조된 것과
+ * 다시 보낸 것은 이미 걸러졌고, 그런 패킷으로는 세션이 끊기지 않는다. 포스처가 정책에
+ * 못 미치면 DENY 로 알리고 세션을 내린다 — 기기 스스로 "지금 방화벽이 꺼져 있다"고
+ * 말한 것이다. */
+static void handle_keepalive(int32_t sock, peer_t *peer, const uint8_t *body, int32_t n,
+		uint64_t counter, const struct sockaddr_in *src, socklen_t srclen)
 {
 	char ids[DEVICE_ID_STRLEN];
-	uint8_t mac[AUTH_MAC_LEN];
-	data_header_t data_header;
 	posture_report_t posture;
 	device_t *dev;
 
-	if (n < (int32_t)(KA_SIGNED_LEN + AUTH_MAC_LEN)) {
+	if (n < (int32_t)sizeof(posture)) {
 		printf("[drop] keepalive without posture (%d bytes)\n", n);
 		stats.keepalive_dropped++;
 		return;
@@ -270,41 +352,33 @@ static void handle_keepalive(int32_t sock, peer_t *peer, const uint8_t *packet, 
 
 	device_id_str(peer->device_id, ids);
 
-	/* 세션이 열린 뒤 기기가 목록에서 지워졌다. 검증할 키가 없으므로 더 볼 것 없이 끊는다. */
+	/* 세션이 열린 뒤 기기가 목록에서 지워졌다. */
 	dev = device_find(peer->device_id);
 	if (dev == NULL) {
 		printf("[ka] device %s is no longer registered\n", ids);
-		send_deny(sock, src, srclen, peer->session_idx, DENY_UNKNOWN_DEVICE);
+		send_session_deny(sock, peer, src, srclen, DENY_UNKNOWN_DEVICE);
 		peer_drop(peer);
 		return;
 	}
 
-	/* mac 은 헤더부터 포스처까지를 덮는다. 헤더의 session_idx 가 들어가 있어 다른
-	 * 세션에서 엿들은 keepalive 를 여기에 끼워 넣을 수 없다. */
-	if (auth_hmac(dev->key, packet, KA_SIGNED_LEN, mac) < 0 ||
-			!auth_mac_equal(mac, packet + KA_SIGNED_LEN)) {
-		printf("[drop] keepalive bad mac idx=%08x\n", peer->session_idx);
+	/* 포스처 보고는 순서대로만 받는다. 데이터 패킷은 순서가 바뀌어 와도 받지만
+	 * (secure.c 의 창), 보고는 "지금의 상태"라 늦게 온 예전 것이 최신 것을 덮으면 안
+	 * 된다. 방화벽이 켜져 있던 때의 보고를 길목에서 붙잡아 두었다가, 끈 뒤에 풀어
+	 * 놓는 것을 막는다. */
+	if (peer->ka_seen && counter <= peer->ka_counter) {
+		printf("[drop] keepalive out of order (counter %llu) idx=%08x\n",
+				(unsigned long long)counter, peer->session_idx);
 		stats.keepalive_dropped++;
 		return;
 	}
-
-	/* 방화벽이 켜져 있던 때의 keepalive 를 녹화해 두었다가 끈 뒤에 다시 보내는 것을
-	 * 막는다. mac 은 맞으므로 이 검사가 없으면 통과한다. */
-	data_decode(packet + sizeof(msg_header_t), sizeof(data_header_t), &data_header);
-	if (peer->ka_seen && data_header.counter <= peer->ka_counter) {
-		printf("[drop] keepalive replayed counter %llu idx=%08x\n",
-				(unsigned long long)data_header.counter, peer->session_idx);
-		stats.keepalive_dropped++;
-		return;
-	}
-	peer->ka_counter = data_header.counter;
+	peer->ka_counter = counter;
 	peer->ka_seen = 1;
 
-	posture_decode(packet + sizeof(msg_header_t) + sizeof(data_header_t), sizeof(posture), &posture);
+	posture_decode(body, sizeof(posture), &posture);
 	if (!device_posture_ok(dev, &posture)) {
 		printf("[ka] device %s posture rejected (build=%u firewall=%u antivirus=%u)\n",
 				ids, posture.os_build, posture.firewall, posture.antivirus);
-		send_deny(sock, src, srclen, peer->session_idx, DENY_POSTURE);
+		send_session_deny(sock, peer, src, srclen, DENY_POSTURE);
 		peer_drop(peer);
 		return;
 	}
@@ -313,8 +387,6 @@ static void handle_keepalive(int32_t sock, peer_t *peer, const uint8_t *packet, 
 	 * 요구하는 ACL 규칙이 있으면 다음 패킷부터 이 값으로 판정한다. */
 	peer->posture = posture;
 
-	/* 검증을 통과한 뒤에야 외부 주소를 갱신한다. 순서가 반대면 위조 패킷이 세션의
-	 * 주소를 자기 쪽으로 돌려놓을 수 있다. */
 	peer_touch(peer, src, srclen);
 	send_keepalive(sock, peer);
 }
@@ -341,7 +413,7 @@ int main(int argc, char *argv[])
 	uint8_t packet[BUF_SIZE];
 	uint8_t *ip;
 	msg_header_t msg_header;
-	data_header_t data_header;
+	uint64_t counter;
 	int32_t off;
 	char *end;
 	int ret = 1;
@@ -350,7 +422,7 @@ int main(int argc, char *argv[])
 	/* 서버를 띄우지 않고 암호 도구만 확인한다. Windows 클라이언트의
 	 * `vpn_client selftest` 와 같은 벡터를 쓴다. */
 	if (argc == 2 && strcmp(argv[1], "selftest") == 0) {
-		return auth_selftest();
+		return crypt_selftest();
 	}
 
 	while ((opt = getopt(argc, argv, "s:")) != -1) {
@@ -555,25 +627,34 @@ int main(int argc, char *argv[])
 					continue;
 				}
 
+				/* 세션 번호는 와이어에 그대로 보인다. 그 번호를 댔다고 그 기기인 것은
+				 * 아니다. 세션 키로 열리는 패킷만 그 기기가 보낸 것이고, 열리지 않는
+				 * 패킷은 세션의 어떤 상태도 바꾸지 못한 채 여기서 버려진다. */
+				n = secure_open(&peer->secure, packet, (size_t)n, &counter);
+				if (n == SECURE_REPLAY) {
+					printf("[drop] counter already seen idx=%08x\n", peer->session_idx);
+					stats.replayed++;
+					continue;
+				}
+				if (n < 0) {
+					printf("[drop] tag does not match idx=%08x\n", peer->session_idx);
+					stats.bad_tag++;
+					continue;
+				}
+
+				ip = packet + PKT_HDR_LEN;
+
 				switch (msg_header.type) {
 					case MSG_TYPE_DATA:
 						break;
 					case MSG_TYPE_KEEPALIVE:
-						handle_keepalive(sock, peer, packet, n, &src, srclen);
+						handle_keepalive(sock, peer, ip, n, counter, &src, srclen);
 						continue;
 					default:
 						printf("[drop] unknown type %u\n", msg_header.type);
 						continue;
 				}
 
-				if (data_decode(packet + off, (size_t)(n - off), &data_header) < 0) {
-					continue;
-				}
-
-				off += sizeof(data_header_t);
-				n -= off;
-
-				ip = packet + off;
 				if (n < IP_MIN_HDR || IP_VERSION(ip) != 4){
 					continue;
 				}
@@ -617,7 +698,9 @@ int main(int argc, char *argv[])
 				}
 			}
 			else if (fd == tun_fd) {
-				n = read(tun_fd, packet + PKT_HDR_LEN, sizeof(packet) - PKT_HDR_LEN);
+				/* 앞에는 헤더가, 뒤에는 tag 가 붙을 자리를 남기고 읽는다. 암호화는
+				 * 읽은 자리에서 하므로 패킷을 옮기지 않는다. */
+				n = read(tun_fd, packet + PKT_HDR_LEN, sizeof(packet) - PKT_OVERHEAD);
 				if (n < 0) { perror("read tun"); goto out; }
 
 				ip = packet + PKT_HDR_LEN;
@@ -628,8 +711,6 @@ int main(int argc, char *argv[])
 				}
 
 				memcpy(&inner, ip + IP_DST_OFF, IP_ADDR_LEN);
-
-				memset(&msg_header, 0, sizeof(msg_header));
 
 				peer = peer_lookup(inner);
 				if (peer == NULL) {
@@ -642,17 +723,17 @@ int main(int argc, char *argv[])
 						ip_str(peer->outer.sin_addr, ob), ntohs(peer->outer.sin_port),
 						ip[IP_IHL(ip)]);
 
-				msg_header.version = PROTOCOL_VERSION;
-				msg_header.type = MSG_TYPE_DATA;
-				msg_header.session_idx = peer->session_idx;
-				data_header.counter = peer->tx_counter++;
 				peer->tx_packets++;
 				peer->tx_bytes += (uint64_t)n;
 
-				off = msg_encode(packet, sizeof(packet), &msg_header);
-				off += data_encode(packet + off, sizeof(packet) - off, &data_header);
+				n = secure_seal(&peer->secure, MSG_TYPE_DATA, peer->session_idx,
+						packet, sizeof(packet), (size_t)n);
+				if (n < 0) {
+					printf("[drop] seal failed for %s\n", ip_str(inner, ib));
+					continue;
+				}
 
-				sent = sendto(sock, packet, off + n, 0,
+				sent = sendto(sock, packet, n, 0,
 						(struct sockaddr *)&peer->outer, peer->outer_len);
 				if (sent < 0) {
 					perror("sendto");

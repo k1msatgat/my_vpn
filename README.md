@@ -39,6 +39,8 @@ Zero Trust Network Access(ZTNA)의 기반 구조를 학습하는 것을 목표�
 - **자체 와이어 프로토콜** — 버전/타입/세션 idx를 담은 고정 길이 헤더, 빅엔디언 직렬화
 - **핸드셰이크 & 세션 idx** — 서버가 클라이언트별로 추측하기 어려운 32bit 세션 식별자 발급
 - **기기 인증** — 등록된 기기만 세션을 받는다. 기기별 키로 서버의 nonce에 HMAC-SHA256 서명 (챌린지-응답)
+- **세션 암호화** — 핸드셰이크마다 일회용 ECDH(P-256)로 키를 합의하고, 세션의 모든 패킷을 AES-256-GCM으로 감싼다. 내용은 보이지 않고, 고치거나 다시 보낸 패킷은 열리지 않는다
+- **서로를 확인** — 세션 키에 기기 키가 들어간다. 그 키를 모르는 쪽은 서버인 척해도 클라이언트가 받아들일 수락을 만들지 못한다
 - **포스처 기반 접근 제어** — 클라이언트가 OS 빌드 / 방화벽 / 백신 상태를 보고하고, 서버가 기기별 정책에 대 본다
 - **지속 검증** — keepalive마다 포스처를 다시 보고·평가하고, 정책에 못 미치면 세션 중에도 차단
 - **정책 무중단 변경** — `kill -HUP`으로 기기 목록과 ACL을 다시 읽는다. 지워진 기기는 다음 keepalive에서 끊기고, 새 ACL은 다음 패킷부터 적용된다
@@ -59,29 +61,31 @@ Zero Trust Network Access(ZTNA)의 기반 구조를 학습하는 것을 목표�
 
 ### Wire format
 
-모든 UDP 페이로드는 `msg_header`로 시작하며, 데이터 메시지는 그 뒤에 `data_header`와 원본 IP 패킷이 붙습니다.
+모든 UDP 페이로드는 `msg_header`로 시작합니다. 세션이 열린 뒤의 패킷은 종류와 관계없이 같은 모양입니다.
 
 ```
  0        1        2                 4                                   8
  +--------+--------+-----------------+-----------------------------------+
- | version|  type  |    reserved     |         session_idx (BE)          |  msg_header  (8B)
- +--------+--------+-----------------+-----------------------------------+
- |                         counter (BE, 64bit)                           |  data_header (8B)
+ | version|  type  |    reserved     |         session_idx (BE)          |  msg_header  (8B)  ┐ 암호화하지 않지만
+ +--------+--------+-----------------+-----------------------------------+                    │ tag 가 함께 덮는다
+ |                         counter (BE, 64bit)                           |  data_header (8B)  ┘
  +-----------------------------------------------------------------------+
- |                        inner IPv4 packet ...                          |  payload
+ |                  암호문 (AES-256-GCM) ...                             |  DATA: inner IPv4 패킷
  +-----------------------------------------------------------------------+
- \__________________________ PKT_HDR_LEN = 16 __________________________/
+ |                         tag (16B)                                     |
+ +-----------------------------------------------------------------------+
+ \________________ PKT_OVERHEAD = 16 (헤더) + 16 (tag) _________________/
 ```
 
 | type | 값 | 페이로드 |
 |---|---|---|
 | `MSG_TYPE_REQ_HANDSHAKE` | 1 | `msg_header` + 터널 IP (4B) + 기기 ID (16B) |
-| `MSG_TYPE_RES_HANDSHAKE` | 2 | `msg_header` (발급된 `session_idx` 포함) |
-| `MSG_TYPE_DATA` | 3 | `msg_header` + `data_header` + IP 패킷 |
-| `MSG_TYPE_KEEPALIVE` | 4 | C→S: `msg_header` + counter (8B) + 포스처 (8B) + mac (32B) / S→C: `msg_header`만 |
+| `MSG_TYPE_RES_HANDSHAKE` | 2 | `msg_header` (발급된 `session_idx` 포함) + 서버의 일회용 공개키 (64B) + tag (16B) |
+| `MSG_TYPE_DATA` | 3 | 세션 패킷. 암호문 = IP 패킷 |
+| `MSG_TYPE_KEEPALIVE` | 4 | 세션 패킷. C→S: 암호문 = 포스처 (8B) / S→C: 암호문 없이 tag만 |
 | `MSG_TYPE_CHALLENGE` | 5 | `msg_header` + nonce (16B) |
-| `MSG_TYPE_AUTH` | 6 | `msg_header` + 터널 IP (4B) + 기기 ID (16B) + nonce (16B) + 포스처 (8B) + mac (32B) |
-| `MSG_TYPE_DENY` | 7 | `msg_header` + 사유 (1B) |
+| `MSG_TYPE_AUTH` | 6 | `msg_header` + 터널 IP (4B) + 기기 ID (16B) + nonce (16B) + 클라이언트의 일회용 공개키 (64B) + 포스처 (8B) + mac (32B) |
+| `MSG_TYPE_DENY` | 7 | 핸드셰이크 중 (`session_idx` = 0): `msg_header` + 사유 (1B) + mac (32B) / 세션 중: 세션 패킷, 암호문 = 사유 (1B) |
 
 포스처 보고는 8바이트 고정입니다: `os_build`(4B, BE) + `firewall`(1B) + `antivirus`(1B) + 예약(2B).
 상태 값은 0 = 모름, 1 = 꺼짐, 2 = 켜짐이며, 채우지 않은 필드가 통과로 읽히지 않도록 0을 "모름"으로 뒀습니다.
@@ -98,13 +102,13 @@ sequenceDiagram
     C->>S: REQ_HANDSHAKE (tun_ip, device_id)
     Note over S: 등록된 기기인가<br/>nonce 발급 (1회용, 5초)
     S->>C: CHALLENGE (nonce)
-    Note over C: 포스처 수집<br/>mac = HMAC(기기 키, tun_ip|id|nonce|posture)
-    C->>S: AUTH (tun_ip, device_id, nonce, posture, mac)
-    Note over S: nonce / mac → 터널 IP → 포스처 정책<br/>통과하면 peer_register()
-    S->>C: RES_HANDSHAKE (idx=0x5F3A9C02)
-    Note over C: session.idx 저장
-    C->>S: DATA (idx=0x5F3A9C02, counter=0, IP...)
-    S->>C: DATA (idx=0x5F3A9C02, counter=0, IP...)
+    Note over C: 포스처 수집, 일회용 키 쌍 생성<br/>mac = HMAC(기기 키, 헤더|tun_ip|id|nonce|pub_c|posture)
+    C->>S: AUTH (tun_ip, device_id, nonce, pub_c, posture, mac)
+    Note over S: nonce / mac → 터널 IP → 포스처 정책<br/>통과하면 peer_register(), 일회용 키 쌍 생성<br/>세션 키 = KDF(기기 키, ECDH(pub_c, pub_s), 주고받은 패킷)
+    S->>C: RES_HANDSHAKE (idx=0x5F3A9C02, pub_s, tag)
+    Note over C: 같은 세션 키를 뽑아 tag 확인<br/>맞지 않으면 받지 않는다
+    C->>S: DATA (idx=0x5F3A9C02, counter=0, 암호문, tag)
+    S->>C: DATA (idx=0x5F3A9C02, counter=0, 암호문, tag)
 ```
 
 어느 단계에서든 서버는 `RES_HANDSHAKE` 대신 `DENY`(사유)로 답할 수 있습니다.
@@ -121,9 +125,35 @@ sequenceDiagram
 - **포스처는 mac의 서명 범위 안**이라 전달 도중에 "방화벽 꺼짐"을 "켜짐"으로 고칠 수 없습니다.
 - **검사 순서**는 기기 → nonce / mac → 터널 IP → 포스처입니다. 키를 가졌다는 것을 확인하기 전에는 구체적인 거절 이유를 알려 주지 않습니다.
 - 클라이언트는 `AUTH`를 보내기 전에 온 `RES_HANDSHAKE`를 받지 않습니다. 받아 주면 서버인 척하는 쪽이 `REQ`에 곧바로 `RES`를 돌려주는 것만으로 인증 단계가 건너뛰어집니다.
-- 클라이언트는 1초 타임아웃으로 최대 5회 `REQ`부터 다시 하며, 서버 주소에서 온 응답만 받습니다. `DENY`를 받으면 재시도하지 않습니다.
-- 새로 인증하면 새 세션입니다. 서버는 그 터널 IP의 기존 세션을 내리고 새 idx를 발급합니다.
-- HMAC-SHA256은 직접 구현하지 않았습니다. 서버는 OpenSSL, Windows 클라이언트는 CNG를 쓰고, 양쪽 모두 `selftest`로 RFC 4231 벡터를 확인합니다.
+- 클라이언트는 1초 타임아웃으로 최대 5회 `REQ`부터 다시 하며, 서버 주소에서 온 응답만 받습니다.
+- 새로 인증하면 새 세션입니다. 서버는 그 터널 IP의 기존 세션을 내리고 새 idx와 새 키를 발급합니다.
+
+### Session encryption
+
+인증만 있던 때에는 "누가 세션을 여는가"는 지켰지만, 열린 뒤의 패킷은 그대로 보였고 세션 번호(4B)만 알면 누구든 끼워 넣을 수 있었습니다. 이제 세션마다 키를 따로 뽑아 모든 패킷을 감쌉니다 ([`secure.h`](lib/common/include/secure.h)).
+
+```
+secret = ECDH(이번 핸드셰이크의 일회용 P-256 키 쌍)
+prk    = HKDF-Extract(salt = 기기 키, ikm = secret)
+keys   = HKDF-Expand(prk, "my_vpn v3 session" | SHA-256(AUTH 패킷 | RES 의 헤더와 pub_s), 96B)
+       = C→S 키 | S→C 키 | RES_HANDSHAKE 키
+```
+
+| 세션 키에 들어가는 것 | 그래서 |
+|---|---|
+| 기기 키 | 그 키를 모르는 쪽은 사이에 끼어 자기 일회용 키를 내밀어도 같은 세션 키에 닿지 못합니다. 서버에 인증서를 따로 두지 않아도 `RES_HANDSHAKE`의 tag가 맞았다는 것이 곧 "상대가 이 기기의 키를 아는 서버"라는 증명입니다 |
+| 일회용 ECDH | 기기 키가 나중에 새도 그동안 녹화해 둔 트래픽은 풀리지 않습니다. 서버의 기기 목록에는 모든 기기의 키가 있어서, 이것이 없으면 서버가 한 번 뚫리는 날 지난 세션이 전부 풀립니다 |
+| 주고받은 패킷의 해시 | 도중에 한 바이트라도 바뀌었으면 양쪽의 키가 달라져 첫 패킷부터 열리지 않습니다 |
+| 방향마다 다른 키 | 양쪽이 `counter`를 0부터 세도 같은 (키, nonce)가 생기지 않고, 보낸 패킷을 보낸 쪽으로 되돌려 보내도 열리지 않습니다 |
+
+- **`counter`가 그대로 nonce입니다.** 패킷마다 늘어나고 세션이 바뀌면 키가 바뀌므로 같은 (키, nonce)를 두 번 쓰지 않습니다.
+- **다시 보낸 패킷은 받지 않습니다.** 받은 `counter`를 64개 폭의 창으로 기억합니다. UDP는 순서를 바꿔 전달할 수 있어서 "가장 큰 값보다 작으면 버린다"로는 안 되고, 창 안에서 처음 보는 값인지를 따집니다.
+- **포스처 보고는 순서대로만 받습니다.** 데이터는 늦게 와도 받지만 보고는 "지금의 상태"라서, 방화벽이 켜져 있던 때의 보고를 길목에서 붙잡아 두었다가 끈 뒤에 풀어 놓는 것을 막아야 합니다.
+- **열리지 않은 패킷은 세션의 어떤 상태도 바꾸지 못합니다.** 창에 표시하는 것, 외부 주소를 갱신하는 것, "서버가 살아 있다"고 적는 것 모두 tag를 확인한 뒤에 합니다.
+- **세션 중의 `DENY`도 세션 키로 감쌉니다.** 세션 번호를 엿본 제3자가 가짜 거절로 남의 접속을 끊을 수 없습니다.
+- **핸드셰이크 중의 `DENY`에는 기기 키로 만든 mac이 붙습니다.** 다만 서명이 맞는 `AUTH`를 받은 뒤의 거절(터널 IP, 포스처)에만 붙일 수 있습니다. 그 전의 거절(모르는 기기, 인증 실패)은 서버가 상대의 키를 확인하지 못한 상태라 mac이 없고, 클라이언트는 이런 거절을 곧바로 믿지 않고 진짜 서버의 답을 끝까지 기다린 뒤 다른 답이 없을 때에만 받아들입니다.
+- **알고리즘은 직접 구현하지 않았습니다.** 서버는 OpenSSL, Windows 클라이언트는 OS에 내장된 CNG를 쓰고, 그 위의 프로토콜 코드(`secure.c`)는 양쪽이 같은 파일을 빌드합니다. 양쪽 `selftest`가 같은 표준 벡터(FIPS 180-4, RFC 4231, RFC 5869, GCM 명세, RFC 5903)를 통과하는 것이 서로의 패킷을 열 수 있다는 근거입니다.
+- **P-256과 AES-GCM을 고른 기준은 "양쪽 OS가 기본으로 주는가"입니다.** 처음 계획은 X25519 + ChaCha20-Poly1305였지만, CNG에서 ChaCha20-Poly1305는 최근 Windows에만 있고 P-256과 AES-GCM은 버전을 가리지 않고 있습니다. 클라이언트에 암호 라이브러리를 따로 실어 보내는 것보다 OS가 보안 패치와 함께 갱신해 주는 구현을 쓰는 쪽을 골랐습니다.
 
 > **Linux 클라이언트(`client/`)는 인증 이전의 프로토콜에 머물러 있습니다.** 예전 형식의 `REQ_HANDSHAKE`를 보내므로 지금 서버에는 붙지 못하며, 더 발전시킬 계획이 없습니다. 이 프로젝트의 클라이언트는 Windows 쪽이고, 인증 핸드셰이크는 Windows 클라이언트와 `test/auth_check.py`로 확인됩니다.
 
@@ -226,9 +256,12 @@ write(tun, buf + 16, n - 16)                       └─ 커널로 전달
 my_vpn/
 ├── lib/common/            # 클라이언트/서버 공용
 │   ├── include/proto.h    #   와이어 헤더 정의, IP 오프셋 매크로 (Linux / Windows 공용)
+│   ├── include/crypt.h    #   암호 도구의 창구 — 서버는 OpenSSL, Windows 는 CNG 가 채운다
+│   ├── include/secure.h   #   세션 키 유도, 패킷 감싸기 / 풀기, 재전송 창
 │   ├── include/common.h   #   Linux 전용 선언 (proto.h 포함)
 │   └── src/
 │       ├── proto.c        #   encode/decode (Linux / Windows 공용)
+│       ├── secure.c       #   secure.h 의 구현과 selftest 벡터 (서버 / Windows 공용)
 │       └── common.c       #   tun_alloc, hex_dump
 ├── client/
 │   └── src/client.c       # 핸드셰이크, keepalive, 재핸드셰이크 + epoll 터널 루프
@@ -238,7 +271,7 @@ my_vpn/
 │       ├── server.c       # epoll 루프, 인증 핸드셰이크 / keepalive 검증, 패킷 검증
 │       ├── peer.c         # 피어 테이블, 세션 idx 발급/조회, 세션 만료
 │       ├── device.c       # 등록된 기기 목록, 기기별 포스처 정책
-│       ├── auth.c         # HMAC-SHA256 (OpenSSL), 상수 시간 비교, 난수
+│       ├── crypt.c        # crypt.h 의 OpenSSL 구현 — SHA-256 / HMAC, ECDH P-256, AES-256-GCM, 난수
 │       ├── policy.c       # 포스처 조건의 문법과 판정 (기기 목록과 ACL이 함께 쓴다)
 │       ├── status.c       # 상태 소켓 — 세션과 카운터를 JSON으로
 │       └── alc.c          # ACL 파싱 및 매칭, 규칙별 포스처 조건
@@ -249,7 +282,7 @@ my_vpn/
 │   │   ├── tunnel.{h,c}       # Wintun + Winsock 터널 루프 (블로킹 tunnel_run)
 │   │   ├── posture.{h,c}      # 단말 포스처 수집 (OS 빌드 / 방화벽 / 백신)
 │   │   ├── device.{h,c}       # 기기 ID · 키 생성, DPAPI 보관
-│   │   ├── hmac.{h,c}         # HMAC-SHA256 (CNG)
+│   │   ├── crypt.c            # crypt.h 의 CNG 구현 — 서버의 crypt.c 와 같은 선언을 채운다
 │   │   └── vpn_session.{h,c}  # 워커 스레드 + 패킷 링버퍼 + PostMessage 마셜링
 │   ├── cli/               #   콘솔 클라이언트 (main.c) — 자동 테스트 대상
 │   ├── gui/               #   MFC 다이얼로그
@@ -260,13 +293,12 @@ my_vpn/
 │   │   ├── PacketStore.{h,cpp}  # 패킷 보관 / 필터 / 집계
 │   │   └── vpn_gui.rc
 │   └── test/
-│       ├── client.ps1         # Windows 시나리오 테스트 (run / idle / restart)
-│       └── mock_server.py     # 인증 핸드셰이크 모의 서버 (서버 구현 전 확인용)
+│       └── client.ps1         # Windows 시나리오 테스트 (run / idle / restart)
 ├── test/
 │   ├── common.sh          # 공용 설정 및 함수
 │   ├── server.sh          # 서버 실행 / 재시작 시나리오
 │   ├── client.sh          # 클라이언트 실행 / idle·stop·restart 시나리오
-│   ├── auth_check.py      # 서버의 기기 인증 / 포스처 / 지속 검증을 패킷 수준에서 확인
+│   ├── auth_check.py      # 서버의 기기 인증 / 세션 암호화 / 포스처 / 지속 검증을 패킷 수준에서 확인
 │   └── devices.conf.example  # 기기 목록 형식 (실제 devices.conf 는 커밋하지 않는다)
 ├── mcp/                   # Linux 서버를 제어하는 MCP 서버 (Node.js)
 │   ├── server.js          #   MCP(stdio) — 도구 선언, 권한 없음
@@ -298,15 +330,18 @@ my_vpn/
 | 핸드셰이크 위장 (세션 탈취) | 방어 | 등록된 기기의 키로 서버의 nonce에 서명해야 세션을 받음 |
 | 엿들은 `AUTH` 재전송 | 방어 | nonce는 1회용이고 5초 뒤 만료 |
 | 전달 중 포스처 변조 | 방어 | 포스처가 mac의 서명 범위 안 |
-| 예전 포스처 보고 재전송 | 방어 | keepalive의 `counter`가 직전 값보다 커야 하고, mac이 `session_idx`에 묶임 |
-| 위조 keepalive로 남의 세션 끊기 / 주소 돌리기 | 방어 | mac 검증을 통과한 뒤에만 세션을 내리거나 외부 주소를 갱신 |
+| 예전 포스처 보고 재전송 | 방어 | 다시 보낸 패킷은 재전송 창이 거르고, 붙잡아 두었다 늦게 푼 보고는 직전 보고보다 `counter`가 작아 받지 않음 |
+| 위조 패킷으로 남의 세션 끊기 / 주소 돌리기 | 방어 | 세션 키로 열린 패킷만 세션을 내리거나 외부 주소를 갱신. 세션 중의 `DENY`도 세션 키로 감쌈 |
 | 정책에 못 미치는 단말의 접근 | 방어 | 핸드셰이크와 매 keepalive에서 기기별 포스처 정책 평가 |
 | 분실 / 폐기된 기기의 접근 | 방어 | 목록에서 지우고 `kill -HUP` — 다음 keepalive에서 차단 |
 | 들어온 뒤 포스처가 나빠진 단말의 민감 리소스 접근 | 방어 | ACL 규칙별 포스처 조건 — 마지막으로 보고한 포스처로 패킷마다 판정 |
 | 핸드셰이크 방해 | 방어 | 살아 있는 nonce는 다시 온 `REQ`에 덮어쓰지 않고, 서명이 틀린 `AUTH`는 nonce를 버리지 않음. 경로 위에서 패킷을 지우는 공격자는 여전히 막을 수 있음 |
-| 도청 / idx 탈취 | **미방어** | 데이터 패킷은 평문이고 인증되지 않음 — idx를 아는 공격자는 패킷 주입과 외부 주소 변경이 가능. 암호화 단계에서 해결 |
-| 데이터 패킷 재전송 | **미방어** | 데이터의 `counter`는 송신만 하고 수신 측 검증 없음 |
-| 서버 위장 | **미방어** | 서버는 클라이언트에게 자신을 증명하지 않음. 서버 주소를 위조할 수 있으면 가짜 `RES` / `DENY`를 보낼 수 있음 |
+| 도청 | 방어 | 세션의 모든 패킷을 AES-256-GCM으로 암호화. 키는 핸드셰이크마다 일회용 ECDH로 합의해 기기 키가 나중에 새도 지난 세션은 풀리지 않음 |
+| idx를 아는 제3자의 패킷 주입 / 변조 | 방어 | 세션 키로 만든 tag가 맞아야 받음. 헤더(종류, 세션 번호, `counter`)도 tag의 범위 안 |
+| 데이터 패킷 재전송 | 방어 | 받은 `counter`를 64개 폭의 창으로 기억. 순서가 바뀌어 늦게 온 패킷은 받고, 이미 받은 값과 창보다 오래된 값은 버림 |
+| 서버 위장 | 방어 | 세션 키에 기기 키가 들어가므로 그 키를 모르는 쪽은 클라이언트가 받아들일 `RES_HANDSHAKE`를 만들지 못함. 세션 중의 keepalive 응답과 `DENY`도 세션 키로 감쌈 |
+| 가짜 거절로 접속 방해 | 부분 방어 | 인증 뒤의 거절은 mac / 세션 키로 확인. 인증 전의 거절(모르는 기기, 인증 실패)은 확인할 수 없어, 클라이언트가 곧바로 믿지 않고 진짜 답을 끝까지 기다림. 경로 위에서 진짜 답을 지울 수 있는 공격자는 여전히 막을 수 있음 |
+| 메타데이터 노출 | **미방어** | 누가(기기 ID) 언제 얼마나 주고받는지, 핸드셰이크의 포스처는 암호화되지 않음 |
 | 포스처 거짓 보고 | **미방어** | 포스처는 클라이언트의 자기 보고. 키를 가진 변조된 클라이언트는 거짓으로 보고할 수 있음 (막으려면 TPM 기반 원격 증명 필요) |
 
 > 학습 목적의 프로젝트이며, 프로덕션 환경에서 사용하기 위한 보안 수준이 아닙니다.
@@ -321,6 +356,8 @@ my_vpn/
 - **서버의 카운터는 쌓아 두지 않습니다.** 상태 소켓의 숫자는 서버가 뜬 뒤부터 센 값이고 재시작하면 0으로 돌아갑니다.
 - **Linux 클라이언트는 인증 이전의 프로토콜에 머물러 있고, 더 발전시키지 않습니다.** 지금 서버에 붙지 못하며 `test/client.sh`의 시나리오도 통과하지 못합니다. 초기 단계(터널, 핸드셰이크, keepalive, 재핸드셰이크)를 구현하고 검증한 기록으로 남겨 둡니다. 포스처 수집은 Windows 전용입니다.
 - **기기 키는 서버에 평문으로 있습니다.** 기기 목록 파일의 권한(600)에 기대며, 서버가 뚫리면 모든 기기의 키가 드러납니다. 공개키 방식이면 서버에는 공개키만 두면 됩니다.
+- **암호 프로토콜은 검토를 받은 적이 없습니다.** 알고리즘은 OpenSSL과 CNG의 것이고 조립하는 방식(사전 공유 키 + 일회용 ECDH + HKDF + AEAD)도 널리 쓰이는 구조이지만, 이 조립 자체를 다른 사람이 분석한 적은 없습니다. 테스트가 보여 주는 것은 "의도한 대로 동작한다"까지입니다.
+- **세션 키를 도중에 바꾸지 않습니다.** 키는 다시 핸드셰이크할 때에만 바뀝니다. 오래 열린 세션에 주기적으로 새 키를 합의하는 절차는 없습니다.
 - **IPv4만 터널링합니다.** IPv6 패킷은 건너뜁니다.
 - **멀티캐스트 / 브로드캐스트는 터널을 통과하지 못합니다.** 서버가 inner dst로 피어를 1:1로 찾는 구조라
   전달할 상대가 없습니다. Windows 클라이언트는 이를 송신 경로에서 명시적으로 버립니다.
@@ -337,7 +374,7 @@ my_vpn/
 - [x] Keepalive 및 세션 만료
 - [x] 클라이언트 재핸드셰이크 (서버 재시작 / 세션 만료 복구)
 - [x] 시나리오 테스트 스크립트
-- [ ] 암호화 & 키 교환 — X25519 + ChaCha20-Poly1305, `counter`를 nonce 및 재전송 방지에 사용
+- [x] 암호화 & 키 교환 — 일회용 ECDH(P-256) + 기기 키로 세션 키 유도, AES-256-GCM, `counter`를 nonce 및 재전송 방지에 사용 (`test/auth_check.py` 119개 통과)
 - [x] 신원 기반 인증 — 기기 키 챌린지-응답, 포스처 기반 정책 (ZTNA)
   - [x] 와이어 포맷 정의 (`CHALLENGE` / `AUTH` / `DENY`, 포스처 보고)
   - [x] Windows 클라이언트 — 포스처 수집, 기기 등록, 인증 핸드셰이크
@@ -378,6 +415,7 @@ my_vpn/
 | AI 작성 | ZTNA 확장의 서버 쪽 — `server/src/auth.c`, `server/src/device.c`, `server.c`의 `handle_request` / `handle_auth` / `handle_keepalive` / `send_deny`와 SIGHUP 처리, `peer.c`의 `peer_drop`, `test/auth_check.py`. 목표 직무가 Windows 클라이언트라 서버 쪽 확장은 AI에게 맡겼고, 기존 서버 로직(피어 테이블, 데이터 경로, ACL)은 그대로 직접 구현한 것 |
 | AI 작성 | `proto.h` / `proto.c`의 인증·포스처 메시지 정의와 `posture_encode` / `posture_decode`. 메시지 흐름은 AI가 제안하고 검토 후 채택 |
 | AI 작성 | 서버의 ZTNA 확장 (2차) — `server/src/policy.c`, `server/src/status.c`, `alc.c`의 다시 읽기(임시 표)와 규칙별 포스처 조건 / 줄 형식 검사, `server.c`의 nonce 재사용과 상태 소켓 연결 / 카운터, `peer.c`의 단조 시계와 세션별 카운터. ACL의 매칭 로직과 피어 테이블의 구조는 직접 구현한 것 그대로 |
+| AI 작성 | 세션 암호화 — `lib/common`의 `crypt.h` / `secure.{h,c}`, `server/src/crypt.c`(OpenSSL), `windows/core/crypt.c`(CNG), `server.c`와 `tunnel.c`의 핸드셰이크 / 데이터 / keepalive 경로를 세션 키로 감싸도록 고친 것, `test/auth_check.py`의 암호화 검사. 키를 어떻게 뽑고 무엇을 tag로 덮을지는 AI가 제안했고, 기존의 `auth.c` / `hmac.c` / `mock_server.py`는 이 과정에서 대체돼 지웠음 |
 | AI 작성 | `mcp/` MCP 서버 전체 — `server.js`(도구 선언), `ctl.cjs`(root 헬퍼), systemd 유닛, 설치 스크립트, `docs/mcp.md` |
 | AI 작성 | GUI 재설계 — `gui/ui_theme.cpp`, `gui/ui_controls.cpp`, `MainDlg`의 배치와 그리기, `EnrollDlg`의 그리기, `vpn_gui.rc`, 앱 아이콘(`windows/tools/mkicon.py`). Linux 장비에서 작성했고 MSVC 빌드는 CI로 확인, 실행은 아직 확인하지 못함 |
 | AI 작성 | `.github/workflows/ci.yml`, CI가 찾은 `posture.c`의 `wscapi.dll` 동적 로드 |

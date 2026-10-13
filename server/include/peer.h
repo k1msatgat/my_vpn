@@ -6,6 +6,7 @@
 #include <netinet/in.h>
 
 #include "proto.h"
+#include "secure.h"
 
 #define MAX_PEERS 8
 #define IDX_SLOT_BIT 8
@@ -16,7 +17,7 @@ _Static_assert(MAX_PEERS <= (1 << IDX_SLOT_BIT), "MAX_PEERS exceeds slot bits");
 typedef struct peer {
     int32_t used;
     uint32_t session_idx;
-    uint64_t tx_counter;
+    secure_session_t secure;	/* 세션 키, 보낼 counter, 받은 counter 의 창 */
     struct in_addr inner;
     struct sockaddr_in outer;
     socklen_t outer_len;

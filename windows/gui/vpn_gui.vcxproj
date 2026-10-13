@@ -123,9 +123,10 @@
     <ClCompile Include="..\core\vpn_session.c" />
     <ClCompile Include="..\core\tunnel.c" />
     <ClCompile Include="..\core\posture.c" />
-    <ClCompile Include="..\core\hmac.c" />
+    <ClCompile Include="..\core\crypt.c" />
     <ClCompile Include="..\core\device.c" />
     <ClCompile Include="..\..\lib\common\src\proto.c" />
+    <ClCompile Include="..\..\lib\common\src\secure.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="framework.h" />
@@ -139,7 +140,8 @@
     <ClInclude Include="..\core\vpn_session.h" />
     <ClInclude Include="..\core\tunnel.h" />
     <ClInclude Include="..\core\posture.h" />
-    <ClInclude Include="..\core\hmac.h" />
+    <ClInclude Include="..\..\lib\common\include\crypt.h" />
+    <ClInclude Include="..\..\lib\common\include\secure.h" />
     <ClInclude Include="..\core\device.h" />
     <ClInclude Include="..\..\lib\common\include\proto.h" />
   </ItemGroup>

@@ -19,7 +19,9 @@
 typedef struct server_stats {
 	uint64_t handshake_ok;
 	uint64_t deny[DENY_POSTURE + 1];	/* DENY 사유별. 핸드셰이크와 세션 중 거절을 합친 값 */
-	uint64_t keepalive_dropped;		/* mac 불일치, 예전 counter, 짧은 keepalive */
+	uint64_t keepalive_dropped;		/* 순서가 뒤바뀐 포스처 보고, 짧은 keepalive */
+	uint64_t bad_tag;			/* 세션 키로 열리지 않은 패킷 (위조 / 손상 / 다른 세션의 것) */
+	uint64_t replayed;			/* 이미 받은 counter 로 다시 온 패킷 */
 	uint64_t unknown_session;
 	uint64_t spoofed_src;
 	uint64_t acl_denied;

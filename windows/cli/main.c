@@ -7,7 +7,7 @@
 
 #include "tunnel.h"
 #include "posture.h"
-#include "hmac.h"
+#include "crypt.h"
 #include "device.h"
 
 #define TUN_PREFIX_LEN 24
@@ -56,45 +56,12 @@ static int print_posture(void)
 	return 0;
 }
 
-/* RFC 4231 의 HMAC-SHA256 테스트 벡터. 서버는 OpenSSL, 여기는 CNG 로 서로 다른
- * 구현을 쓰므로, 양쪽이 같은 표준 벡터를 통과하는지가 "mac 이 서로 맞는다"의 근거다. */
+/* 서버는 OpenSSL, 여기는 CNG 로 서로 다른 구현을 쓴다. 양쪽이 같은 표준 벡터를 통과하는
+ * 것이 "서로의 패킷을 열 수 있다"의 근거다. 벡터와 검사는 secure.c 에 하나만 있고
+ * 서버의 `vpn_server selftest` 도 같은 것을 돌린다. */
 static int selftest(void)
 {
-	static const struct {
-		const char *name;
-		uint8_t key[20];
-		size_t key_len;
-		const char *msg;
-		uint8_t want[HMAC_SHA256_LEN];
-	} cases[] = {
-		{ "rfc4231 case 1",
-		  { 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b,
-		    0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b }, 20,
-		  "Hi There",
-		  { 0xb0, 0x34, 0x4c, 0x61, 0xd8, 0xdb, 0x38, 0x53, 0x5c, 0xa8, 0xaf, 0xce,
-		    0xaf, 0x0b, 0xf1, 0x2b, 0x88, 0x1d, 0xc2, 0x00, 0xc9, 0x83, 0x3d, 0xa7,
-		    0x26, 0xe9, 0x37, 0x6c, 0x2e, 0x32, 0xcf, 0xf7 } },
-		{ "rfc4231 case 2",
-		  { 'J', 'e', 'f', 'e' }, 4,
-		  "what do ya want for nothing?",
-		  { 0x5b, 0xdc, 0xc1, 0x46, 0xbf, 0x60, 0x75, 0x4e, 0x6a, 0x04, 0x24, 0x26,
-		    0x08, 0x95, 0x75, 0xc7, 0x5a, 0x00, 0x3f, 0x08, 0x9d, 0x27, 0x39, 0x83,
-		    0x9d, 0xec, 0x58, 0xb9, 0x64, 0xec, 0x38, 0x43 } },
-	};
-	uint8_t got[HMAC_SHA256_LEN];
-	int failed = 0;
-	size_t i;
-
-	for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-		int ok = hmac_sha256(cases[i].key, cases[i].key_len,
-				(const uint8_t *)cases[i].msg, strlen(cases[i].msg), got) == 0 &&
-			memcmp(got, cases[i].want, sizeof(got)) == 0;
-
-		printf("hmac-sha256 %-16s %s\n", cases[i].name, ok ? "ok" : "FAIL");
-		failed |= !ok;
-	}
-
-	return failed;
+	return crypt_selftest();
 }
 
 static void print_hex(const char *label, const uint8_t *buf, size_t len)

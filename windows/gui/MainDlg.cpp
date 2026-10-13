@@ -1053,6 +1053,8 @@ CString CMainDlg::VerdictName(int verdict)
 	case TUNNEL_DROP_UNKNOWN_TYPE:	return _T("알 수 없는 타입");
 	case TUNNEL_DROP_IO_ERROR:	return _T("전달 실패");
 	case TUNNEL_DROP_DENIED:	return _T("접근 거부");
+	case TUNNEL_DROP_BAD_TAG:	return _T("위조 / 손상");
+	case TUNNEL_DROP_REPLAY:	return _T("재전송");
 	default:			return _T("?");
 	}
 }
@@ -1321,6 +1323,8 @@ void CMainDlg::UpdateStats()
 		LPCTSTR name;
 	} reasons[] = {
 		{ TUNNEL_DROP_DENIED,		_T("접근 거부") },
+		{ TUNNEL_DROP_BAD_TAG,		_T("위조 / 손상") },
+		{ TUNNEL_DROP_REPLAY,		_T("재전송") },
 		{ TUNNEL_DROP_NON_UNICAST,	_T("비유니캐스트") },
 		{ TUNNEL_DROP_WRONG_SESSION,	_T("세션 불일치") },
 		{ TUNNEL_DROP_NOT_SERVER,	_T("서버 아닌 출발지") },

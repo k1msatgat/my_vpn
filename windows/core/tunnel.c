@@ -11,7 +11,7 @@
 #include "wintun.h"
 #include "proto.h"
 #include "posture.h"
-#include "hmac.h"
+#include "secure.h"
 #include "tunnel.h"
 
 #define HS_TIMEOUT_MSEC 1000
@@ -41,7 +41,7 @@ static const GUID ADAPTER_GUID =
 
 typedef struct session {
 	uint32_t idx;
-	uint64_t tx_counter;
+	secure_session_t secure;	/* 세션 키, 보낼 counter, 받은 counter 의 창 */
 	struct in_addr tun_ip;
 	struct sockaddr_in server;
 	uint64_t last_rx_ms;
@@ -320,6 +320,8 @@ const char *tunnel_verdict_name(int verdict)
 	case TUNNEL_DROP_UNKNOWN_TYPE:	return "unknown type";
 	case TUNNEL_DROP_IO_ERROR:	return "io error";
 	case TUNNEL_DROP_DENIED:	return "access denied";
+	case TUNNEL_DROP_BAD_TAG:	return "tag does not match";
+	case TUNNEL_DROP_REPLAY:	return "counter already seen";
 	default:			return "?";
 	}
 }
@@ -380,6 +382,18 @@ static void pkt_snap(tunnel_packet_t *p, const uint8_t *wire, uint32_t len)
 
 	memcpy(p->snap, wire, n);
 	p->snap_len = (uint8_t)n;
+}
+
+/* 보낸 패킷은 감싸기 전의 모습으로 떠 둔다: 우리 헤더와 counter(sealed 의 앞 16B,
+ * 암호화되지 않는 부분) 뒤에 원래의 inner 패킷. */
+static void pkt_snap_plain(tunnel_packet_t *p, const uint8_t *sealed, const uint8_t *inner, uint32_t len)
+{
+	uint32_t room = TUNNEL_SNAP_LEN - (uint32_t)PKT_HDR_LEN;
+	uint32_t n = len < room ? len : room;
+
+	memcpy(p->snap, sealed, PKT_HDR_LEN);
+	memcpy(p->snap + PKT_HDR_LEN, inner, n);
+	p->snap_len = (uint8_t)(PKT_HDR_LEN + n);
 }
 
 static void pkt_emit(tunnel_t *t, tunnel_packet_t *p)
@@ -513,84 +527,160 @@ static void send_hs_request(tunnel_t *t)
 	hs_emit(t, TUNNEL_DIR_TX, &h, req, off, NULL, 0);
 }
 
-/* AUTH: tun_ip(4) | device_id(16) | nonce(16) | posture(8) | mac(32)
+/* 진행 중인 핸드셰이크 한 번의 상태. 세션 키에는 내가 보낸 AUTH 의 바이트와 그때 쓴
+ * 일회용 키가 들어가므로 수락이 올 때까지 들고 있는다. */
+typedef struct handshake {
+	crypt_ecdh_t *ecdh;
+	uint8_t auth[AUTH_PACKET_LEN];
+	int auth_sent;
+} handshake_t;
+
+static void hs_reset(handshake_t *hs)
+{
+	crypt_ecdh_free(hs->ecdh);
+	memset(hs, 0, sizeof(*hs));
+}
+
+/* AUTH: tun_ip(4) | device_id(16) | nonce(16) | pub_c(64) | posture(8) | mac(32)
  *
- * mac 은 그 앞의 44바이트 전체를 덮는다. 서버가 방금 준 nonce 가 들어가므로 이
+ * mac 은 헤더부터 그 앞까지 전체를 덮는다. 서버가 방금 준 nonce 가 들어가므로 이
  * 패킷은 이번 핸드셰이크에만 유효하고, 포스처도 서명 범위 안이라 전달 도중에
  * "방화벽 꺼짐"을 "켜짐"으로 고칠 수 없다. 포스처는 핸드셰이크를 시작할 때가
- * 아니라 AUTH 를 만드는 지금 읽는다. */
-static int send_hs_auth(tunnel_t *t, const uint8_t *nonce)
+ * 아니라 AUTH 를 만드는 지금 읽는다.
+ *
+ * pub_c 도 서명 범위 안이다. 사이에 낀 쪽이 이것을 자기 공개키로 바꾸면 mac 이
+ * 틀려 서버가 받지 않는다. */
+static int send_hs_auth(tunnel_t *t, handshake_t *hs, const uint8_t *nonce)
 {
-	uint8_t auth[sizeof(msg_header_t) + AUTH_PAYLOAD_LEN];
 	posture_report_t *report = &t->session.posture;
+	uint8_t *auth = hs->auth;
+	uint8_t *body = auth + sizeof(msg_header_t);
 	msg_header_t h;
-	uint8_t *signed_part;
-	int off;
 
 	memset(&h, 0, sizeof(h));
 	h.version = PROTOCOL_VERSION;
 	h.type = MSG_TYPE_AUTH;
+	msg_encode(auth, sizeof(hs->auth), &h);
 
-	off = msg_encode(auth, sizeof(auth), &h);
-	signed_part = auth + off;
+	memcpy(body + AUTH_OFF_TUN_IP, &t->session.tun_ip, IP_ADDR_LEN);
+	memcpy(body + AUTH_OFF_DEVICE_ID, t->cfg->device_id, DEVICE_ID_LEN);
+	memcpy(body + AUTH_OFF_NONCE, nonce, AUTH_NONCE_LEN);
 
-	memcpy(auth + off, &t->session.tun_ip, IP_ADDR_LEN);
-	off += IP_ADDR_LEN;
-	memcpy(auth + off, t->cfg->device_id, DEVICE_ID_LEN);
-	off += DEVICE_ID_LEN;
-	memcpy(auth + off, nonce, AUTH_NONCE_LEN);
-	off += AUTH_NONCE_LEN;
+	/* 핸드셰이크마다 새 키 쌍이다. 다시 쓰면 "지난 세션은 풀리지 않는다"가 깨진다. */
+	hs->ecdh = crypt_ecdh_new(body + AUTH_OFF_PUB);
+	if (hs->ecdh == NULL) {
+		tlog(t, "[HS] key generation failed");
+		return -1;
+	}
 
 	/* 세션에 남겨 둔다. 이후 keepalive 가 "보고한 값에서 달라졌는가"를 이것과 비교한다. */
 	posture_report_now(report);
 	t->session.last_posture_ms = GetTickCount64();
-	off += posture_encode(auth + off, sizeof(auth) - (size_t)off, report);
+	posture_encode(body + AUTH_OFF_POSTURE, sizeof(*report), report);
 
-	if (hmac_sha256(t->cfg->device_key, AUTH_KEY_LEN,
-			signed_part, AUTH_SIGNED_LEN, auth + off) < 0) {
+	if (crypt_hmac(t->cfg->device_key, AUTH_KEY_LEN, auth, AUTH_SIGNED_LEN,
+				body + AUTH_OFF_MAC) < 0) {
 		tlog(t, "[HS] hmac failed");
 		return -1;
 	}
-	off += AUTH_MAC_LEN;
 
 	tlog(t, "[HS] auth: build=%u firewall=%u antivirus=%u",
 			report->os_build, report->firewall, report->antivirus);
 
-	udp_send(t, auth, off);
-	hs_emit(t, TUNNEL_DIR_TX, &h, auth, off, report, 0);
+	udp_send(t, auth, (int)AUTH_PACKET_LEN);
+	hs_emit(t, TUNNEL_DIR_TX, &h, auth, (int)AUTH_PACKET_LEN, report, 0);
+	hs->auth_sent = 1;
 
 	return 0;
+}
+
+/* RES_HANDSHAKE: pub_s(64) | tag(16)
+ *
+ * 서버의 일회용 공개키와 내 것으로 합의하고, 거기에 기기 키를 섞어 세션 키를 뽑는다.
+ * tag 가 맞으면 상대도 같은 키에 닿았다는 뜻이고, 그러려면 이 기기의 키를 알아야 한다.
+ * 맞지 않으면 서버가 보낸 것이 아니므로 버린다. 0 을 돌려주면 세션이 열린 것이다. */
+static int accept_hs_response(tunnel_t *t, handshake_t *hs, uint8_t *res, int len, uint32_t session_idx)
+{
+	uint8_t secret[VPN_SECRET_LEN];
+	secure_keys_t keys;
+	int ret = -1;
+
+	if (crypt_ecdh_derive(hs->ecdh, res + sizeof(msg_header_t), secret) < 0 ||
+			secure_derive(t->cfg->device_key, secret, hs->auth, res, &keys) < 0) {
+		goto out;
+	}
+
+	if (secure_res_open(keys.res, res, (size_t)len) < 0) {
+		goto out;
+	}
+
+	if (secure_session_open(&t->session.secure, keys.c2s, keys.s2c) < 0) {
+		goto out;
+	}
+	t->session.idx = session_idx;
+	ret = 0;
+
+out:
+	crypt_wipe(secret, sizeof(secret));
+	crypt_wipe(&keys, sizeof(keys));
+
+	return ret;
+}
+
+/* 핸드셰이크 중에 온 DENY 를 서버가 보낸 것으로 믿어도 되는가.
+ *
+ * 서버는 서명이 맞는 AUTH 를 받은 뒤의 거절(터널 IP, 포스처)에 기기 키로 만든 mac 을
+ * 붙인다. 그 전의 거절(모르는 기기, 인증 실패)은 서버가 우리 키를 확인하지 못한
+ * 상태에서 나오므로 mac 이 없고, 서버 주소를 위조할 수 있는 누구나 만들 수 있다. */
+static int deny_verified(const tunnel_t *t, const handshake_t *hs, const uint8_t *body)
+{
+	uint8_t want[AUTH_MAC_LEN];
+
+	if (!hs->auth_sent) {
+		return 0;
+	}
+
+	if (secure_deny_mac(t->cfg->device_key, body[0],
+				hs->auth + AUTH_SIGNED_LEN, want) < 0) {
+		return 0;
+	}
+
+	return crypt_equal(want, body + 1, AUTH_MAC_LEN);
 }
 
 /* ---- protocol ------------------------------------------------------------ */
 /*   C -> S  REQ_HANDSHAKE     "나는 이 기기다"
  *   S -> C  CHALLENGE         "그렇다면 이 nonce 에 서명해 봐라"
- *   C -> S  AUTH              nonce + 포스처 + mac
- *   S -> C  RES_HANDSHAKE     세션 idx     (또는 DENY 와 사유)
+ *   C -> S  AUTH              nonce + 내 일회용 공개키 + 포스처 + mac
+ *   S -> C  RES_HANDSHAKE     세션 idx + 서버의 일회용 공개키 + tag   (또는 DENY 와 사유)
  *
  * HS_OK / HS_FAIL / HS_DENIED 를 돌려준다. */
 static int do_handshake(tunnel_t *t)
 {
-	session_t *session = &t->session;
 	uint8_t res[BUF_SIZE];
 	const uint8_t *body;
+	handshake_t hs;
 	msg_header_t h;
 	uint64_t deadline;
-	int auth_sent;
+	uint8_t loose_deny;
 	int body_len;
+	int ret = HS_FAIL;
 	int tries;
 	int n;
 
+	memset(&hs, 0, sizeof(hs));
+
 	for (tries = 1; tries <= HS_RETRY; tries++) {
 		tlog(t, "[HS] request %d/%d", tries, HS_RETRY);
+		hs_reset(&hs);
+		loose_deny = 0;
 		send_hs_request(t);
-		auth_sent = 0;
 
 		deadline = GetTickCount64() + HS_TIMEOUT_MSEC;
 		for (;;) {
 			n = hs_recv(t, deadline, res, (int)sizeof(res), &h);
 			if (n == HS_FAIL) {
-				return HS_FAIL;
+				goto out;
 			}
 			if (n == 0) {
 				break;	/* 응답이 없다. REQ 부터 다시 */
@@ -601,102 +691,122 @@ static int do_handshake(tunnel_t *t)
 
 			switch (h.type) {
 			case MSG_TYPE_CHALLENGE:
-				if (body_len < AUTH_NONCE_LEN) {
+				/* 한 번의 시도에 AUTH 는 하나다. 중복된 CHALLENGE 에 다시 답하면
+				 * 일회용 키가 바뀌어, 먼저 보낸 AUTH 에 대한 수락을 열지 못한다. */
+				if (body_len < AUTH_NONCE_LEN || hs.auth_sent) {
 					continue;
 				}
 				hs_emit(t, TUNNEL_DIR_RX, &h, res, n, NULL, 0);
 
-				if (send_hs_auth(t, body) < 0) {
-					return HS_FAIL;
+				if (send_hs_auth(t, &hs, body) < 0) {
+					goto out;
 				}
-				auth_sent = 1;
 				deadline = GetTickCount64() + HS_TIMEOUT_MSEC;
 				continue;
 
 			case MSG_TYPE_DENY:
-				if (body_len < 1) {
+				/* 세션 번호가 붙은 DENY 는 열려 있던 세션에 대한 것이다. 여기서는
+				 * 그 세션을 버리고 새로 여는 중이므로 볼 필요가 없다. */
+				if (n < (int)DENY_HS_LEN || h.session_idx != 0) {
 					continue;
 				}
 				hs_emit(t, TUNNEL_DIR_RX, &h, res, n, NULL, body[0]);
-				tlog(t, "[HS] denied: %s", deny_reason_name(body[0]));
-				return HS_DENIED;
+
+				if (deny_verified(t, &hs, body)) {
+					tlog(t, "[HS] denied: %s", deny_reason_name(body[0]));
+					ret = HS_DENIED;
+					goto out;
+				}
+
+				/* 확인할 수 없는 거절이다. 곧바로 믿으면 서버 주소를 위조한 패킷 한
+				 * 통으로 접속을 막을 수 있다. 기억만 해 두고 진짜 서버의 답을 끝까지
+				 * 기다린다 — 그동안 아무것도 오지 않았을 때에만 이것을 답으로 친다. */
+				if (loose_deny == 0) {
+					loose_deny = body[0];
+				}
+				continue;
 
 			case MSG_TYPE_RES_HANDSHAKE:
-				/* AUTH 를 보내기 전에 온 수락은 받지 않는다. 받아 주면 인증을
-				 * 구현하지 않은 서버(또는 서버인 척하는 쪽)가 REQ 에 곧바로 RES 를
-				 * 돌려주는 것만으로 인증 단계를 건너뛰게 된다. */
-				if (!auth_sent || h.session_idx == 0) {
+				/* AUTH 를 보내기 전에 온 수락은 받지 않는다. 그리고 tag 가 맞지 않는
+				 * 수락도 받지 않는다 — 기기 키를 모르는 쪽은 맞는 tag 를 만들 수 없다. */
+				if (!hs.auth_sent || h.session_idx == 0 || n < (int)RES_HS_MIN_LEN) {
+					continue;
+				}
+				if (accept_hs_response(t, &hs, res, n, h.session_idx) < 0) {
+					tlog(t, "[HS] response did not verify, ignored");
 					continue;
 				}
 				hs_emit(t, TUNNEL_DIR_RX, &h, res, n, NULL, 0);
 
-				if (session->idx != h.session_idx) {
-					session->idx = h.session_idx;
-					session->tx_counter = 0;
-				}
-
-				tlog(t, "[HS] established idx=%08x", session->idx);
-				return HS_OK;
+				tlog(t, "[HS] established idx=%08x", t->session.idx);
+				ret = HS_OK;
+				goto out;
 
 			default:
 				continue;
 			}
 		}
+
+		if (loose_deny != 0) {
+			tlog(t, "[HS] denied: %s", deny_reason_name(loose_deny));
+			ret = HS_DENIED;
+			goto out;
+		}
 	}
 
 	tlog(t, "[HS] no response from server");
-	return HS_FAIL;
+
+out:
+	hs_reset(&hs);
+
+	return ret;
 }
 
-/* KEEPALIVE: counter(8) | posture(8) | mac(32)
+/* KEEPALIVE: counter(8) | 암호화된 posture(8) | tag(16)
  *
  * 핸드셰이크에서 한 번 통과했다고 세션이 끝날 때까지 믿지 않는다. keepalive 마다
  * 지금의 포스처를 다시 싣고, 서버는 받을 때마다 정책을 다시 평가한다.
  *
- * mac 은 헤더부터 포스처까지 24바이트를 덮는다. 헤더가 들어가 이 세션에 묶이고,
- * counter 가 들어가 패킷마다 값이 달라진다. counter 는 데이터 패킷과 같은
- * tx_counter 를 쓴다. 세션 안에서 한 번 쓴 값을 다시 쓰지 않는다는 점만 필요하다. */
+ * 데이터 패킷과 같은 세션 키, 같은 counter 로 감싼다. 세션 키는 이 세션에서만 쓰이고
+ * counter 는 패킷마다 늘어나므로, 다른 세션의 것을 끼워 넣거나 예전 것을 다시 보내면
+ * 서버가 열지 못한다. */
 static void send_keepalive(tunnel_t *t)
 {
 	session_t *session = &t->session;
-	msg_header_t msg_header;
-	data_header_t data_header;
-	uint8_t packet[KA_SIGNED_LEN + AUTH_MAC_LEN];
+	uint8_t packet[PKT_OVERHEAD + sizeof(posture_report_t)];
+	uint8_t plain[PKT_HDR_LEN + sizeof(posture_report_t)];
 	tunnel_packet_t pkt;
-	int off;
+	uint64_t counter = session->secure.tx_counter;
+	int n;
 
-	memset(&msg_header, 0, sizeof(msg_header_t));
-	msg_header.version = PROTOCOL_VERSION;
-	msg_header.type = MSG_TYPE_KEEPALIVE;
-	msg_header.session_idx = session->idx;
-	data_header.counter = session->tx_counter++;
+	posture_encode(packet + PKT_HDR_LEN, sizeof(posture_report_t), &session->posture);
+	memcpy(plain + PKT_HDR_LEN, packet + PKT_HDR_LEN, sizeof(posture_report_t));
 
-	off = msg_encode(packet, sizeof(packet), &msg_header);
-	off += data_encode(packet + off, sizeof(packet) - (size_t)off, &data_header);
-	off += posture_encode(packet + off, sizeof(packet) - (size_t)off, &session->posture);
-
-	if (hmac_sha256(t->cfg->device_key, AUTH_KEY_LEN, packet, (size_t)off, packet + off) < 0) {
-		tlog(t, "[keepalive] hmac failed");
+	n = secure_seal(&session->secure, MSG_TYPE_KEEPALIVE, session->idx,
+			packet, sizeof(packet), sizeof(posture_report_t));
+	if (n < 0) {
+		tlog(t, "[keepalive] seal failed");
 		return;
 	}
-	off += AUTH_MAC_LEN;
+	memcpy(plain, packet, PKT_HDR_LEN);
 
-	udp_send(t, packet, off);
+	udp_send(t, packet, n);
 	t->session.last_ka_ms = t->session.last_tx_ms;
 
 	if (pkt_log_text(t)) {
 		tlog(t, "[keepalive] sent");
 	}
 
+	/* 화면에는 감싸기 전의 모습을 올린다. 암호문을 올리면 상세창이 보여 줄 것이 없다. */
 	pkt_init(t, &pkt, TUNNEL_DIR_TX, TUNNEL_PASS);
 	pkt.msg_type = MSG_TYPE_KEEPALIVE;
-	pkt.session_idx = msg_header.session_idx;
+	pkt.session_idx = session->idx;
 	pkt.has_counter = 1;
-	pkt.counter = data_header.counter;
+	pkt.counter = counter;
 	pkt.has_posture = 1;
 	pkt.posture = session->posture;
-	pkt.wire_len = (uint32_t)off;
-	pkt_snap(&pkt, packet, (uint32_t)off);
+	pkt.wire_len = (uint32_t)n;
+	pkt_snap(&pkt, plain, sizeof(plain));
 	pkt_emit(t, &pkt);
 }
 
@@ -732,13 +842,12 @@ static int pump_tun(tunnel_t *t)
 {
 	session_t *session = &t->session;
 	uint8_t packet[BUF_SIZE];
-	msg_header_t msg_header;
-	data_header_t data_header;
 	tunnel_packet_t pkt;
+	uint64_t counter;
 	BYTE *ip;
 	DWORD n;
 	DWORD err;
-	int off;
+	int wire;
 
 	for (;;) {
 		ip = WintunReceivePacket(t->tun, &n);
@@ -760,7 +869,7 @@ static int pump_tun(tunnel_t *t)
 			pkt_snap(&pkt, ip, n);
 			pkt_emit(t, &pkt);
 		}
-		else if (n > sizeof(packet) - PKT_HDR_LEN) {
+		else if (n > sizeof(packet) - PKT_OVERHEAD) {
 			if (pkt_log_text(t)) {
 				tlog(t, "[skip] too long (%lu bytes)", n);
 			}
@@ -797,29 +906,36 @@ static int pump_tun(tunnel_t *t)
 				tlog(t, "[tun->udp] %lu bytes, proto=%d", n, ip[IP_PROTO_OFF]);
 			}
 
-			memset(&msg_header, 0, sizeof(msg_header_t));
-			msg_header.version = PROTOCOL_VERSION;
-			msg_header.type = MSG_TYPE_DATA;
-			msg_header.session_idx = session->idx;
-			data_header.counter = session->tx_counter++;
+			counter = session->secure.tx_counter;
 
-			off = msg_encode(packet, sizeof(packet), &msg_header);
-			off += data_encode(packet + off, sizeof(packet) - off, &data_header);
+			/* 패킷이 Wintun 링버퍼 안에 있어 Linux처럼 헤드룸을 둘 수 없으므로 한 번
+			 * 복사한다. 암호화는 복사한 자리에서 한다. */
+			memcpy(packet + PKT_HDR_LEN, ip, n);
 
-			/* 패킷이 Wintun 링버퍼 안에 있어 Linux처럼 헤드룸을 둘 수 없으므로 한 번 복사한다. */
-			memcpy(packet + off, ip, n);
+			wire = secure_seal(&session->secure, MSG_TYPE_DATA, session->idx,
+					packet, sizeof(packet), n);
+			if (wire < 0) {
+				tlog(t, "[skip] seal failed (%lu bytes)", n);
+				pkt_init(t, &pkt, TUNNEL_DIR_TX, TUNNEL_DROP_IO_ERROR);
+				pkt.wire_len = n;
+				pkt_inner(&pkt, ip, n);
+				pkt_snap(&pkt, ip, n);
+				pkt_emit(t, &pkt);
+			}
+			else {
+				udp_send(t, packet, wire);
 
-			udp_send(t, packet, off + (int)n);
-
-			pkt_init(t, &pkt, TUNNEL_DIR_TX, TUNNEL_PASS);
-			pkt.msg_type = MSG_TYPE_DATA;
-			pkt.session_idx = msg_header.session_idx;
-			pkt.has_counter = 1;
-			pkt.counter = data_header.counter;
-			pkt.wire_len = (uint32_t)off + n;
-			pkt_inner(&pkt, ip, n);
-			pkt_snap(&pkt, packet, (uint32_t)off + n);
-			pkt_emit(t, &pkt);
+				/* 화면에는 감싸기 전의 모습을 올린다: 우리 헤더 뒤에 원래의 패킷. */
+				pkt_init(t, &pkt, TUNNEL_DIR_TX, TUNNEL_PASS);
+				pkt.msg_type = MSG_TYPE_DATA;
+				pkt.session_idx = session->idx;
+				pkt.has_counter = 1;
+				pkt.counter = counter;
+				pkt.wire_len = (uint32_t)wire;
+				pkt_inner(&pkt, ip, n);
+				pkt_snap_plain(&pkt, packet, ip, n);
+				pkt_emit(t, &pkt);
+			}
 		}
 
 		WintunReleaseReceivePacket(t->tun, ip);
@@ -832,18 +948,15 @@ static int pump_udp(tunnel_t *t)
 	session_t *session = &t->session;
 	uint8_t packet[BUF_SIZE];
 	msg_header_t msg_header;
-	data_header_t data_header;
 	tunnel_packet_t pkt;
 	struct sockaddr_in from;
+	uint64_t counter;
 	uint8_t *ip;
 	BYTE *out;
-	int wire;	/* 수신한 UDP 페이로드 길이. 아래에서 n을 깎으므로 따로 둔다 */
-	int off;
-	int n;
+	int wire;	/* 수신한 UDP 페이로드 길이 */
+	int n;		/* 푼 뒤의 평문 길이 */
 
-	while ((n = udp_recv(t, packet, (int)sizeof(packet), &from)) >= 0) {
-		wire = n;
-
+	while ((wire = udp_recv(t, packet, (int)sizeof(packet), &from)) >= 0) {
 		/* 검증 단계마다 verdict만 바꿔 같은 이벤트를 내보낸다.
 		 * 폐기된 패킷도 올려야 UI가 "왜 안 통했는지"를 집계할 수 있다. */
 		pkt_init(t, &pkt, TUNNEL_DIR_RX, TUNNEL_PASS);
@@ -857,8 +970,8 @@ static int pump_udp(tunnel_t *t)
 			continue;
 		}
 
-		off = msg_decode(packet, (size_t)wire, &msg_header);
-		if (off < 0 || msg_header.version != PROTOCOL_VERSION) {
+		if (msg_decode(packet, (size_t)wire, &msg_header) < 0 ||
+				msg_header.version != PROTOCOL_VERSION) {
 			pkt.verdict = TUNNEL_DROP_BAD_HEADER;
 			pkt_emit(t, &pkt);
 			continue;
@@ -874,12 +987,30 @@ static int pump_udp(tunnel_t *t)
 			continue;
 		}
 
+		/* 출발지 주소와 세션 번호는 위조할 수 있다. 여기까지 온 패킷이 정말 서버가 이
+		 * 세션에 보낸 것인지는 tag 가 말해 준다. 그 전에는 내용을 믿지 않고, 세션의
+		 * 상태도 바꾸지 않는다 — "서버가 살아 있다"는 표시(last_rx_ms)도 그 뒤에 한다.
+		 * 순서가 반대면 위조 패킷이 죽은 서버를 살아 있는 것처럼 보이게 한다. */
+		n = secure_open(&session->secure, packet, (size_t)wire, &counter);
+		if (n < 0) {
+			tlog(t, "[drop] %s", n == SECURE_REPLAY ? "counter already seen" : "tag does not match");
+			pkt.verdict = (uint8_t)(n == SECURE_REPLAY ? TUNNEL_DROP_REPLAY : TUNNEL_DROP_BAD_TAG);
+			pkt_emit(t, &pkt);
+			continue;
+		}
+
 		session->last_rx_ms = GetTickCount64();
+
+		/* 풀린 모습으로 다시 떠 둔다. */
+		pkt.has_counter = 1;
+		pkt.counter = counter;
+		pkt_snap(&pkt, packet, (uint32_t)PKT_HDR_LEN + (uint32_t)n);
+
+		ip = packet + PKT_HDR_LEN;
 
 		switch (msg_header.type) {
 			case MSG_TYPE_KEEPALIVE:
-				/* last_rx_ms는 위에서 이미 갱신했다. 세션이 살아 있다는 증거라
-				 * 유휴 시나리오에서 확인할 수 있게 로그를 남긴다. */
+				/* 세션이 살아 있다는 증거라 유휴 시나리오에서 확인할 수 있게 로그를 남긴다. */
 				if (pkt_log_text(t)) {
 					tlog(t, "[keepalive] recv");
 				}
@@ -889,13 +1020,13 @@ static int pump_udp(tunnel_t *t)
 				/* 세션 중의 거절. 방금 보낸 keepalive 의 포스처가 정책에 못 미쳤거나
 				 * 서버 쪽 정책이 바뀌었다. 터널은 닫지 않는다 — 어댑터를 없애면 사용자가
 				 * 방화벽을 다시 켰을 때 스스로 돌아올 수 없다. */
-				if (wire - off < 1) {
+				if (n < 1) {
 					pkt.verdict = TUNNEL_DROP_BAD_HEADER;
 					pkt_emit(t, &pkt);
 					continue;
 				}
-				tlog(t, "[deny] %s", deny_reason_name(packet[off]));
-				pkt.deny_reason = packet[off];
+				tlog(t, "[deny] %s", deny_reason_name(ip[0]));
+				pkt.deny_reason = ip[0];
 				session->denied = 1;
 				set_state(t, TUNNEL_STATE_DENIED);
 				pkt_emit(t, &pkt);
@@ -909,21 +1040,6 @@ static int pump_udp(tunnel_t *t)
 				continue;
 		}
 
-		if (data_decode(packet + off, (size_t)(wire - off), &data_header) < 0) {
-			tlog(t, "[drop] short data header");
-			pkt.verdict = TUNNEL_DROP_BAD_HEADER;
-			pkt_emit(t, &pkt);
-			continue;
-		}
-
-		pkt.has_counter = 1;
-		pkt.counter = data_header.counter;
-
-		off += (int)sizeof(data_header_t);
-
-		n = wire - off;
-
-		ip = packet + off;
 		if (n < IP_MIN_HDR || IP_VERSION(ip) != 4) {
 			tlog(t, "[drop] udp: not IPv4 (%d bytes)", n);
 			pkt.verdict = TUNNEL_DROP_NON_IPV4;
@@ -951,7 +1067,7 @@ static int pump_udp(tunnel_t *t)
 		pkt_emit(t, &pkt);
 	}
 
-	return n == RECV_ERROR ? -1 : 0;
+	return wire == RECV_ERROR ? -1 : 0;
 }
 
 /* ---- entry --------------------------------------------------------------- */
@@ -1109,6 +1225,7 @@ int tunnel_run(const tunnel_config_t *cfg, HANDLE stop_event)
 	ret = 0;
 
 out:
+	secure_session_close(&session->secure);
 	if (t->sock != INVALID_SOCKET) {
 		closesocket(t->sock);
 	}

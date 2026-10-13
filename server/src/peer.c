@@ -70,6 +70,7 @@ void peer_check_expired(void) {
 	for (i = 0; i < MAX_PEERS; i++){
 		if(peers[i].used){
 			if (now - peers[i].last_seen > SESSION_TIMEOUT_SEC){
+				secure_session_close(&peers[i].secure);
 				peers[i].used = 0;
 				printf("[peer] expire inner ip[%s] idx=%08x\n",ip4(peers[i].inner, dst), peers[i].session_idx);
 			}
@@ -117,6 +118,8 @@ peer_t *peer_register(struct in_addr inner, const struct sockaddr_in *outer, soc
 	}
 
 	peer = &peers[slot];
+	/* 이 자리에 있던 세션의 키를 먼저 놓는다. 그냥 덮으면 키 객체가 샌다. */
+	secure_session_close(&peer->secure);
 	memset(peer, 0, sizeof(*peer));
 	peer->used = 1;
 	peer->session_idx = idx;
@@ -140,6 +143,7 @@ void peer_drop(peer_t *peer)
 	char ib[INET_ADDRSTRLEN];
 
 	printf("[peer] drop %s idx=%08x\n", ip4(peer->inner, ib), peer->session_idx);
+	secure_session_close(&peer->secure);
 	peer->used = 0;
 }
 

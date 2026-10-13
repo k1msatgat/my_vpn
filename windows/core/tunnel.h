@@ -38,6 +38,8 @@ typedef enum tunnel_verdict {
 	TUNNEL_DROP_UNKNOWN_TYPE,
 	TUNNEL_DROP_IO_ERROR,		/* 검증은 통과했지만 전달 자체가 실패 */
 	TUNNEL_DROP_DENIED,		/* 서버가 접근을 거절한 상태라 보내지 않았다 */
+	TUNNEL_DROP_BAD_TAG,		/* tag 가 맞지 않는다. 서버가 이 세션에 보낸 것이 아니다 */
+	TUNNEL_DROP_REPLAY,		/* 이미 받은 counter. 같은 패킷이 다시 왔다 */
 	TUNNEL_VERDICT_COUNT		/* 항목 수. 집계 배열의 크기로 쓴다 */
 } tunnel_verdict_t;
 

@@ -77,6 +77,8 @@ static void build(int acl_enabled)
 	put("\"deny_tun_ip\":%llu,", (unsigned long long)stats.deny[DENY_TUN_IP]);
 	put("\"deny_posture\":%llu,", (unsigned long long)stats.deny[DENY_POSTURE]);
 	put("\"keepalive_dropped\":%llu,", (unsigned long long)stats.keepalive_dropped);
+	put("\"bad_tag\":%llu,", (unsigned long long)stats.bad_tag);
+	put("\"replayed\":%llu,", (unsigned long long)stats.replayed);
 	put("\"unknown_session\":%llu,", (unsigned long long)stats.unknown_session);
 	put("\"spoofed_src\":%llu,", (unsigned long long)stats.spoofed_src);
 	put("\"acl_denied\":%llu,", (unsigned long long)stats.acl_denied);
