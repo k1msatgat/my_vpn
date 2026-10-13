@@ -27,6 +27,9 @@ typedef struct device {
 #define DEVICE_NOT_ENROLLED	1
 #define DEVICE_ERROR		(-1)
 
+/* 신원을 사용자 계정이 아니라 PC 에 둔다 (서비스용). 다른 함수를 부르기 전에 한 번 부른다. */
+void device_use_machine_store(void);
+
 /* 저장된 신원을 읽는다. */
 int device_load(device_t *out);
 

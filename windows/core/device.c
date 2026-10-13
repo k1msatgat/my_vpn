@@ -11,6 +11,18 @@
 #define DEVICE_REG_ID	L"id"
 #define DEVICE_REG_KEY	L"key"
 
+/* 신원을 두는 곳. 기본은 지금 로그온한 사용자의 것(HKCU)이다. 서비스는 사용자가 아니라
+ * 시스템 계정으로 돌고, 로그온한 사람이 없을 때에도 터널을 열어야 하므로 PC 의 것(HKLM)
+ * 을 쓴다. 그때 키는 시스템 계정의 DPAPI 로 감싸인다 — 레지스트리의 값은 일반 사용자도
+ * 읽을 수 있지만 풀 수 있는 것은 시스템 계정으로 도는 프로세스뿐이다. 사용자 계정에
+ * 둘 때의 "같은 사용자로 도는 다른 프로세스가 키를 풀 수 있다"가 여기서는 없다. */
+static HKEY device_root = HKEY_CURRENT_USER;
+
+void device_use_machine_store(void)
+{
+	device_root = HKEY_LOCAL_MACHINE;
+}
+
 /* 키를 레지스트리에 그대로 쓰면 그 하이브를 읽을 수 있는 누구나(백업 파일, 다른
  * 계정의 관리자, 디스크를 떼어 간 사람) 키를 얻는다. DPAPI(CryptProtectData)는
  * 현재 사용자의 로그온 자격 증명에서 유도한 키로 암호화하므로, 저장된 값은 같은
@@ -71,7 +83,7 @@ int device_load(device_t *out)
 	memset(out, 0, sizeof(*out));
 
 	len = sizeof(out->id);
-	err = RegGetValueW(HKEY_CURRENT_USER, DEVICE_REG_PATH, DEVICE_REG_ID,
+	err = RegGetValueW(device_root, DEVICE_REG_PATH, DEVICE_REG_ID,
 			RRF_RT_REG_BINARY, NULL, out->id, &len);
 	if (err == ERROR_FILE_NOT_FOUND) {
 		return DEVICE_NOT_ENROLLED;
@@ -81,7 +93,7 @@ int device_load(device_t *out)
 	}
 
 	len = sizeof(sealed);
-	err = RegGetValueW(HKEY_CURRENT_USER, DEVICE_REG_PATH, DEVICE_REG_KEY,
+	err = RegGetValueW(device_root, DEVICE_REG_PATH, DEVICE_REG_KEY,
 			RRF_RT_REG_BINARY, NULL, sealed, &len);
 	if (err != ERROR_SUCCESS) {
 		return DEVICE_ERROR;
@@ -112,7 +124,7 @@ int device_save(const device_t *dev)
 		goto out;
 	}
 
-	if (RegCreateKeyExW(HKEY_CURRENT_USER, DEVICE_REG_PATH, 0, NULL, 0,
+	if (RegCreateKeyExW(device_root, DEVICE_REG_PATH, 0, NULL, 0,
 			KEY_SET_VALUE, NULL, &reg, NULL) != ERROR_SUCCESS) {
 		goto out;
 	}

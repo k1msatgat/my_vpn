@@ -1,7 +1,7 @@
 # 푸시할 때마다 양쪽을 실제로 빌드한다.
 #
 #   server   Linux 서버를 경고 없이 빌드하고, 패킷 수준의 인증 검사를 돌린다.
-#   windows  Windows 클라이언트(콘솔 + MFC GUI)를 MSVC 로 빌드한다.
+#   windows  Windows 클라이언트(콘솔 + 서비스 + MFC GUI)를 MSVC 로 빌드한다.
 #
 # 서버는 Linux 장비에서, 클라이언트는 Windows PC 에서 개발한다. 한쪽에서 고친 것이
 # 다른 쪽을 깨뜨렸는지는 그 장비에 가서 빌드해 보기 전까지 알 수 없었다.
@@ -59,7 +59,7 @@ jobs:
 
       # 오류와 경고를 주석(annotation)으로도 올린다. 로그를 내려받지 않아도 무엇이
       # 깨졌는지 실행 결과 화면에서 바로 보인다.
-      - name: Build vpn_client + vpn_gui (Release x64)
+      - name: Build vpn_client + vpn_service + vpn_gui (Release x64)
         shell: pwsh
         run: |
           msbuild windows\my_vpn.sln -m -nologo -p:Configuration=Release -p:Platform=x64 "-flp:logfile=build.log;verbosity=minimal;encoding=utf-8"

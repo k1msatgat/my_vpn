@@ -52,6 +52,7 @@ Zero Trust Network Access(ZTNA)의 기반 구조를 학습하는 것을 목표�
 - **상태 소켓** — 지금 붙어 있는 세션(기기, 포스처, 트래픽)과 사유별 거부 횟수를 읽기 전용 유닉스 소켓으로 내보낸다
 - **감사 로그** — 누가 언제 들어와 어디에 닿았고 왜 거절됐는지를 사건마다 한 줄씩 JSON으로 남긴다. 패킷마다가 아니라 세션과 목적지마다 한 번
 - **등록 코드** — 기기의 ID와 키를 손으로 옮기지 않는다. 관리자가 만든 일회용 코드를 기기에 적으면 기기가 자기 키를 암호화된 세션으로 서버에 올린다
+- **서비스와 GUI의 분리 (Windows)** — 터널은 시스템 서비스가 맡고 GUI는 권한 없이 떠서 파이프로 조종한다. 창을 닫아도 터널이 유지되고, 기기의 키는 서비스만 읽는다
 - **MCP 제어** — AI 클라이언트가 서버를 올리고 내리고, 기기와 ACL을 바꾸고, 상태를 본다 ([docs/mcp.md](docs/mcp.md))
 - **위조 방어** — 서버는 inner src가 세션에 등록된 터널 IP와 같은지, 클라이언트는 출발지가 서버인지 확인
 - **Keepalive & 세션 만료** — 유휴 시 10초마다 keepalive, 서버는 60초 무응답 세션을 정리
@@ -313,7 +314,10 @@ my_vpn/
 │   │   ├── posture.{h,c}      # 단말 포스처 수집 (OS 빌드 / 방화벽 / 백신)
 │   │   ├── device.{h,c}       # 기기 ID · 키 생성, DPAPI 보관
 │   │   ├── crypt.c            # crypt.h 의 CNG 구현 — 서버의 crypt.c 와 같은 선언을 채운다
-│   │   └── vpn_session.{h,c}  # 워커 스레드 + 패킷 링버퍼 + PostMessage 마셜링
+│   │   ├── ipc.{h,c}          # 서비스와 GUI 사이의 메시지 (이름 있는 파이프)
+│   │   ├── vpn_remote.{h,c}   # GUI 쪽: vpn_session.h 를 파이프로 채운다
+│   │   └── vpn_session.{h,c}  # 한 프로세스 안에서 터널을 돌리던 계층 (GUI 는 더 이상 쓰지 않음)
+│   ├── svc/               #   서비스 (main.c) — 터널을 맡고, 설치 / 제거 / 확인용 ctl
 │   ├── cli/               #   콘솔 클라이언트 (main.c) — 자동 테스트 대상
 │   ├── gui/               #   MFC 다이얼로그
 │   │   ├── MainDlg.{h,cpp}      # 가상 리스트, 상세창, 포스처 탭, 레이아웃, 바탕 그리기
@@ -433,7 +437,7 @@ my_vpn/
 - [x] Windows 클라이언트 — Wintun 콘솔 클라이언트 (ping 왕복 / 유휴 120초 / 서버 재시작 복구 확인)
 - [x] Windows 클라이언트 — MFC GUI (연결·해제 상태 전이 / 패킷 분석 탭 / 필터·통계 / ping 왕복 확인)
 - [x] CI — 푸시마다 서버 빌드와 `test/auth_check.py`, Windows 클라이언트(콘솔 + MFC GUI) MSVC 빌드
-- [ ] Windows 클라이언트 — Windows 서비스 + Named Pipe IPC
+- [x] Windows 클라이언트 — Windows 서비스 + Named Pipe IPC. 터널은 서비스가 맡고 GUI는 권한 없이 떠서 조종만 한다 (파이프 통신과 GUI의 접속 / 분리는 확인, 서비스로 설치해 터널을 여는 것은 아직)
 
 ---
 
@@ -460,6 +464,7 @@ my_vpn/
 | AI 작성 | 서버 뒤의 네트워크로 전달 — `server.c`의 규칙 파일이 없을 때의 판정, `mcp/service.sh`의 `forward_up` / `forward-down`(nftables), `docs/linux.md`의 해당 절 |
 | AI 작성 | 감사 로그 — `server/src/audit.c`, `server.c` / `peer.c`의 사건 지점, `mcp/ctl.cjs`의 `audit`와 MCP `audit_log` 도구 |
 | AI 작성 | 등록 코드 — `server/src/enroll.c`, `server.c`의 `handle_enroll`, `secure.c`의 `secure_enroll_identity`, `tunnel.c`의 `tunnel_enroll`, `device.c`(Windows)의 생성 / 저장 분리, 콘솔과 GUI의 코드 입력, `mcp/ctl.cjs`의 `enroll_*`. 새 핸드셰이크를 만들지 않고 코드에서 임시 신원을 뽑는 방식은 AI가 제안 |
+| AI 작성 | 서비스와 GUI의 분리 — `windows/svc/main.c`(서비스, 설치, `ctl`), `core/ipc.{h,c}`, `core/vpn_remote.{h,c}`, GUI를 서비스에 붙도록 고친 것, `device.c`의 PC 단위 보관. 구조(터널을 돌리는 서비스 + 조종하는 GUI)는 직접 제안한 방향이고 구현은 AI |
 | AI 작성 | `mcp/` MCP 서버 전체 — `server.js`(도구 선언), `ctl.cjs`(root 헬퍼), systemd 유닛, 설치 스크립트, `docs/mcp.md` |
 | AI 작성 | GUI 재설계 — `gui/ui_theme.cpp`, `gui/ui_controls.cpp`, `MainDlg`의 배치와 그리기, `EnrollDlg`의 그리기, `vpn_gui.rc`, 앱 아이콘(`windows/tools/mkicon.py`). Linux 장비에서 작성했고 MSVC 빌드는 CI로 확인, 실행은 아직 확인하지 못함 |
 | AI 작성 | `.github/workflows/ci.yml`, CI가 찾은 `posture.c`의 `wscapi.dll` 동적 로드 |

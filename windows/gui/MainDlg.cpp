@@ -43,6 +43,7 @@ CMainDlg::CMainDlg(CWnd *parent)
 	, m_deny_reason(0)
 	, m_posture_ticks(0)
 	, m_session_idx(0)
+	, m_link(VPN_REMOTE_DOWN)
 	, m_stopping(false)
 	, m_tabs(nullptr)
 	, m_sep_y(0)
@@ -92,6 +93,9 @@ BEGIN_MESSAGE_MAP(CMainDlg, CDialogEx)
 	ON_MESSAGE(WM_VPN_STATE, &CMainDlg::OnVpnState)
 	ON_MESSAGE(WM_VPN_DONE, &CMainDlg::OnVpnDone)
 	ON_MESSAGE(WM_VPN_PACKETS, &CMainDlg::OnVpnPackets)
+	ON_MESSAGE(WM_VPN_SERVICE, &CMainDlg::OnVpnService)
+	ON_MESSAGE(WM_VPN_DEVICE, &CMainDlg::OnVpnDevice)
+	ON_MESSAGE(WM_VPN_ERROR, &CMainDlg::OnVpnError)
 END_MESSAGE_MAP()
 
 BOOL CMainDlg::OnInitDialog()
@@ -258,26 +262,21 @@ bool CMainDlg::BuildConfig(tunnel_config_t &cfg)
 	}
 	cfg.server_port = static_cast<uint16_t>(port_num);
 
-	/* 기기 신원 */
-	device_t dev;
-	int enrolled = device_load(&dev);
+	/* 터널은 서비스가 연다. 이 프로그램은 어디로 붙을지만 알려 준다 — 기기의 키는
+	 * 서비스만 읽을 수 있는 곳에 있고 여기로는 오지 않는다. */
+	if (!ServiceReady()) {
+		return false;
+	}
 
-	if (enrolled == DEVICE_NOT_ENROLLED) {
+	if (m_device_id.IsEmpty()) {
 		AfxMessageBox(_T("등록되지 않은 기기입니다.\n\n")
-				_T("[포스처] 탭의 [기기 등록...] 으로 ID 와 키를 만들고\n")
-				_T("그 값을 서버에 등록하세요."), MB_ICONWARNING);
+				_T("[포스처] 탭의 [기기 등록...] 에 관리자에게 받은\n")
+				_T("등록 코드를 적어 주세요."), MB_ICONWARNING);
 		/* 어디로 가야 하는지 말로만 하지 않고 데려다 준다. */
 		ui::TabsSetSel(m_tabs, TAB_POSTURE);
 		OnTabChanged();
 		return false;
 	}
-	if (enrolled != DEVICE_OK) {
-		AfxMessageBox(_T("기기 신원을 읽지 못했습니다."), MB_ICONWARNING);
-		return false;
-	}
-	memcpy(cfg.device_id, dev.id, sizeof(cfg.device_id));
-	memcpy(cfg.device_key, dev.key, sizeof(cfg.device_key));
-	SecureZeroMemory(&dev, sizeof(dev));
 
 	return true;
 }
@@ -427,8 +426,12 @@ void CMainDlg::OnEnroll()
 {
 	device_t dev;
 
-	/* 워커가 설정의 사본에 예전 키를 들고 돌고 있다. 지금 키를 바꾸면 화면의
-	 * 기기 ID 와 실제로 쓰이는 키가 어긋난다. */
+	if (!ServiceReady()) {
+		return;
+	}
+
+	/* 열려 있는 터널은 예전 키로 인증한 세션이다. 지금 키를 바꾸면 화면의 기기 ID 와
+	 * 실제로 쓰이는 키가 어긋난다. 서비스도 터널이 열려 있는 동안에는 받지 않는다. */
 	if (vpn_session_active(m_session)) {
 		AfxMessageBox(_T("연결을 해제한 뒤에 등록하세요."), MB_ICONINFORMATION);
 		return;
@@ -456,10 +459,15 @@ void CMainDlg::OnEnroll()
 	INT_PTR choice = ask.DoModal();
 
 	if (choice == CEnrollCodeDlg::RESULT_MANUAL) {
-		/* 코드 없이: ID 와 키를 만들어 보여 주고, 관리자가 손으로 서버에 옮겨 적는다. */
-		if (device_enroll(&dev) != DEVICE_OK) {
-			AfxMessageBox(_T("기기 등록에 실패했습니다."), MB_ICONERROR);
-			return;
+		/* 코드 없이: 서비스가 ID 와 키를 만들어 저장하고 한 번 돌려준다. 그것을 보여
+		 * 주고, 관리자가 손으로 서버에 옮겨 적는다. */
+		{
+			CWaitCursor wait;
+
+			if (vpn_remote_enroll_manual(m_session, &dev) != DEVICE_OK) {
+				AfxMessageBox(_T("기기 등록에 실패했습니다."), MB_ICONERROR);
+				return;
+			}
 		}
 
 		{
@@ -492,29 +500,19 @@ void CMainDlg::OnEnroll()
 	}
 	cfg.server_port = static_cast<uint16_t>(port_num);
 
-	if (device_generate(&dev) != DEVICE_OK) {
-		AfxMessageBox(_T("기기 신원을 만들지 못했습니다."), MB_ICONERROR);
-		return;
-	}
+	int result;
 
-	HANDLE stop = CreateEventW(NULL, TRUE, FALSE, NULL);
-	int result = TUNNEL_ENROLL_ERROR;
-
-	if (stop) {
-		/* 서버의 답을 기다리는 동안 창이 멈춘다. 길어야 십여 초이고, 그동안 할 수 있는
-		 * 일도 없다. 터널처럼 워커 스레드로 빼지 않았다. */
+	{
+		/* 서비스가 서버와 주고받는 동안 창이 멈춘다. 길어야 십여 초이고, 그동안 할 수
+		 * 있는 일도 없다. 신원을 만들고 저장하는 것은 서비스다 — 키는 이 프로그램을
+		 * 지나가지 않는다. */
 		CWaitCursor wait;
 		CStringA code(ask.m_code);
 
-		result = tunnel_enroll(&cfg, code, dev.id, dev.key, stop);
-		CloseHandle(stop);
+		result = vpn_remote_enroll(m_session, cfg.server_ip.s_addr, cfg.server_port, code);
 	}
 
-	/* 신원은 서버가 받아 준 뒤에 저장한다. 먼저 저장하면 서버에 닿지 못했을 때 예전
-	 * 신원은 지워졌고 새 신원은 어디에도 등록되지 않은 채로 남는다. */
-	bool saved = result == TUNNEL_ENROLL_OK && device_save(&dev) == DEVICE_OK;
-
-	SecureZeroMemory(&dev, sizeof(dev));
+	const bool saved = true;	/* 저장은 서비스가 했다. 못 했으면 result 가 OK 가 아니다 */
 
 	switch (result) {
 	case TUNNEL_ENROLL_OK:
@@ -815,18 +813,108 @@ void CMainDlg::SetupPostureList()
 /* 기기 ID 만 보여 준다. device_load 는 키까지 풀어 주므로 쓰지 않을 키는 바로 지운다. */
 void CMainDlg::LoadDeviceId()
 {
-	device_t dev;
+	uint8_t id[DEVICE_ID_LEN];
 
 	m_device_id.Empty();
 
-	if (device_load(&dev) == DEVICE_OK) {
+	/* 신원은 서비스가 갖고 있다. 서비스에 붙기 전에는 등록됐는지조차 알 수 없다. */
+	if (vpn_remote_device(m_session, id)) {
 		CString t;
 		for (int i = 0; i < DEVICE_ID_LEN; i++) {
-			t.Format(_T("%02x"), dev.id[i]);
+			t.Format(_T("%02x"), id[i]);
 			m_device_id += t;
 		}
 	}
-	SecureZeroMemory(&dev, sizeof(dev));
+}
+
+/* 서비스에 붙어 있는가. 아니면 왜 안 되는지와 무엇을 해야 하는지를 알려 준다. */
+bool CMainDlg::ServiceReady()
+{
+	switch (m_link) {
+	case VPN_REMOTE_UP:
+		return true;
+	case VPN_REMOTE_MISMATCH:
+		AfxMessageBox(_T("서비스가 이 프로그램과 다른 버전입니다.\n\n")
+				_T("같이 빌드된 vpn_service.exe 로 다시 설치하세요:\n")
+				_T("관리자 명령 프롬프트에서  vpn_service.exe install"), MB_ICONWARNING);
+		return false;
+	case VPN_REMOTE_BUSY:
+		AfxMessageBox(_T("다른 프로그램이 이미 서비스에 붙어 있습니다.\n\n")
+				_T("이 창이 하나 더 떠 있는지 확인하세요."), MB_ICONWARNING);
+		return false;
+	default:
+		AfxMessageBox(_T("터널을 맡는 서비스가 돌고 있지 않습니다.\n\n")
+				_T("한 번 설치하면 됩니다. 관리자 명령 프롬프트에서:\n")
+				_T("vpn_service.exe install"), MB_ICONWARNING);
+		return false;
+	}
+}
+
+/* 서비스와의 연결이 바뀌었다. */
+LRESULT CMainDlg::OnVpnService(WPARAM wParam, LPARAM)
+{
+	m_link = static_cast<int>(wParam);
+
+	switch (m_link) {
+	case VPN_REMOTE_UP:
+		AppendLog(_T("[gui] 서비스에 붙었습니다"));
+		break;
+	case VPN_REMOTE_MISMATCH:
+		AppendLog(_T("[gui] 서비스가 이 프로그램과 다른 버전입니다"));
+		break;
+	case VPN_REMOTE_BUSY:
+		AppendLog(_T("[gui] 다른 프로그램이 서비스에 붙어 있습니다"));
+		break;
+	default:
+		AppendLog(_T("[gui] 서비스에 닿지 못합니다"));
+		break;
+	}
+
+	/* 서비스에서 떨어지면 터널이 어떤 상태인지 이 프로그램은 모른다. 열려 있을 수도
+	 * 있다. 모르는 것을 "연결됨"으로 보여 주지 않는다. */
+	if (m_link != VPN_REMOTE_UP) {
+		m_stopping = false;
+		SetUiState(TUNNEL_STATE_STOPPED);
+	}
+
+	LoadDeviceId();
+	RefreshPosture(false);
+	UpdateStatus();
+
+	return 0;
+}
+
+LRESULT CMainDlg::OnVpnDevice(WPARAM, LPARAM)
+{
+	LoadDeviceId();
+	RefreshPosture(false);
+
+	return 0;
+}
+
+/* 서비스가 명령을 받아 주지 않았다. */
+LRESULT CMainDlg::OnVpnError(WPARAM wParam, LPARAM)
+{
+	switch (wParam) {
+	case 1:		/* IPC_ERR_BUSY */
+		AppendLog(_T("[gui] 서비스: 터널이 열려 있습니다. 먼저 해제하세요"));
+		break;
+	case 2:		/* IPC_ERR_NOT_ENROLLED */
+		AppendLog(_T("[gui] 서비스: 등록되지 않은 기기입니다"));
+		break;
+	default:
+		AppendLog(_T("[gui] 서비스가 요청을 받지 않았습니다"));
+		break;
+	}
+
+	/* 연결을 눌러 "연결 중"으로 바꿔 둔 화면을 서비스의 실제 상태로 되돌린다. 열려
+	 * 있었다면 곧 STATE 가 다시 온다. */
+	if (!vpn_session_active(m_session)) {
+		m_stopping = false;
+		SetUiState(TUNNEL_STATE_STOPPED);
+	}
+
+	return 0;
 }
 
 /* 패킷 이벤트에서 "무엇을 보고했고 서버가 뭐라고 했는지"를 주워 둔다.
@@ -1369,7 +1457,23 @@ void CMainDlg::UpdateStatus()
 	case TUNNEL_STATE_STOPPED:
 	default:
 		title = _T("연결되지 않음");
-		sub = _T("서버 주소와 터널 IP 를 확인하고 연결을 누르세요");
+		/* 서비스에 붙지 못했으면 연결을 눌러도 아무 일도 일어나지 않는다. 그 이유가
+		 * 가장 먼저 보여야 한다. */
+		if (m_link == VPN_REMOTE_UP) {
+			sub = _T("서버 주소를 확인하고 연결을 누르세요");
+		}
+		else if (m_link == VPN_REMOTE_MISMATCH) {
+			sub = _T("서비스가 이 프로그램과 다른 버전입니다 — vpn_service.exe install 로 다시 설치하세요");
+			subColor = c.danger;
+		}
+		else if (m_link == VPN_REMOTE_BUSY) {
+			sub = _T("다른 프로그램이 이미 서비스에 붙어 있습니다");
+			subColor = c.danger;
+		}
+		else {
+			sub = _T("서비스가 돌고 있지 않습니다 — 관리자 권한으로 vpn_service.exe install");
+			subColor = c.danger;
+		}
 		dot = c.idle;
 		break;
 	}
@@ -1912,9 +2016,12 @@ void CMainDlg::OnDestroy()
 	KillTimer(TIMER_TICK_ID);
 	SaveSettings();
 
-	/* 순서가 중요하다.
-	 *  1) destroy 가 종료를 요청하고 워커가 끝날 때까지 기다린다. 이 시점 이후로는
-	 *     새 PostMessage 가 생기지 않는다.
+	/* 이 창을 닫아도 터널은 닫히지 않는다. 터널은 서비스가 맡고 있고, destroy 는 그
+	 * 서비스에서 떨어질 뿐이다. 다시 켜면 열려 있는 터널에 그대로 붙는다.
+	 *
+	 * 순서가 중요하다.
+	 *  1) destroy 가 서비스에서 떨어지고 읽는 스레드가 끝날 때까지 기다린다. 이 시점
+	 *     이후로는 새 PostMessage 가 생기지 않는다.
 	 *  2) 그 뒤에 큐에 남아 있는 WM_VPN_LOG 의 버퍼를 해제한다. 창이 사라지면
 	 *     이 메시지들은 처리되지 않으므로 여기서 치우지 않으면 그대로 샌다.
 	 * ESC / Enter 로 닫을 때는 WM_CLOSE 없이 바로 WM_DESTROY 가 오므로

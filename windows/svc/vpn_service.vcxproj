@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <ProjectGuid>{7A41D6E2-93B5-4C08-8F1E-6D2B5A0C9E34}</ProjectGuid>
+    <Keyword>Win32Proj</Keyword>
+    <RootNamespace>vpn_service</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <!-- $(SolutionDir) 는 .sln 을 통해 빌드할 때만 정의된다. msbuild 로 이 .vcxproj 를
+       직접 빌드해도 되도록 프로젝트 위치를 기준으로 삼는다. -->
+  <PropertyGroup Label="Paths">
+    <WindowsRoot>$(MSBuildProjectDirectory)\..</WindowsRoot>
+    <RepoRoot>$(MSBuildProjectDirectory)\..\..</RepoRoot>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <!-- 설치된 VS의 기본 툴셋을 쓴다. VS2022는 v143, VS2026은 v145.
+       Microsoft.Cpp.Default.props가 $(DefaultPlatformToolset)을 채워주므로 이 위치여야 한다. -->
+  <PropertyGroup Label="Toolset">
+    <MyVpnToolset Condition="'$(DefaultPlatformToolset)'!=''">$(DefaultPlatformToolset)</MyVpnToolset>
+    <MyVpnToolset Condition="'$(MyVpnToolset)'==''">v143</MyVpnToolset>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>$(MyVpnToolset)</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>$(MyVpnToolset)</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup>
+    <OutDir>$(WindowsRoot)\build\$(Configuration)\</OutDir>
+    <IntDir>$(WindowsRoot)\build\obj\$(ProjectName)\$(Configuration)\</IntDir>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard_C>stdc17</LanguageStandard_C>
+      <AdditionalIncludeDirectories>$(RepoRoot)\lib\common\include;$(WindowsRoot)\core;$(WindowsRoot)\third_party\wintun\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>WIN32_LEAN_AND_MEAN;_CRT_SECURE_NO_WARNINGS;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <!-- 소스는 Linux와 공유하므로 UTF-8(BOM 없음)이다. MSVC는 기본적으로 시스템 코드페이지로
+           읽어 한글 주석에서 C4819가 나므로 입력/실행 문자셋을 UTF-8로 못박는다. -->
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>ws2_32.lib;iphlpapi.lib;bcrypt.lib;crypt32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+    <PostBuildEvent>
+      <Command>copy /Y "$(WindowsRoot)\third_party\wintun\bin\amd64\wintun.dll" "$(OutDir)"</Command>
+      <Message>Copy wintun.dll next to the executable</Message>
+    </PostBuildEvent>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <Optimization>Disabled</Optimization>
+      <PreprocessorDefinitions>_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <Optimization>MaxSpeed</Optimization>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <PreprocessorDefinitions>NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <Link>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="main.c" />
+    <ClCompile Include="..\core\tunnel.c" />
+    <ClCompile Include="..\core\posture.c" />
+    <ClCompile Include="..\core\crypt.c" />
+    <ClCompile Include="..\core\device.c" />
+    <ClCompile Include="..\core\ipc.c" />
+    <ClCompile Include="..\..\lib\common\src\proto.c" />
+    <ClCompile Include="..\..\lib\common\src\secure.c" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\core\tunnel.h" />
+    <ClInclude Include="..\core\posture.h" />
+    <ClInclude Include="..\..\lib\common\include\crypt.h" />
+    <ClInclude Include="..\..\lib\common\include\secure.h" />
+    <ClInclude Include="..\core\device.h" />
+    <ClInclude Include="..\core\ipc.h" />
+    <ClInclude Include="..\..\lib\common\include\proto.h" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

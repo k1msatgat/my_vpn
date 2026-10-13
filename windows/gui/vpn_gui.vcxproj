@@ -72,10 +72,10 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalDependencies>ws2_32.lib;iphlpapi.lib;bcrypt.lib;crypt32.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <!-- Wintun 어댑터 생성과 IP / MTU 설정에 관리자 권한이 필요하다.
-           매니페스트에 박아 두면 실행할 때 Windows 가 권한 상승을 먼저 묻는다. -->
+      <!-- 관리자 권한을 요구하지 않는다. 어댑터를 만들고 주소와 경로를 넣는 일은 서비스가
+           한다. 화면을 그리고 입력을 받는 코드가 관리자 권한으로 돌 이유가 없다. -->
       <EnableUAC>true</EnableUAC>
-      <UACExecutionLevel>RequireAdministrator</UACExecutionLevel>
+      <UACExecutionLevel>AsInvoker</UACExecutionLevel>
       <!-- comctl32 v6 를 매니페스트에 선언해야 비주얼 스타일이 적용된다.
            없으면 버튼 / 리스트가 테마 없이 Win95 모양으로 그려진다. -->
       <AdditionalManifestDependencies>type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'</AdditionalManifestDependencies>
@@ -120,13 +120,12 @@
     <ClCompile Include="PacketStore.cpp" />
     <ClCompile Include="ui_theme.cpp" />
     <ClCompile Include="ui_controls.cpp" />
-    <ClCompile Include="..\core\vpn_session.c" />
-    <ClCompile Include="..\core\tunnel.c" />
+    <!-- 터널(tunnel.c)과 암호 도구, 기기의 키를 읽는 코드는 이 프로그램에 들어 있지 않다.
+         그것들은 서비스(svc)에 있고, 여기서는 파이프로 서비스에 붙는다 (vpn_remote.c).
+         posture.c 는 "이 PC 의 지금 값"을 화면에 보여 주려고 남겼다. 권한 없이 읽힌다. -->
+    <ClCompile Include="..\core\vpn_remote.c" />
+    <ClCompile Include="..\core\ipc.c" />
     <ClCompile Include="..\core\posture.c" />
-    <ClCompile Include="..\core\crypt.c" />
-    <ClCompile Include="..\core\device.c" />
-    <ClCompile Include="..\..\lib\common\src\proto.c" />
-    <ClCompile Include="..\..\lib\common\src\secure.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="framework.h" />
@@ -138,6 +137,8 @@
     <ClInclude Include="ui_theme.h" />
     <ClInclude Include="ui_controls.h" />
     <ClInclude Include="..\core\vpn_session.h" />
+    <ClInclude Include="..\core\vpn_remote.h" />
+    <ClInclude Include="..\core\ipc.h" />
     <ClInclude Include="..\core\tunnel.h" />
     <ClInclude Include="..\core\posture.h" />
     <ClInclude Include="..\..\lib\common\include\crypt.h" />

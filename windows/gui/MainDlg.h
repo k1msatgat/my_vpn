@@ -5,7 +5,7 @@
 #error "include framework.h before MainDlg.h"
 #endif
 
-#include "vpn_session.h"
+#include "vpn_remote.h"
 #include "posture.h"
 #include "PacketStore.h"
 #include "ui_theme.h"
@@ -90,6 +90,10 @@ protected:
 	afx_msg LRESULT OnVpnState(WPARAM wParam, LPARAM lParam);
 	afx_msg LRESULT OnVpnDone(WPARAM wParam, LPARAM lParam);
 	afx_msg LRESULT OnVpnPackets(WPARAM wParam, LPARAM lParam);
+	afx_msg LRESULT OnVpnService(WPARAM wParam, LPARAM lParam);
+	afx_msg LRESULT OnVpnDevice(WPARAM wParam, LPARAM lParam);
+	afx_msg LRESULT OnVpnError(WPARAM wParam, LPARAM lParam);
+	bool ServiceReady();
 
 	DECLARE_MESSAGE_MAP()
 
@@ -152,6 +156,7 @@ private:
 
 	uint32_t m_session_idx;		/* 지금 세션, 없으면 0 */
 	CString m_tun_text;		/* 터널 IP 칸에 적어 둔 글. 같은 값으로 다시 쓰지 않으려고 기억한다 */
+	int m_link;			/* 서비스와의 연결 (vpn_remote_link_t) */
 	bool m_stopping;		/* 해제를 요청하고 워커가 끝나기를 기다리는 중 */
 
 	CListCtrl m_packets;

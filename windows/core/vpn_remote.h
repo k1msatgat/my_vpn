@@ -1,0 +1,58 @@
+#ifndef VPN_REMOTE_H
+#define VPN_REMOTE_H
+
+/* 서비스에 붙어 터널을 조종하는 쪽 (GUI 용).
+ *
+ * vpn_session.h 의 함수들을 그대로 채운다. 차이는 그 뒤에 무엇이 있는가다.
+ *
+ *   vpn_session.c   이 프로세스 안의 워커 스레드가 tunnel_run() 을 돈다
+ *   vpn_remote.c    터널은 서비스(vpn_service.exe)에 있고, 여기서는 파이프로 명령을
+ *                   보내고 사건을 받는다
+ *
+ * 같은 이름으로 채운 것은 GUI 를 거의 그대로 두기 위해서다. 화면은 전과 같이 start /
+ * stop 을 부르고 WM_VPN_* 메시지를 받는다. 둘 중 하나만 링크한다.
+ *
+ * 달라지는 것
+ *   - 이 프로그램을 닫아도 터널은 그대로다. destroy 는 서비스에서 떨어질 뿐이다.
+ *   - 이 프로그램에는 관리자 권한이 필요 없다.
+ *   - 기기의 키를 이 프로그램이 읽지 않는다. 신원은 서비스가 만들고 서비스만 읽을 수 있는
+ *     곳에 둔다. 여기서는 기기 ID 만 안다. */
+
+#include "vpn_session.h"
+#include "device.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* vpn_session.h 의 WM_VPN_* 에 더해 오는 메시지. */
+#define WM_VPN_SERVICE	(WM_APP + 5)	/* wParam = vpn_remote_link_t. 서비스와의 연결이 바뀌었다 */
+#define WM_VPN_DEVICE	(WM_APP + 6)	/* 기기의 등록 상태가 바뀌었다. vpn_remote_device 로 읽는다 */
+#define WM_VPN_ERROR	(WM_APP + 7)	/* wParam = ipc_error_code_t. 서비스가 명령을 받지 않았다 */
+
+typedef enum vpn_remote_link {
+	VPN_REMOTE_DOWN = 0,		/* 서비스에 닿지 못한다 (설치되지 않았거나 멈춰 있다) */
+	VPN_REMOTE_UP,			/* 붙었다 */
+	VPN_REMOTE_MISMATCH,		/* 서비스가 이 프로그램과 다른 빌드다 */
+	VPN_REMOTE_BUSY			/* 다른 프로그램이 이미 서비스에 붙어 있다 */
+} vpn_remote_link_t;
+
+/* 지금 서비스와의 연결 (vpn_remote_link_t). */
+int vpn_remote_link(const vpn_session_t *s);
+
+/* 등록된 기기면 1 을 돌려주고 id 를 채운다. 아니면 (또는 서비스에 붙지 못했으면) 0. */
+int vpn_remote_device(vpn_session_t *s, uint8_t id[DEVICE_ID_LEN]);
+
+/* 등록 코드로 서버에 이 PC 를 올리라고 서비스에 시킨다. tunnel_enroll_result_t 를 돌려준다.
+ * 답이 올 때까지 블로킹한다 (길어야 수십 초). server_ip 는 network byte order. */
+int vpn_remote_enroll(vpn_session_t *s, uint32_t server_ip, uint16_t server_port, const char *code);
+
+/* 코드 없이: 서비스가 새 신원을 만들어 저장하고 ID 와 키를 돌려준다. 관리자가 서버에
+ * 손으로 옮겨 적는다. 키를 볼 수 있는 것은 이 한 번뿐이다. DEVICE_OK / DEVICE_ERROR. */
+int vpn_remote_enroll_manual(vpn_session_t *s, device_t *out);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif
