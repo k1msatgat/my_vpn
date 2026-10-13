@@ -9,6 +9,9 @@
 #define MAX_RULES     32
 #define ACL_ANY_PROTO 0
 
+/* 규칙마다 경로 하나가 나올 수 있다. 내려 줄 자리가 규칙 수보다 적으면 일부가 조용히 빠진다. */
+_Static_assert(MAX_RULES <= NET_MAX_ROUTES, "every allow rule must fit in a pushed route list");
+
 /* 규칙의 action 은 ACL_DENY / ACL_ALLOW 둘뿐이다. ACL_DENY_POSTURE 는 acl_check 의
  * 판정으로만 나온다 — 허용 규칙에 걸렸지만 그 규칙이 요구하는 포스처에 못 미쳤다. */
 enum acl_action {
@@ -39,5 +42,10 @@ int  acl_load(const char *path);
 int  acl_check(const unsigned char *pkt, int len, const posture_report_t *posture);
 void acl_dump(void);
 int  acl_count(void);
+
+/* src 에서 출발하는 패킷을 허용하는 규칙들의 목적지 대역 (터널 대역 안과 any 는 뺀다).
+ * 그 기기에 내려 줄 경로 목록이다. 채운 개수를 돌려준다. */
+int  acl_routes(struct in_addr src, struct in_addr subnet, int subnet_bits,
+		net_route_t *out, int max);
 
 #endif /* ACL_H */

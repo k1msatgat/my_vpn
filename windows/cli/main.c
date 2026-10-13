@@ -10,8 +10,6 @@
 #include "crypt.h"
 #include "device.h"
 
-#define TUN_PREFIX_LEN 24
-
 static HANDLE stop_event;
 
 static BOOL WINAPI on_console_ctrl(DWORD type)
@@ -171,13 +169,14 @@ int main(int argc, char *argv[])
 		return enroll(argc == 3);
 	}
 
-	if (argc != 5) {
-		fprintf(stderr, "usage: %s <adapter-name> <server-ip> <port> <tunnel-ip>\n", argv[0]);
+	if (argc != 4) {
+		fprintf(stderr, "usage: %s <adapter-name> <server-ip> <port>\n", argv[0]);
 		fprintf(stderr, "       %s posture\n", argv[0]);
 		fprintf(stderr, "       %s selftest\n", argv[0]);
 		fprintf(stderr, "       %s enroll [--force]\n", argv[0]);
 		fprintf(stderr, "       %s device\n", argv[0]);
-		fprintf(stderr, " e.g. %s my_vpn 49.247.139.39 9000 10.0.0.3\n", argv[0]);
+		fprintf(stderr, " e.g. %s my_vpn 49.247.139.39 9000\n", argv[0]);
+		fprintf(stderr, " the tunnel address and the routes come from the server\n");
 		return 1;
 	}
 
@@ -187,7 +186,6 @@ int main(int argc, char *argv[])
 	}
 
 	memset(&cfg, 0, sizeof(cfg));
-	cfg.prefix_len = TUN_PREFIX_LEN;
 	cfg.log_packets = 1;
 	cfg.on_log = on_log;
 
@@ -207,11 +205,6 @@ int main(int argc, char *argv[])
 		goto out;
 	}
 	cfg.server_port = (uint16_t)server_port;
-
-	if (inet_pton(AF_INET, argv[4], &cfg.tun_ip) != 1) {
-		fprintf(stderr, "invalid tun ip : %s\n", argv[4]);
-		goto out;
-	}
 
 	if (load_identity(&cfg) < 0) {
 		goto out;

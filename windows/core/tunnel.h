@@ -84,6 +84,14 @@ typedef struct tunnel_packet {
 	uint8_t deny_reason;		/* DENY 의 deny_reason_t, 아니면 0 */
 	posture_report_t posture;
 
+	/* 서버가 정해 준 터널 설정. 받아들인 RES_HANDSHAKE 와 서버의 KEEPALIVE 에서 채워진다.
+	 * 경로 목록 전체는 싣지 않는다 (패킷마다 복사되는 구조체다). 개수만 올리고 내용은
+	 * 로그에 남긴다. */
+	uint8_t has_netcfg;
+	uint8_t cfg_prefix_len;
+	uint8_t cfg_routes;
+	struct in_addr cfg_tun_ip;
+
 	uint8_t snap[TUNNEL_SNAP_LEN];
 	uint8_t snap_len;
 } tunnel_packet_t;
@@ -94,8 +102,6 @@ typedef struct tunnel_config {
 	wchar_t adapter_name[TUNNEL_ADAPTER_NAME_LEN];
 	struct in_addr server_ip;
 	uint16_t server_port;		/* host byte order */
-	struct in_addr tun_ip;
-	uint8_t prefix_len;		/* 터널 대역 prefix, 예) 24 */
 
 	/* 기기 신원. 호출자가 device_load() 로 읽어 채운다. 포인터가 아니라 배열로 둬서
 	 * cfg 를 구조체째 복사해도 그대로 따라온다. */

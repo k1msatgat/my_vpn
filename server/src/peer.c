@@ -189,3 +189,18 @@ void peer_dump(void)
 	printf("------------------\n");
 }
 
+
+/* 이 기기가 열어 둔 세션. 없으면 NULL. 세션은 터널 주소로 찾는 것이 보통이지만, 관리자가
+ * 기기의 주소를 바꾼 뒤에는 같은 기기의 세션이 예전 주소 아래에 남아 있다. */
+peer_t *peer_find_device(const uint8_t id[DEVICE_ID_LEN])
+{
+	int i;
+
+	for (i = 0; i < MAX_PEERS; i++) {
+		if (peers[i].used && memcmp(peers[i].device_id, id, DEVICE_ID_LEN) == 0) {
+			return &peers[i];
+		}
+	}
+
+	return NULL;
+}

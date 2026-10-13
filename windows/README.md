@@ -14,7 +14,7 @@
 | 핸드셰이크 대기 | `SO_RCVTIMEO` 블로킹 `recvfrom` | 같은 이벤트 대기 — 대기 중에도 종료 요청에 바로 반응 |
 | 종료 | `SIGINT` / `SIGTERM` | manual-reset 이벤트 (콘솔은 Ctrl+C, GUI는 해제 버튼) |
 | 시간 | `clock_gettime`, `time` | `GetTickCount64` |
-| IP / MTU 설정 | `ip addr add`, `ip link set mtu` | 프로그램이 직접 설정 (`CreateUnicastIpAddressEntry`, `SetIpInterfaceEntry`) |
+| IP / MTU / 경로 설정 | `ip addr add`, `ip link set mtu` | 서버가 내려 준 값을 프로그램이 직접 설정 (`CreateUnicastIpAddressEntry`, `SetIpInterfaceEntry`, `CreateIpForwardEntry2`) |
 | keepalive 트리거 | 송신 유휴 10초 | 10초마다, 포스처가 바뀌면 즉시 (아래 참고) |
 | 터널에 넣지 않는 패킷 | — (tun0이 조용함) | 멀티캐스트 / 브로드캐스트 목적지 |
 
@@ -307,19 +307,19 @@ vpn_client.exe selftest
 2. Visual Studio 2022 이상으로 `windows/my_vpn.sln`을 열어 x64로 빌드합니다. `wintun.dll`은 빌드 후 실행 파일 옆으로 복사됩니다.
    GUI(`vpn_gui`)는 Visual Studio 설치 관리자의 개별 구성 요소에서 **"최신 v143(또는 v145) 빌드 도구용 C++ MFC"** 가 필요합니다
    (없으면 `error MSB8041`). 콘솔 클라이언트(`vpn_client`)는 MFC 없이 빌드됩니다.
-3. **관리자 권한**으로 실행합니다. 어댑터 생성과 IP / MTU 설정까지 프로그램이 합니다.
+3. **관리자 권한**으로 실행합니다. 어댑터 생성과 IP / MTU / 경로 설정까지 프로그램이 합니다. 터널 주소와 경로는 적지 않습니다 — 서버가 수락에 실어 줍니다.
    GUI는 매니페스트에 `requireAdministrator`가 박혀 있어 실행할 때 Windows가 권한 상승을 먼저 묻습니다.
 
 ```
 :: 콘솔
 windows\build\Debug\vpn_client.exe <adapter-name> <server-ip> <port> <tunnel-ip>
-:: 예) vpn_client.exe my_vpn 203.0.113.10 9000 10.0.0.3
+:: 예) vpn_client.exe my_vpn 203.0.113.10 9000
 
-:: GUI — 같은 값을 창에서 입력하고 [연결]
+:: GUI — 같은 값을 창에서 입력하고 [연결]. 터널 IP 칸에는 서버가 정해 준 주소가 나온다
 windows\build\Debug\vpn_gui.exe
 ```
 
-- 터널 대역은 `/24`로 설정합니다. 온링크 라우트(`10.0.0.0/24`)는 주소를 붙이면 Windows가 직접 넣어주므로 따로 추가하지 않습니다.
+- 터널 대역의 prefix는 서버가 내려 준 값을 씁니다. 온링크 라우트(`10.0.0.0/24`)는 주소를 붙이면 Windows가 직접 넣어주므로 따로 추가하지 않습니다.
 - 플랫폼 툴셋은 하드코딩하지 않고 설치된 VS의 기본값(`$(DefaultPlatformToolset)` — VS2022는 v143, VS2026은 v145)을 따릅니다.
 - 소스는 Linux와 함께 쓰므로 UTF-8(BOM 없음)입니다. MSVC는 기본적으로 시스템 코드페이지로 읽어 C4819가 나고
   한글 와이드 문자열 리터럴도 깨지므로 `/utf-8`로 컴파일합니다. `.rc`는 `#pragma code_page(65001)`로 같은 문제를 막습니다.

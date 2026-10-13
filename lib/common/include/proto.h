@@ -14,7 +14,7 @@ extern "C" {
 #define PROTO_STATIC_ASSERT _Static_assert
 #endif
 
-#define PROTOCOL_VERSION 3 /* 서버와 클라이언트가 같은 값을 쓴다. 2: 기기 인증, 3: 세션 암호화 */
+#define PROTOCOL_VERSION 4 /* 서버와 클라이언트가 같은 값을 쓴다. 2: 기기 인증, 3: 세션 암호화, 4: 서버가 터널 설정을 내려 준다 */
 
 #define TUN_MTU		1400
 #define BUF_SIZE	2048
@@ -44,15 +44,15 @@ extern "C" {
  *
  * 핸드셰이크는 네 메시지다. 모두 msg_header(8B) 뒤에 아래 페이로드가 붙는다.
  *
- *   C -> S  REQ_HANDSHAKE  tun_ip(4) | device_id(16)
+ *   C -> S  REQ_HANDSHAKE  device_id(16)
  *   S -> C  CHALLENGE      nonce(16)
- *   C -> S  AUTH           tun_ip(4) | device_id(16) | nonce(16) | pub_c(64) | posture(8) | mac(32)
- *   S -> C  RES_HANDSHAKE  pub_s(64) | tag(16)          헤더의 session_idx 가 세션 번호
+ *   C -> S  AUTH           device_id(16) | nonce(16) | pub_c(64) | posture(8) | mac(32)
+ *   S -> C  RES_HANDSHAKE  pub_s(64) | 암호화된 net_config | tag(16)     헤더의 session_idx 가 세션 번호
  *        또는 DENY          reason(1) | mac(32)          헤더의 session_idx 는 0
  *
- * AUTH 의 mac 은 HMAC-SHA256(기기 키, 헤더부터 mac 앞까지 116B) 이다. 서버가 매번 새로
+ * AUTH 의 mac 은 HMAC-SHA256(기기 키, 헤더부터 mac 앞까지 112B) 이다. 서버가 매번 새로
  * 뽑은 nonce 가 들어가므로 예전 AUTH 를 녹화해 다시 보내도 통과하지 못한다. AUTH 가
- * tun_ip 와 device_id 를 다시 싣는 것은 서버가 출발지 주소로 "진행 중인 핸드셰이크"를
+ * device_id 를 다시 싣는 것은 서버가 출발지 주소로 "진행 중인 핸드셰이크"를
  * 찾지 않아도 되게 하려는 것이다. NAT 뒤에서는 두 메시지 사이에 출발지 포트가 바뀔 수 있다.
  *
  * pub_c / pub_s 는 이번 핸드셰이크에만 쓰고 버리는 ECDH P-256 공개키다. 둘로 합의한
@@ -72,7 +72,7 @@ extern "C" {
  *
  *   DATA       C <-> S   암호문 = inner IPv4 패킷
  *   KEEPALIVE  C  -> S   암호문 = posture(8)       포스처 재보고
- *              S  -> C   암호문 없음
+ *              S  -> C   암호문 = net_config      지금의 터널 설정
  *   DENY       S  -> C   암호문 = reason(1)        세션 중의 거절. 헤더의 session_idx 는 그 세션
  *
  * AES-256-GCM 이고, 앞의 16B(헤더와 counter)는 암호화하지 않지만 tag 가 함께 덮는다.
@@ -95,7 +95,7 @@ typedef enum MSG_TYPE {
 typedef enum DENY_REASON {
 	DENY_UNKNOWN_DEVICE = 1,	/* 등록되지 않은 device_id */
 	DENY_BAD_AUTH,			/* nonce 불일치 / 만료, mac 불일치 */
-	DENY_TUN_IP,			/* 그 기기에 배정된 터널 IP 가 아니다 */
+	DENY_TUN_IP,			/* (버전 3 까지) 그 기기에 배정된 터널 IP 가 아니다. 이제 터널 IP 는 서버가 정해 내려 주므로 보내지 않는다 */
 	DENY_POSTURE			/* 인증은 됐지만 포스처가 정책에 못 미친다 */
 } deny_reason_t;
 
@@ -116,11 +116,10 @@ typedef struct posture_report {
 #define ECDH_PUB_LEN	64	/* P-256 공개키 X(32) | Y(32) */
 #define AEAD_TAG_LEN	16
 
-#define REQ_HS_PAYLOAD_LEN	(IP_ADDR_LEN + DEVICE_ID_LEN)
+#define REQ_HS_PAYLOAD_LEN	DEVICE_ID_LEN
 
 /* AUTH 페이로드 안에서의 위치 (헤더 뒤부터). */
-#define AUTH_OFF_TUN_IP		0
-#define AUTH_OFF_DEVICE_ID	(AUTH_OFF_TUN_IP + IP_ADDR_LEN)
+#define AUTH_OFF_DEVICE_ID	0
 #define AUTH_OFF_NONCE		(AUTH_OFF_DEVICE_ID + DEVICE_ID_LEN)
 #define AUTH_OFF_PUB		(AUTH_OFF_NONCE + AUTH_NONCE_LEN)
 #define AUTH_OFF_POSTURE	(AUTH_OFF_PUB + ECDH_PUB_LEN)
@@ -164,6 +163,48 @@ int data_decode(const unsigned char *buf, size_t len, struct data_header *d);
 
 int posture_encode(unsigned char *buf, size_t cap, const struct posture_report *p);
 int posture_decode(const unsigned char *buf, size_t len, struct posture_report *p);
+
+/* 터널 설정. 서버가 정해서 내려 주고 클라이언트는 받은 대로 맞춘다.
+ *
+ *   tun_ip(4) | prefix_len(1) | n_routes(1) | mtu(2) | n_routes x ( addr(4) | prefix_len(1) )
+ *
+ * 전에는 클라이언트가 터널 IP 를 직접 적어야 했다. 서버가 이미 아는 값을 사용자가 한 번
+ * 더 똑같이 입력하는 것이고, 틀리면 거절당할 뿐이다. 그리고 "무엇을 터널로 보낼
+ * 것인가"는 정하는 곳이 없어서 터널 대역 말고는 갈 수 없었다. 둘 다 서버의 정책에서
+ * 나와야 하는 값이다 — 관리자가 한 곳을 고치면 붙어 있는 기기가 따라오게 한다.
+ *
+ * RES_HANDSHAKE 와 서버의 keepalive 응답에 실린다. keepalive 마다 통째로 다시 보내므로
+ * 클라이언트는 받은 것과 지금 적용한 것을 비교하기만 하면 된다. 바뀐 것만 따로 알리는
+ * 메시지를 두면 그 한 통이 사라졌을 때를 위한 확인과 재전송이 필요해진다.
+ *
+ * 주소는 네트워크 바이트 순서 그대로 둔다 (in_addr.s_addr 와 같은 모양). */
+#define NET_MAX_ROUTES	32
+
+typedef struct net_route {
+	uint32_t addr;		/* 대역의 주소 */
+	uint8_t prefix_len;
+} net_route_t;
+
+typedef struct net_config {
+	uint32_t tun_ip;	/* 이 기기의 터널 주소 */
+	uint8_t prefix_len;	/* 터널 대역의 prefix */
+	uint8_t n_routes;
+	uint16_t mtu;
+	net_route_t routes[NET_MAX_ROUTES];	/* 터널 대역 말고 터널로 보낼 대역 */
+} net_config_t;
+
+#define NET_CONFIG_HEAD_LEN	8
+#define NET_ROUTE_LEN		5
+#define NET_CONFIG_MAX_LEN	(NET_CONFIG_HEAD_LEN + NET_MAX_ROUTES * NET_ROUTE_LEN)
+
+/* 쓴 길이를 돌려준다. 자리가 모자라거나 값이 범위를 벗어나면 -1. */
+int net_config_encode(unsigned char *buf, size_t cap, const net_config_t *c);
+
+/* len 은 설정 하나의 길이와 정확히 같아야 한다. 맞지 않거나 값이 범위를 벗어나면 -1. */
+int net_config_decode(const unsigned char *buf, size_t len, net_config_t *c);
+
+/* 내용이 같으면 1. 구조체의 빈 자리는 보지 않는다. */
+int net_config_equal(const net_config_t *a, const net_config_t *b);
 
 #ifdef __cplusplus
 }

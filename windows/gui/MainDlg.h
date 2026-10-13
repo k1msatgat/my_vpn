@@ -151,6 +151,7 @@ private:
 	int m_posture_ticks;
 
 	uint32_t m_session_idx;		/* 지금 세션, 없으면 0 */
+	CString m_tun_text;		/* 터널 IP 칸에 적어 둔 글. 같은 값으로 다시 쓰지 않으려고 기억한다 */
 	bool m_stopping;		/* 해제를 요청하고 워커가 끝나기를 기다리는 중 */
 
 	CListCtrl m_packets;

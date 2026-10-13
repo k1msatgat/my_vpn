@@ -53,6 +53,7 @@ peer_t *peer_register(struct in_addr inner,
 peer_t *peer_find_idx(uint32_t idx);
 void peer_drop(peer_t *peer);
 peer_t *peer_lookup(struct in_addr inner);
+peer_t *peer_find_device(const uint8_t id[DEVICE_ID_LEN]);
 void peer_dump(void);
 
 /* slot i 의 세션. 비어 있으면 NULL. 상태를 내보낼 때 표를 훑는 데 쓴다. */

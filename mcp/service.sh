@@ -13,7 +13,9 @@ SERVER=/opt/my_vpn/server/bin/vpn_server
 case "${1:-}" in
 run)
 	# 상태 소켓은 RuntimeDirectory(/run/my_vpn, root 전용) 안에 둔다. my_vpn_ctl 이 읽는다.
-	args=(-s /run/my_vpn/status.sock "$PORT" "$ETC/devices.conf")
+	# -n / -m 은 아래 tun-up 이 tun 에 붙이는 값과 같아야 한다. 서버가 그대로 클라이언트에
+	# 내려 준다.
+	args=(-s /run/my_vpn/status.sock -n "$PREFIX" -m "$MTU" "$PORT" "$ETC/devices.conf")
 
 	# ACL 은 파일이 있으면 켜진 것이다. 켜고 끄는 것은 시작할 때만 정해지므로, 어떤
 	# 내용으로 떴는지 적어 둔다 — my_vpn_ctl 이 지금 파일과 비교해 재시작이 필요한지 안다.

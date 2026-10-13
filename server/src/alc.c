@@ -313,3 +313,68 @@ void acl_dump(void)
 	}
 }
 
+
+/* src 에서 출발하는 패킷을 허용하는 규칙들의 목적지 대역을 모은다. 서버가 그 기기에
+ * "이 대역은 터널로 보내라"고 내려 줄 목록이다.
+ *
+ * 경로를 따로 적는 설정을 두지 않고 ACL 에서 뽑는다. 어디로 갈 수 있는지는 이미 ACL 이
+ * 말하고 있다. 경로 목록을 따로 두면 둘이 어긋난다 — 경로는 있는데 규칙이 없어 터널로
+ * 들어간 패킷이 버려지거나, 규칙은 있는데 경로가 없어 터널로 가지도 않는다.
+ *
+ * 빼는 것
+ *   deny 규칙            막을 곳을 터널로 끌어올 이유가 없다
+ *   목적지가 any 인 규칙  모든 트래픽을 터널로 보내라는 뜻이 된다. 서버가 인터넷으로
+ *                        나가는 길까지 맡아야 하는데 그건 이 프로젝트가 하려는 일이
+ *                        아니다. 접근시킬 대역은 적어서 연다
+ *   터널 대역 안의 목적지 클라이언트가 터널 주소를 받으면 이미 그리로 간다
+ *
+ * 위쪽의 deny 가 allow 의 일부를 가리고 있어도 그 대역은 그대로 내려간다. 경로는 "어디를
+ * 터널로 보낼 것인가"이고, 보낸 뒤 통과시킬지는 패킷마다 acl_check 가 정한다.
+ *
+ * 채운 개수를 돌려준다. 규칙 하나가 대역 하나를 내므로 규칙 수(MAX_RULES)만큼의 자리를
+ * 주면 넘치지 않는다. */
+int acl_routes(struct in_addr src, struct in_addr subnet, int subnet_bits,
+		net_route_t *out, int max)
+{
+	struct in_addr subnet_mask;
+	const struct acl_rule *r;
+	int bits;
+	int n = 0;
+	int i, k;
+
+	subnet_mask.s_addr = subnet_bits == 0 ? 0 : htonl(0xFFFFFFFFu << (32 - subnet_bits));
+
+	for (i = 0; i < nrules; i++) {
+		r = &rules[i];
+
+		if (r->action != ACL_ALLOW ||
+				(src.s_addr & r->src_mask.s_addr) != r->src_addr.s_addr ||
+				r->dst_mask.s_addr == 0) {
+			continue;
+		}
+
+		bits = mask_bits(r->dst_mask);
+		if (bits >= subnet_bits && (r->dst_addr.s_addr & subnet_mask.s_addr) == subnet.s_addr) {
+			continue;
+		}
+
+		for (k = 0; k < n; k++) {
+			if (out[k].addr == r->dst_addr.s_addr && out[k].prefix_len == bits) {
+				break;
+			}
+		}
+		if (k < n) {
+			continue;
+		}
+
+		if (n == max) {
+			break;
+		}
+
+		out[n].addr = r->dst_addr.s_addr;
+		out[n].prefix_len = (uint8_t)bits;
+		n++;
+	}
+
+	return n;
+}

@@ -3,7 +3,7 @@
 
 #include "secure.h"
 
-static const char SESSION_LABEL[] = "my_vpn v3 session";
+static const char SESSION_LABEL[] = "my_vpn v4 session";
 static const char DENY_LABEL[] = "my_vpn deny";
 
 /* ---- HKDF (RFC 5869) --------------------------------------------------------

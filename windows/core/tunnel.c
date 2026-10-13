@@ -42,7 +42,6 @@ static const GUID ADAPTER_GUID =
 typedef struct session {
 	uint32_t idx;
 	secure_session_t secure;	/* 세션 키, 보낼 counter, 받은 counter 의 창 */
-	struct in_addr tun_ip;
 	struct sockaddr_in server;
 	uint64_t last_rx_ms;
 	uint64_t last_tx_ms;
@@ -62,6 +61,11 @@ typedef struct tunnel {
 	WINTUN_ADAPTER_HANDLE adapter;
 	WINTUN_SESSION_HANDLE tun;
 	uint32_t bcast;		/* 터널 대역의 브로드캐스트 주소 (network byte order) */
+	NET_LUID luid;		/* 어댑터. 주소와 경로를 넣고 뺄 때 쓴다 */
+	net_config_t want;	/* 서버가 마지막으로 준 터널 설정 */
+	net_config_t applied;	/* 어댑터에 실제로 넣어 둔 것 */
+	int has_applied;
+	int readdress;		/* 서버가 터널 주소를 바꿨다. 다시 핸드셰이크해서 새 주소로 세션을 연다 */
 	uint64_t t0_ms;		/* 패킷 타임스탬프 기준점 */
 	uint64_t seq;		/* 패킷 일련번호 */
 	session_t session;
@@ -131,32 +135,142 @@ static void set_state(const tunnel_t *t, tunnel_state_t state)
 }
 
 /* ---- adapter / socket setup ---------------------------------------------- */
-/* Linux의 `ip addr add` / `ip link set mtu` 에 해당한다. */
-static int adapter_configure(tunnel_t *t)
+/* 터널 대역의 브로드캐스트 주소. prefix가 /32면 브로드캐스트가 없으므로 0을 돌려준다
+ * (dst 0.0.0.0은 어차피 전달 대상이 아니라 비교에 써도 무해하다). */
+static uint32_t subnet_broadcast(uint32_t addr, uint8_t prefix_len)
 {
-	MIB_UNICASTIPADDRESS_ROW addr;
-	MIB_IPINTERFACE_ROW iface;
-	NET_LUID luid;
+	uint32_t mask;
+
+	if (prefix_len == 0) {
+		return 0xFFFFFFFFu;
+	}
+	if (prefix_len >= 32) {
+		return 0;
+	}
+
+	mask = htonl(0xFFFFFFFFu << (32 - prefix_len));
+
+	return (addr & mask) | ~mask;
+}
+
+static const char *ip4(uint32_t addr, char *dst)
+{
+	struct in_addr a;
+
+	a.s_addr = addr;
+
+	return inet_ntop(AF_INET, &a, dst, INET_ADDRSTRLEN);
+}
+
+/* 서버가 준 설정을 그대로 쓸 수 있는가. 서버는 인증된 상대지만, 받은 값을 OS 에 넣기
+ * 전에 말이 되는지는 본다. 터널 주소가 없거나 MTU 가 버퍼보다 크면 어댑터를 올려도
+ * 통하지 않는다. */
+static int netcfg_usable(const net_config_t *c)
+{
+	return c->tun_ip != 0 && c->prefix_len >= 8 && c->prefix_len <= 30 &&
+		c->mtu >= 576 && c->mtu <= BUF_SIZE - PKT_OVERHEAD;
+}
+
+/* 이 대역을 터널로 돌려도 되는가.
+ *
+ *   /0                모든 트래픽을 터널로 보내라는 뜻이다. 서버가 그런 값을 줄 일은
+ *                     없지만(alc.c 의 acl_routes), 준다고 따르지는 않는다.
+ *   서버 주소를 덮는 대역  서버로 가는 UDP 가 터널로 들어간다. 터널 패킷을 싣고 가야
+ *                     할 길이 터널 자신이 되어, 넣는 순간 연결이 끊긴다. */
+static int route_usable(const tunnel_t *t, const net_route_t *r)
+{
+	uint32_t mask;
+
+	if (r->prefix_len == 0) {
+		return 0;
+	}
+
+	mask = htonl(0xFFFFFFFFu << (32 - r->prefix_len));
+
+	return (t->cfg->server_ip.s_addr & mask) != r->addr;
+}
+
+static void route_row(const tunnel_t *t, const net_route_t *r, MIB_IPFORWARD_ROW2 *row)
+{
+	InitializeIpForwardEntry(row);
+	row->InterfaceLuid = t->luid;
+	row->DestinationPrefix.Prefix.Ipv4.sin_family = AF_INET;
+	row->DestinationPrefix.Prefix.Ipv4.sin_addr.s_addr = r->addr;
+	row->DestinationPrefix.PrefixLength = r->prefix_len;
+	/* 다음 홉을 0.0.0.0 으로 두면 "이 인터페이스에 바로 붙어 있다"는 뜻이다. 터널은
+	 * 점대점이라 게이트웨이가 따로 없고, 어댑터에 넣으면 서버가 받는다. */
+	row->NextHop.Ipv4.sin_family = AF_INET;
+	row->Metric = 0;
+	row->Protocol = MIB_IPPROTO_NETMGMT;
+}
+
+static void route_add(tunnel_t *t, const net_route_t *r)
+{
+	char ib[INET_ADDRSTRLEN];
+	MIB_IPFORWARD_ROW2 row;
 	DWORD err;
 
-	WintunGetAdapterLUID(t->adapter, &luid);
-
-	InitializeUnicastIpAddressEntry(&addr);
-	addr.InterfaceLuid = luid;
-	addr.Address.Ipv4.sin_family = AF_INET;
-	addr.Address.Ipv4.sin_addr = t->cfg->tun_ip;
-	addr.OnLinkPrefixLength = t->cfg->prefix_len;
-	addr.DadState = IpDadStatePreferred;
-
-	err = CreateUnicastIpAddressEntry(&addr);
-	if (err != NO_ERROR && err != ERROR_OBJECT_ALREADY_EXISTS) {
-		tlog(t, "CreateUnicastIpAddressEntry failed: %lu", err);
-		return -1;
+	if (!route_usable(t, r)) {
+		tlog(t, "[cfg] route %s/%u ignored (%s)", ip4(r->addr, ib), r->prefix_len,
+				r->prefix_len == 0 ? "default route" : "it covers the server address");
+		return;
 	}
+
+	route_row(t, r, &row);
+	err = CreateIpForwardEntry2(&row);
+	if (err != NO_ERROR && err != ERROR_OBJECT_ALREADY_EXISTS) {
+		tlog(t, "[cfg] route %s/%u failed: %lu", ip4(r->addr, ib), r->prefix_len, err);
+		return;
+	}
+
+	tlog(t, "[cfg] route + %s/%u", ip4(r->addr, ib), r->prefix_len);
+}
+
+static void route_delete(tunnel_t *t, const net_route_t *r)
+{
+	char ib[INET_ADDRSTRLEN];
+	MIB_IPFORWARD_ROW2 row;
+
+	if (!route_usable(t, r)) {
+		return;		/* 넣은 적이 없다 */
+	}
+
+	route_row(t, r, &row);
+	DeleteIpForwardEntry2(&row);
+	tlog(t, "[cfg] route - %s/%u", ip4(r->addr, ib), r->prefix_len);
+}
+
+static int route_in(const net_config_t *c, const net_route_t *r)
+{
+	int i;
+
+	for (i = 0; i < c->n_routes; i++) {
+		if (c->routes[i].addr == r->addr && c->routes[i].prefix_len == r->prefix_len) {
+			return 1;
+		}
+	}
+
+	return 0;
+}
+
+static void address_row(const tunnel_t *t, const net_config_t *c, MIB_UNICASTIPADDRESS_ROW *addr)
+{
+	InitializeUnicastIpAddressEntry(addr);
+	addr->InterfaceLuid = t->luid;
+	addr->Address.Ipv4.sin_family = AF_INET;
+	addr->Address.Ipv4.sin_addr.s_addr = c->tun_ip;
+	addr->OnLinkPrefixLength = c->prefix_len;
+	addr->DadState = IpDadStatePreferred;
+}
+
+static int mtu_set(tunnel_t *t, uint16_t mtu)
+{
+	MIB_IPINTERFACE_ROW iface;
+	DWORD err;
 
 	InitializeIpInterfaceEntry(&iface);
 	iface.Family = AF_INET;
-	iface.InterfaceLuid = luid;
+	iface.InterfaceLuid = t->luid;
 
 	err = GetIpInterfaceEntry(&iface);
 	if (err != NO_ERROR) {
@@ -164,7 +278,7 @@ static int adapter_configure(tunnel_t *t)
 		return -1;
 	}
 
-	iface.NlMtu = TUN_MTU;
+	iface.NlMtu = mtu;
 	iface.SitePrefixLength = 0; /* IPv4에서는 0이어야 SetIpInterfaceEntry가 받아준다 */
 
 	err = SetIpInterfaceEntry(&iface);
@@ -172,6 +286,66 @@ static int adapter_configure(tunnel_t *t)
 		tlog(t, "SetIpInterfaceEntry failed: %lu", err);
 		return -1;
 	}
+
+	return 0;
+}
+
+/* 어댑터를 서버가 준 설정(t->want)에 맞춘다. Linux 의 `ip addr add` / `ip link set mtu` /
+ * `ip route add` 에 해당한다.
+ *
+ * 처음 한 번만 부르는 것이 아니다. 다시 핸드셰이크했을 때와 keepalive 응답으로 새 설정이
+ * 왔을 때에도 부른다. 그래서 "설정을 넣는다"가 아니라 "지금 넣어 둔 것(t->applied)과 다른
+ * 부분만 고친다"로 짰다. 통째로 지우고 다시 넣으면 바뀌지 않은 경로까지 잠깐 사라져
+ * 그 사이의 연결이 끊긴다. */
+static int netcfg_apply(tunnel_t *t)
+{
+	const net_config_t *want = &t->want;
+	net_config_t *cur = &t->applied;
+	MIB_UNICASTIPADDRESS_ROW addr;
+	char ib[INET_ADDRSTRLEN];
+	DWORD err;
+	int i;
+
+	if (!t->adapter) {
+		return 0;	/* 아직 어댑터가 없다. 만든 뒤에 다시 부른다 */
+	}
+
+	if (!t->has_applied || cur->tun_ip != want->tun_ip || cur->prefix_len != want->prefix_len) {
+		if (t->has_applied) {
+			address_row(t, cur, &addr);
+			DeleteUnicastIpAddressEntry(&addr);
+		}
+
+		address_row(t, want, &addr);
+		err = CreateUnicastIpAddressEntry(&addr);
+		if (err != NO_ERROR && err != ERROR_OBJECT_ALREADY_EXISTS) {
+			tlog(t, "CreateUnicastIpAddressEntry failed: %lu", err);
+			return -1;
+		}
+		tlog(t, "[cfg] address %s/%u", ip4(want->tun_ip, ib), want->prefix_len);
+	}
+
+	if ((!t->has_applied || cur->mtu != want->mtu) && mtu_set(t, want->mtu) < 0) {
+		return -1;
+	}
+
+	/* 경로 하나가 들어가지 않는 것은 터널 전체를 내릴 이유가 아니다. 그 대역만 못 간다. */
+	if (t->has_applied) {
+		for (i = 0; i < cur->n_routes; i++) {
+			if (!route_in(want, &cur->routes[i])) {
+				route_delete(t, &cur->routes[i]);
+			}
+		}
+	}
+	for (i = 0; i < want->n_routes; i++) {
+		if (!t->has_applied || !route_in(cur, &want->routes[i])) {
+			route_add(t, &want->routes[i]);
+		}
+	}
+
+	*cur = *want;
+	t->has_applied = 1;
+	t->bcast = subnet_broadcast(cur->tun_ip, cur->prefix_len);
 
 	return 0;
 }
@@ -266,24 +440,6 @@ static int from_server(const session_t *session, const struct sockaddr_in *from)
 }
 
 /* ---- outbound filter ----------------------------------------------------- */
-/* 터널 대역의 브로드캐스트 주소. prefix가 /32면 브로드캐스트가 없으므로 0을 돌려준다
- * (dst 0.0.0.0은 어차피 전달 대상이 아니라 비교에 써도 무해하다). */
-static uint32_t subnet_broadcast(struct in_addr addr, uint8_t prefix_len)
-{
-	uint32_t mask;
-
-	if (prefix_len == 0) {
-		return 0xFFFFFFFFu;
-	}
-	if (prefix_len >= 32) {
-		return 0;
-	}
-
-	mask = htonl(0xFFFFFFFFu << (32 - prefix_len));
-
-	return (addr.s_addr & mask) | ~mask;
-}
-
 /* 서버는 inner dst로 피어를 1:1로 찾아(peer_lookup) 그 피어에게만 보내므로,
  * 멀티캐스트나 브로드캐스트는 애초에 전달할 상대가 없다.
  *
@@ -447,6 +603,14 @@ static void posture_report_now(posture_report_t *report)
 	report->antivirus = posture_wire_state(p.antivirus);
 }
 
+static void pkt_netcfg(tunnel_packet_t *p, const net_config_t *c)
+{
+	p->has_netcfg = 1;
+	p->cfg_tun_ip.s_addr = c->tun_ip;
+	p->cfg_prefix_len = c->prefix_len;
+	p->cfg_routes = c->n_routes;
+}
+
 /* 핸드셰이크 패킷 하나를 UI 로 올린다. */
 static void hs_emit(tunnel_t *t, int dir, const msg_header_t *h, const uint8_t *wire, int len,
 		const posture_report_t *posture, uint8_t deny_reason)
@@ -460,6 +624,11 @@ static void hs_emit(tunnel_t *t, int dir, const msg_header_t *h, const uint8_t *
 	if (posture) {
 		pkt.has_posture = 1;
 		pkt.posture = *posture;
+	}
+	/* 받아들인 수락에는 서버가 정해 준 터널 설정이 들어 있다 (accept_hs_response 가
+	 * t->want 에 풀어 둔다). 화면이 "어떤 주소를 받았는가"를 여기서 읽는다. */
+	if (dir == TUNNEL_DIR_RX && h->type == MSG_TYPE_RES_HANDSHAKE) {
+		pkt_netcfg(&pkt, &t->want);
 	}
 	pkt.wire_len = (uint32_t)len;
 	pkt_snap(&pkt, wire, (uint32_t)len);
@@ -506,7 +675,7 @@ static int hs_recv(tunnel_t *t, uint64_t deadline, uint8_t *buf, int cap, msg_he
 	}
 }
 
-/* REQ_HANDSHAKE: tun_ip(4) | device_id(16) */
+/* REQ_HANDSHAKE: device_id(16) */
 static void send_hs_request(tunnel_t *t)
 {
 	uint8_t req[sizeof(msg_header_t) + REQ_HS_PAYLOAD_LEN];
@@ -518,8 +687,6 @@ static void send_hs_request(tunnel_t *t)
 	h.type = MSG_TYPE_REQ_HANDSHAKE;
 
 	off = msg_encode(req, sizeof(req), &h);
-	memcpy(req + off, &t->session.tun_ip, IP_ADDR_LEN);
-	off += IP_ADDR_LEN;
 	memcpy(req + off, t->cfg->device_id, DEVICE_ID_LEN);
 	off += DEVICE_ID_LEN;
 
@@ -541,7 +708,7 @@ static void hs_reset(handshake_t *hs)
 	memset(hs, 0, sizeof(*hs));
 }
 
-/* AUTH: tun_ip(4) | device_id(16) | nonce(16) | pub_c(64) | posture(8) | mac(32)
+/* AUTH: device_id(16) | nonce(16) | pub_c(64) | posture(8) | mac(32)
  *
  * mac 은 헤더부터 그 앞까지 전체를 덮는다. 서버가 방금 준 nonce 가 들어가므로 이
  * 패킷은 이번 핸드셰이크에만 유효하고, 포스처도 서명 범위 안이라 전달 도중에
@@ -562,7 +729,6 @@ static int send_hs_auth(tunnel_t *t, handshake_t *hs, const uint8_t *nonce)
 	h.type = MSG_TYPE_AUTH;
 	msg_encode(auth, sizeof(hs->auth), &h);
 
-	memcpy(body + AUTH_OFF_TUN_IP, &t->session.tun_ip, IP_ADDR_LEN);
 	memcpy(body + AUTH_OFF_DEVICE_ID, t->cfg->device_id, DEVICE_ID_LEN);
 	memcpy(body + AUTH_OFF_NONCE, nonce, AUTH_NONCE_LEN);
 
@@ -594,15 +760,20 @@ static int send_hs_auth(tunnel_t *t, handshake_t *hs, const uint8_t *nonce)
 	return 0;
 }
 
-/* RES_HANDSHAKE: pub_s(64) | tag(16)
+/* RES_HANDSHAKE: pub_s(64) | 암호화된 net_config | tag(16)
  *
  * 서버의 일회용 공개키와 내 것으로 합의하고, 거기에 기기 키를 섞어 세션 키를 뽑는다.
  * tag 가 맞으면 상대도 같은 키에 닿았다는 뜻이고, 그러려면 이 기기의 키를 알아야 한다.
- * 맞지 않으면 서버가 보낸 것이 아니므로 버린다. 0 을 돌려주면 세션이 열린 것이다. */
+ * 맞지 않으면 서버가 보낸 것이 아니므로 버린다. 0 을 돌려주면 세션이 열린 것이다.
+ *
+ * 수락에는 서버가 이 기기에 정해 준 터널 설정이 들어 있다. 주소와 경로를 사용자가
+ * 적는 것이 아니라 서버의 정책에서 받는다. */
 static int accept_hs_response(tunnel_t *t, handshake_t *hs, uint8_t *res, int len, uint32_t session_idx)
 {
 	uint8_t secret[VPN_SECRET_LEN];
 	secure_keys_t keys;
+	net_config_t cfg;
+	int cfg_len;
 	int ret = -1;
 
 	if (crypt_ecdh_derive(hs->ecdh, res + sizeof(msg_header_t), secret) < 0 ||
@@ -610,7 +781,15 @@ static int accept_hs_response(tunnel_t *t, handshake_t *hs, uint8_t *res, int le
 		goto out;
 	}
 
-	if (secure_res_open(keys.res, res, (size_t)len) < 0) {
+	cfg_len = secure_res_open(keys.res, res, (size_t)len);
+	if (cfg_len < 0) {
+		goto out;
+	}
+
+	/* 여기부터는 서버가 보낸 것이 맞다. 그래도 쓸 수 없는 설정이면 세션을 열지 않는다 —
+	 * 주소 없이 열린 터널은 아무 데도 닿지 않는데 화면에는 "연결됨"으로 보인다. */
+	if (net_config_decode(res + RES_HS_HEAD_LEN, (size_t)cfg_len, &cfg) < 0 || !netcfg_usable(&cfg)) {
+		tlog(t, "[HS] the server sent a tunnel configuration this client cannot use");
 		goto out;
 	}
 
@@ -618,6 +797,8 @@ static int accept_hs_response(tunnel_t *t, handshake_t *hs, uint8_t *res, int le
 		goto out;
 	}
 	t->session.idx = session_idx;
+	t->want = cfg;
+	t->readdress = 0;
 	ret = 0;
 
 out:
@@ -942,6 +1123,41 @@ static int pump_tun(tunnel_t *t)
 	}
 }
 
+/* 서버의 keepalive 응답에 실려 온 터널 설정을 지금 것과 비교한다.
+ *
+ * 관리자가 ACL 을 고쳐 이 기기가 갈 수 있는 대역이 바뀌면 여기서 경로가 따라 바뀐다.
+ * 연결을 끊었다 다시 맺을 필요가 없다.
+ *
+ * 터널 주소가 바뀐 경우만은 그 자리에서 고치지 않는다. 서버의 세션은 예전 주소로 등록돼
+ * 있어서, 어댑터만 새 주소로 바꾸면 내가 보내는 패킷이 "세션의 주소가 아닌 출발지"로
+ * 버려진다. 다시 핸드셰이크해서 서버가 새 주소로 세션을 열게 한다. */
+static void netcfg_refresh(tunnel_t *t, const uint8_t *body, int len, tunnel_packet_t *pkt)
+{
+	net_config_t cfg;
+
+	if (net_config_decode(body, (size_t)len, &cfg) < 0 || !netcfg_usable(&cfg)) {
+		tlog(t, "[cfg] unusable tunnel configuration in keepalive, kept the current one");
+		return;
+	}
+
+	pkt_netcfg(pkt, &cfg);
+
+	if (net_config_equal(&cfg, &t->applied)) {
+		return;
+	}
+
+	if (cfg.tun_ip != t->applied.tun_ip || cfg.prefix_len != t->applied.prefix_len) {
+		if (!t->readdress) {
+			tlog(t, "[cfg] the server assigned a different tunnel address");
+		}
+		t->readdress = 1;
+		return;
+	}
+
+	t->want = cfg;
+	netcfg_apply(t);
+}
+
 /* UDP -> TUN. 소켓 수신 큐를 모두 비운다. */
 static int pump_udp(tunnel_t *t)
 {
@@ -1014,6 +1230,7 @@ static int pump_udp(tunnel_t *t)
 				if (pkt_log_text(t)) {
 					tlog(t, "[keepalive] recv");
 				}
+				netcfg_refresh(t, ip, n, &pkt);
 				pkt_emit(t, &pkt);
 				continue;
 			case MSG_TYPE_DENY:
@@ -1090,10 +1307,8 @@ int tunnel_run(const tunnel_config_t *cfg, HANDLE stop_event)
 	t->stop_event = stop_event;
 	t->sock = INVALID_SOCKET;
 
-	t->bcast = subnet_broadcast(cfg->tun_ip, cfg->prefix_len);
 	t->t0_ms = GetTickCount64();
 
-	session->tun_ip = cfg->tun_ip;
 	session->server.sin_family = AF_INET;
 	session->server.sin_addr = cfg->server_ip;
 	session->server.sin_port = htons(cfg->server_port);
@@ -1135,7 +1350,9 @@ int tunnel_run(const tunnel_config_t *cfg, HANDLE stop_event)
 		goto out;
 	}
 
-	if (adapter_configure(t) < 0) {
+	/* 주소, MTU, 경로는 서버가 수락에 실어 준 것(t->want)을 넣는다. */
+	WintunGetAdapterLUID(t->adapter, &t->luid);
+	if (netcfg_apply(t) < 0) {
 		goto out;
 	}
 
@@ -1175,18 +1392,30 @@ int tunnel_run(const tunnel_config_t *cfg, HANDLE stop_event)
 		 *    있으니 30초를 기다리지 않고 바로 다시 물어본다.
 		 * 거절된 상태에서도 첫 번째 조건이 그대로 걸려, 포스처가 그대로여도 30초마다
 		 * 다시 물어본다. 서버 쪽 정책이 풀렸을 수 있다. */
-		if (now - session->last_rx_ms > SERVER_TIMEOUT_MSEC ||
+		if (now - session->last_rx_ms > SERVER_TIMEOUT_MSEC || t->readdress ||
 				(session->denied && posture_changed(t, now))) {
 			if (session->denied) {
 				tlog(t, "[HS] retry after deny");
+			}
+			else if (t->readdress) {
+				tlog(t, "[HS] re-handshake for the new tunnel address");
+				set_state(t, TUNNEL_STATE_RECONNECTING);
 			}
 			else {
 				tlog(t, "[HS] no rx from server for %ds, re-handshake", SERVER_TIMEOUT_SEC);
 				set_state(t, TUNNEL_STATE_RECONNECTING);
 			}
 
+			/* 실패하면 여기서 다시 묻지 않는다. 세션이 살아 있으면 다음 keepalive 응답이
+			 * 주소가 다르다는 것을 다시 알려 준다. 그대로 두면 매 틱마다 핸드셰이크한다. */
+			t->readdress = 0;
+
 			switch (do_handshake(t)) {
 			case HS_OK:
+				/* 다시 받은 설정을 어댑터에 맞춘다. 주소가 바뀌었으면 여기서 바뀐다. */
+				if (netcfg_apply(t) < 0) {
+					goto out;
+				}
 				session->denied = 0;
 				set_state(t, TUNNEL_STATE_CONNECTED);
 				break;

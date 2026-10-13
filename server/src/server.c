@@ -39,6 +39,39 @@ static void on_reload(int sig)
 	reload_requested = 1;
 }
 
+/* ACL 을 쓰는가. 시작할 때 규칙 파일을 받았는지로 정해지고 도는 중에는 바뀌지 않는다. */
+static int acl_enabled;
+
+/* 터널 대역의 prefix 와 MTU. 서버 자신의 tun 에 붙인 값과 같아야 하고 (-n, -m),
+ * 클라이언트에게 그대로 내려간다. */
+static int tun_prefix = 24;
+static int tun_mtu = TUN_MTU;
+
+static struct in_addr tun_subnet_of(struct in_addr ip)
+{
+	struct in_addr subnet;
+
+	subnet.s_addr = tun_prefix == 0 ? 0 : ip.s_addr & htonl(0xFFFFFFFFu << (32 - tun_prefix));
+
+	return subnet;
+}
+
+/* 이 기기에 내려 줄 터널 설정을 지금의 기기 목록과 ACL 에서 만든다. 저장해 두지 않고
+ * 보낼 때마다 다시 만든다 — SIGHUP 으로 정책이 바뀌면 다음 keepalive 응답에 새 값이
+ * 실리고, 무엇이 바뀌었는지 따로 추적할 것이 없다. */
+static void net_config_for(const device_t *dev, net_config_t *cfg)
+{
+	memset(cfg, 0, sizeof(*cfg));
+	cfg->tun_ip = dev->tun_ip.s_addr;
+	cfg->prefix_len = (uint8_t)tun_prefix;
+	cfg->mtu = (uint16_t)tun_mtu;
+
+	if (acl_enabled) {
+		cfg->n_routes = (uint8_t)acl_routes(dev->tun_ip, tun_subnet_of(dev->tun_ip),
+				tun_prefix, cfg->routes, NET_MAX_ROUTES);
+	}
+}
+
 /* 핸드셰이크를 거절하고 이유를 알려 준다. 응답이 없는 것과 거절된 것을 클라이언트가
  * 구분해야 사용자에게 무엇을 고치라고 말할 수 있다.
  *
@@ -101,7 +134,7 @@ static void send_session_deny(int32_t sock, peer_t *peer, const struct sockaddr_
 	}
 }
 
-/* REQ_HANDSHAKE: tun_ip(4) | device_id(16)
+/* REQ_HANDSHAKE: device_id(16)
  *
  * 여기서는 아무것도 믿지 않는다. ID 는 공개된 이름표라 누구나 댈 수 있다. 그래서
  * 세션을 주지 않고 "그 기기라면 이 nonce 에 서명해 봐라"만 돌려준다. 키를 만들고
@@ -122,9 +155,9 @@ static void handle_request(int32_t sock, const uint8_t *packet, int32_t n,
 		return;
 	}
 
-	dev = device_find(body + IP_ADDR_LEN);
+	dev = device_find(body);
 	if (dev == NULL) {
-		printf("[HS] unknown device %s\n", device_id_str(body + IP_ADDR_LEN, ids));
+		printf("[HS] unknown device %s\n", device_id_str(body, ids));
 		send_deny(sock, src, srclen, DENY_UNKNOWN_DEVICE, NULL, NULL);
 		return;
 	}
@@ -157,7 +190,7 @@ static void handle_request(int32_t sock, const uint8_t *packet, int32_t n,
 
 /* 인증이 끝난 기기와 세션 키를 합의하고 RES_HANDSHAKE 를 만든다.
  *
- *   RES_HANDSHAKE: pub_s(64) | tag(16)
+ *   RES_HANDSHAKE: pub_s(64) | 암호화된 net_config | tag(16)
  *
  * 일회용 키 쌍을 새로 만들어 클라이언트의 것과 합의하고, 거기에 기기 키와 주고받은
  * 패킷의 해시를 섞어 세션 키를 뽑는다 (secure.h). tag 는 그 키로 만든다 — 클라이언트는
@@ -169,8 +202,23 @@ static int open_session(peer_t *peer, const device_t *dev, const uint8_t *auth, 
 	uint8_t secret[VPN_SECRET_LEN];
 	secure_keys_t keys;
 	msg_header_t msg_header;
+	net_config_t cfg;
 	crypt_ecdh_t *ecdh;
+	int cfg_len;
 	int len = -1;
+
+	if (cap < RES_HS_MIN_LEN) {
+		return -1;
+	}
+
+	/* 터널 설정은 수락과 한 통에 실어 보낸다. 따로 보내면 세션은 열렸는데 주소를 모르는
+	 * 순간이 생기고, 그 한 통이 사라졌을 때를 처리해야 한다. 세션 키로 감싸므로 이 기기
+	 * 말고는 읽을 수 없고, 도중에 경로를 끼워 넣을 수도 없다. */
+	net_config_for(dev, &cfg);
+	cfg_len = net_config_encode(res + RES_HS_HEAD_LEN, cap - RES_HS_MIN_LEN, &cfg);
+	if (cfg_len < 0) {
+		return -1;
+	}
 
 	memset(&msg_header, 0, sizeof(msg_header));
 	msg_header.version = PROTOCOL_VERSION;
@@ -194,7 +242,7 @@ static int open_session(peer_t *peer, const device_t *dev, const uint8_t *auth, 
 		goto out;
 	}
 
-	len = secure_res_seal(keys.res, res, cap, 0);
+	len = secure_res_seal(keys.res, res, cap, (size_t)cfg_len);
 
 out:
 	crypt_ecdh_free(ecdh);
@@ -204,17 +252,21 @@ out:
 	return len;
 }
 
-/* AUTH: tun_ip(4) | device_id(16) | nonce(16) | pub_c(64) | posture(8) | mac(32)
+/* AUTH: device_id(16) | nonce(16) | pub_c(64) | posture(8) | mac(32)
  *
- * 검사 순서에 뜻이 있다. 키를 가졌다는 것(mac)을 확인하기 전에는 "터널 IP 가
- * 틀렸다" 같은 구체적인 이유를 알려 주지 않는다. 인증되지 않은 상대에게 설정
- * 내용을 흘리지 않기 위해서다. 키 합의도 그 뒤에 한다. */
+ * 검사 순서에 뜻이 있다. 키를 가졌다는 것(mac)을 확인하기 전에는 "포스처가 못
+ * 미친다" 같은 구체적인 이유를 알려 주지 않는다. 인증되지 않은 상대에게 정책의
+ * 내용을 흘리지 않기 위해서다. 키 합의도 그 뒤에 한다.
+ *
+ * 터널 IP 는 클라이언트가 대지 않는다. 기기 목록에 적힌 것을 서버가 준다. 전에는
+ * 클라이언트가 적어 보낸 값이 목록과 같은지 대조했는데, 틀릴 수만 있고 고를 수는
+ * 없는 값을 받는 셈이었다. */
 static void handle_auth(int32_t sock, const uint8_t *packet, int32_t n,
 		const struct sockaddr_in *src, socklen_t srclen)
 {
 	char ids[DEVICE_ID_STRLEN];
 	char ib[INET_ADDRSTRLEN];
-	uint8_t res[RES_HS_MIN_LEN];
+	uint8_t res[RES_HS_MIN_LEN + NET_CONFIG_MAX_LEN];
 	uint8_t mac[AUTH_MAC_LEN];
 	const uint8_t *body = packet + sizeof(msg_header_t);
 	const uint8_t *auth_mac = body + AUTH_OFF_MAC;
@@ -229,8 +281,6 @@ static void handle_auth(int32_t sock, const uint8_t *packet, int32_t n,
 		printf("[HS] short auth (%d bytes)\n", n);
 		return;
 	}
-
-	memcpy(&tun_ip, body + AUTH_OFF_TUN_IP, IP_ADDR_LEN);
 
 	dev = device_find(body + AUTH_OFF_DEVICE_ID);
 	if (dev == NULL) {
@@ -263,11 +313,7 @@ static void handle_auth(int32_t sock, const uint8_t *packet, int32_t n,
 	 * 보내 세션을 또 열 수 있다. */
 	dev->nonce_valid = 0;
 
-	if (tun_ip.s_addr != dev->tun_ip.s_addr) {
-		printf("[HS] device %s asked for %s, not its tunnel ip\n", ids, ip_str(tun_ip, ib));
-		send_deny(sock, src, srclen, DENY_TUN_IP, dev, auth_mac);
-		return;
-	}
+	tun_ip = dev->tun_ip;
 
 	/* 누구인지는 확인됐다. 이제 그 기기가 지금 믿을 만한 상태인지 본다. 포스처는
 	 * mac 의 서명 범위 안이라 전달 도중에 고쳐지지 않았다. */
@@ -283,6 +329,13 @@ static void handle_auth(int32_t sock, const uint8_t *packet, int32_t n,
 	 * 엿들은 패킷은 번호가 달라 찾지 못하고, 찾더라도 키가 달라 열리지 않는다. */
 	peer = peer_lookup(tun_ip);
 	if (peer != NULL) {
+		peer_drop(peer);
+	}
+
+	/* 이 기기가 다른 주소로 열어 둔 세션도 내린다. 관리자가 기기의 터널 주소를 바꾸면
+	 * 예전 주소의 세션이 남는데, 그 주소는 이제 이 기기의 것이 아니다. 만료(60초)를
+	 * 기다리는 동안 그 주소를 새로 받은 다른 기기와 겹친다. */
+	while ((peer = peer_find_device(dev->id)) != NULL) {
 		peer_drop(peer);
 	}
 
@@ -311,14 +364,25 @@ static void handle_auth(int32_t sock, const uint8_t *packet, int32_t n,
 	}
 }
 
-/* KEEPALIVE (S -> C): 암호문 없이 tag 만. 클라이언트는 이것으로 서버가 살아 있고 세션이
- * 그대로임을 안다. tag 가 붙으므로 서버인 척하는 쪽이 대신 보내 줄 수 없다. */
-static void send_keepalive(int32_t sock, peer_t *peer)
+/* KEEPALIVE (S -> C): 암호화된 net_config. 클라이언트는 이것으로 서버가 살아 있고 세션이
+ * 그대로임을 안다. tag 가 붙으므로 서버인 척하는 쪽이 대신 보내 줄 수 없다.
+ *
+ * 응답마다 지금의 터널 설정을 통째로 싣는다. 관리자가 ACL 을 고쳐 그 기기가 갈 수 있는
+ * 대역이 바뀌면, 클라이언트는 다음 keepalive(10초 이내)에서 새 경로를 받는다. 포스처가
+ * 정책에 대 보이는 주기와 같다. */
+static void send_keepalive(int32_t sock, peer_t *peer, const device_t *dev)
 {
-	uint8_t packet[PKT_OVERHEAD];
+	uint8_t packet[PKT_OVERHEAD + NET_CONFIG_MAX_LEN];
+	net_config_t cfg;
 	int n;
 
-	n = secure_seal(&peer->secure, MSG_TYPE_KEEPALIVE, peer->session_idx, packet, sizeof(packet), 0);
+	net_config_for(dev, &cfg);
+	n = net_config_encode(packet + PKT_HDR_LEN, sizeof(packet) - PKT_OVERHEAD, &cfg);
+	if (n < 0) {
+		return;
+	}
+
+	n = secure_seal(&peer->secure, MSG_TYPE_KEEPALIVE, peer->session_idx, packet, sizeof(packet), (size_t)n);
 	if (n < 0) {
 		return;
 	}
@@ -388,7 +452,7 @@ static void handle_keepalive(int32_t sock, peer_t *peer, const uint8_t *body, in
 	peer->posture = posture;
 
 	peer_touch(peer, src, srclen);
-	send_keepalive(sock, peer);
+	send_keepalive(sock, peer, dev);
 }
 
 int main(int argc, char *argv[])
@@ -397,7 +461,6 @@ int main(int argc, char *argv[])
 	char ib[INET_ADDRSTRLEN], ob[INET_ADDRSTRLEN];
 	int tun_fd, sock, n, sent, port;
 	int epfd = -1, nev, i;
-	int acl_enabled = 0;
 	int verdict;
 	int opt;
 	int status_fd = -1;
@@ -425,12 +488,28 @@ int main(int argc, char *argv[])
 		return crypt_selftest();
 	}
 
-	while ((opt = getopt(argc, argv, "s:")) != -1) {
-		if (opt != 's') {
+	while ((opt = getopt(argc, argv, "s:n:m:")) != -1) {
+		if (opt == 's') {
+			status_path = optarg;
+		}
+		else if (opt == 'n') {
+			tun_prefix = (int)strtol(optarg, &end, 10);
+			if (*end != '\0' || tun_prefix < 8 || tun_prefix > 30) {
+				fprintf(stderr, "invalid tunnel prefix length (8..30) : %s\n", optarg);
+				return 1;
+			}
+		}
+		else if (opt == 'm') {
+			tun_mtu = (int)strtol(optarg, &end, 10);
+			if (*end != '\0' || tun_mtu < 576 || tun_mtu > (int)(BUF_SIZE - PKT_OVERHEAD)) {
+				fprintf(stderr, "invalid tunnel mtu (576..%d) : %s\n", (int)(BUF_SIZE - PKT_OVERHEAD), optarg);
+				return 1;
+			}
+		}
+		else {
 			argc = 0;
 			break;
 		}
-		status_path = optarg;
 	}
 
 	/* 옵션을 걷어내고 나머지 인자가 다시 argv[1] 부터 오게 한다. */
@@ -441,7 +520,9 @@ int main(int argc, char *argv[])
 	}
 
 	if (argc != 3 && argc != 4) {
-		fprintf(stderr, "usage: %s [-s status-socket] <port> <device-file> [acl-file]\n", argv[0]);
+		fprintf(stderr, "usage: %s [-s status-socket] [-n tunnel-prefix-len] [-m tunnel-mtu] <port> <device-file> [acl-file]\n", argv[0]);
+		fprintf(stderr, "       -n, -m: what the tun device is configured with (default /24, mtu %d);\n", TUN_MTU);
+		fprintf(stderr, "               they are pushed to every client\n");
 		fprintf(stderr, "       %s selftest\n", argv[0]);
 		return 1;
 	}

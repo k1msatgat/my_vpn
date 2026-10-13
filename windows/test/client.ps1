@@ -22,7 +22,8 @@ param(
     [string]$ServerIp    = $(if ($env:SERVER_IP)      { $env:SERVER_IP }      else { '49.247.139.39' }),
     [int]   $Port        = $(if ($env:PORT)           { [int]$env:PORT }      else { 9000 }),
     [string]$ServerTunIp = $(if ($env:SERVER_TUN_IP)  { $env:SERVER_TUN_IP }  else { '10.0.0.1' }),
-    # Linux 클라이언트가 10.0.0.2 를 쓰므로 Windows 는 10.0.0.3 을 기본으로 한다.
+    # 터널 IP 는 클라이언트에 넘기지 않는다. 서버가 기기 목록에 적힌 주소를 내려 준다.
+    # 여기 적는 것은 "서버가 이 주소를 줬어야 한다"는 기대값이고, 뜬 어댑터와 대조한다.
     [string]$ClientTunIp = $(if ($env:CLIENT_TUN_IP)  { $env:CLIENT_TUN_IP }  else { '10.0.0.3' }),
     [string]$Adapter     = $(if ($env:ADAPTER)        { $env:ADAPTER }        else { 'my_vpn' }),
     [string]$Config      = $(if ($env:CONFIG)         { $env:CONFIG }         else { 'Debug' }),
@@ -265,7 +266,7 @@ Set-Content -Path $ClientLog -Value '' -Encoding utf8
 Say "client: $Adapter $ClientTunIp -> server ${ServerIp}:${Port} (tunnel $ServerTunIp)"
 
 $script:Proc = Start-Process -FilePath $Exe `
-    -ArgumentList $Adapter, $ServerIp, "$Port", $ClientTunIp `
+    -ArgumentList $Adapter, $ServerIp, "$Port" `
     -NoNewWindow -PassThru -RedirectStandardOutput $ClientLog `
     -RedirectStandardError (Join-Path $LogDir 'client.err')
 

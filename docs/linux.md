@@ -30,7 +30,7 @@ TUN 디바이스 생성에 root 권한(`CAP_NET_ADMIN`)이 필요합니다.
 ### Server
 
 ```bash
-sudo ./server/bin/vpn_server [-s status-socket] <port> <device-file> [acl-file]
+sudo ./server/bin/vpn_server [-s status-socket] [-n prefix-len] [-m mtu] <port> <device-file> [acl-file]
 
 # 다른 터미널에서 인터페이스 설정 (생성된 이름은 로그의 "tun device:" 확인)
 sudo ip addr add 10.0.0.1/24 dev tun0
@@ -43,6 +43,7 @@ sudo kill -HUP $(pidof vpn_server)    # 기기 목록과 ACL 을 다시 읽는�
 - `<device-file>`은 필수입니다. 등록된 기기만 세션을 받으므로, 목록이 없으면 누구도 받아 줄 수 없습니다.
   아래 [기기 등록과 포스처 정책](#기기-등록과-포스처-정책)을 보세요.
 - `-s <path>`를 주면 그 경로에 [상태 소켓](#상태-소켓)을 엽니다. 주지 않으면 열지 않습니다.
+- `-n` / `-m`은 터널 대역의 prefix 길이와 MTU입니다 (기본 `24`, `1400`). 서버 자신의 tun에 붙인 값(`ip addr add ...`, `ip link set ... mtu`)과 같게 주세요. 서버는 이 값과 기기 목록의 터널 주소, ACL에서 뽑은 경로를 클라이언트에 내려 줍니다 — 클라이언트 쪽에는 터널 주소를 적지 않습니다.
 - 서비스로 띄우고 AI 클라이언트로 제어하려면 [MCP 서버](mcp.md)를 보세요.
 
 ### Client

@@ -8,7 +8,6 @@
 #pragma comment(lib, "uxtheme.lib")
 #endif
 
-#define TUN_PREFIX_LEN 24
 
 /* 리스트 열 정의. 폭은 다이얼로그 단위로 적고 MapDialogRect 로 픽셀로 바꾼다 —
  * 고정 픽셀로 적으면 고DPI 에서 글자가 잘린다. */
@@ -130,7 +129,11 @@ BOOL CMainDlg::OnInitDialog()
 	/* 빈 칸에 무엇을 적는지 흐린 글씨로 알려 준다. */
 	GetDlgItem(IDC_SERVER)->SendMessage(EM_SETCUEBANNER, FALSE, (LPARAM)L"203.0.113.10");
 	GetDlgItem(IDC_PORT)->SendMessage(EM_SETCUEBANNER, FALSE, (LPARAM)L"9000");
-	GetDlgItem(IDC_TUNIP)->SendMessage(EM_SETCUEBANNER, FALSE, (LPARAM)L"10.0.0.3");
+	/* 터널 IP 는 적는 칸이 아니라 보는 칸이다. 서버가 이 기기에 정해 준 주소가 연결된
+	 * 뒤에 여기에 나온다. 전에는 서버가 이미 아는 값을 사용자가 똑같이 한 번 더 적어야
+	 * 했고, 틀리면 거절당할 뿐이었다. */
+	GetDlgItem(IDC_TUNIP)->SendMessage(EM_SETREADONLY, TRUE, 0);
+	GetDlgItem(IDC_TUNIP)->SendMessage(EM_SETCUEBANNER, TRUE, (LPARAM)L"서버가 배정");
 
 	SetupPacketColumns();
 
@@ -200,7 +203,6 @@ void CMainDlg::LoadSettings()
 	SetDlgItemText(IDC_ADAPTER, app->GetProfileString(_T("conn"), _T("adapter"), _T("my_vpn")));
 	SetDlgItemText(IDC_SERVER, app->GetProfileString(_T("conn"), _T("server"), _T("49.247.139.39")));
 	SetDlgItemText(IDC_PORT, app->GetProfileString(_T("conn"), _T("port"), _T("9000")));
-	SetDlgItemText(IDC_TUNIP, app->GetProfileString(_T("conn"), _T("tunip"), _T("10.0.0.3")));
 }
 
 void CMainDlg::SaveSettings()
@@ -214,8 +216,6 @@ void CMainDlg::SaveSettings()
 	app->WriteProfileString(_T("conn"), _T("server"), s);
 	GetDlgItemText(IDC_PORT, s);
 	app->WriteProfileString(_T("conn"), _T("port"), s);
-	GetDlgItemText(IDC_TUNIP, s);
-	app->WriteProfileString(_T("conn"), _T("tunip"), s);
 }
 
 /* ---- 설정 읽기 ---------------------------------------------------------- */
@@ -224,21 +224,17 @@ bool CMainDlg::BuildConfig(tunnel_config_t &cfg)
 	CString adapter;
 	CString server;
 	CString port;
-	CString tun_ip;
 	int port_num;
 
 	GetDlgItemText(IDC_ADAPTER, adapter);
 	GetDlgItemText(IDC_SERVER, server);
 	GetDlgItemText(IDC_PORT, port);
-	GetDlgItemText(IDC_TUNIP, tun_ip);
 
 	adapter.Trim();
 	server.Trim();
 	port.Trim();
-	tun_ip.Trim();
 
 	ZeroMemory(&cfg, sizeof(cfg));
-	cfg.prefix_len = TUN_PREFIX_LEN;
 	/* on_packet 을 쓰므로 코어의 패킷 텍스트 로그는 필요 없다. */
 	cfg.log_packets = 0;
 
@@ -261,11 +257,6 @@ bool CMainDlg::BuildConfig(tunnel_config_t &cfg)
 		return false;
 	}
 	cfg.server_port = static_cast<uint16_t>(port_num);
-
-	if (InetPtonW(AF_INET, tun_ip, &cfg.tun_ip) != 1) {
-		FieldError(IDC_TUNIP, _T("서버가 이 기기에 배정한 터널 IPv4 주소를 적어 주세요. 예) 10.0.0.3"));
-		return false;
-	}
 
 	/* 기기 신원 */
 	device_t dev;
@@ -757,6 +748,27 @@ void CMainDlg::TrackAuth(const tunnel_packet_t &p)
 	if (p.dir != TUNNEL_DIR_RX || p.verdict != TUNNEL_PASS) {
 		return;
 	}
+
+	/* 서버가 정해 준 터널 주소. 수락과 keepalive 응답에 실려 온다. 관리자가 도중에
+	 * 바꾸면 여기도 따라 바뀐다. 같은 값으로 다시 쓰지 않는다 — 10초마다 깜빡인다. */
+	if (p.has_netcfg) {
+		wchar_t ip[INET_ADDRSTRLEN];
+		CString text;
+
+		if (InetNtopW(AF_INET, &p.cfg_tun_ip, ip, INET_ADDRSTRLEN) != NULL) {
+			if (p.cfg_routes != 0) {
+				text.Format(_T("%s/%u  +경로 %u"), ip, (unsigned)p.cfg_prefix_len, (unsigned)p.cfg_routes);
+			}
+			else {
+				text.Format(_T("%s/%u"), ip, (unsigned)p.cfg_prefix_len);
+			}
+			if (text != m_tun_text) {
+				m_tun_text = text;
+				SetDlgItemText(IDC_TUNIP, text);
+			}
+		}
+	}
+
 	if (p.msg_type == MSG_TYPE_DENY) {
 		m_deny_reason = p.deny_reason;
 	}
@@ -1212,7 +1224,12 @@ void CMainDlg::SetUiState(tunnel_state_t state)
 	GetDlgItem(IDC_ADAPTER)->EnableWindow(stopped);
 	GetDlgItem(IDC_SERVER)->EnableWindow(stopped);
 	GetDlgItem(IDC_PORT)->EnableWindow(stopped);
-	GetDlgItem(IDC_TUNIP)->EnableWindow(stopped);
+
+	/* 터널이 닫히면 받았던 주소도 더는 내 것이 아니다. */
+	if (stopped && !m_tun_text.IsEmpty()) {
+		m_tun_text.Empty();
+		SetDlgItemText(IDC_TUNIP, _T(""));
+	}
 }
 
 /* 상태 줄의 글과 색을 지금 값으로 다시 정한다. 바뀐 것이 있을 때만 그 영역을 다시

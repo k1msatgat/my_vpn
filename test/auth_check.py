@@ -35,7 +35,7 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SERVER = os.path.join(ROOT, "server", "bin", "vpn_server")
 PORT = int(next((a for a in sys.argv[1:] if a.isdigit()), 19000))
-VERSION = 3
+VERSION = 4
 
 REQ_HANDSHAKE, RES_HANDSHAKE, DATA, KEEPALIVE, CHALLENGE, AUTH, DENY = range(1, 8)
 DENY_UNKNOWN_DEVICE, DENY_BAD_AUTH, DENY_TUN_IP, DENY_POSTURE = range(1, 5)
@@ -198,13 +198,26 @@ def mac(key, data):
 
 def session_keys(dev_key, secret, auth_pkt, res_head):
     """(C->S 키, S->C 키, RES_HANDSHAKE 키). secure.h 의 "세션 키"."""
-    info = b"my_vpn v3 session" + hashlib.sha256(auth_pkt + res_head).digest()
+    info = b"my_vpn v4 session" + hashlib.sha256(auth_pkt + res_head).digest()
     prk = mac(dev_key, secret)                  # HKDF-Extract(salt = 기기 키, ikm = secret)
     okm, block = b"", b""
     for i in (1, 2, 3):                         # HKDF-Expand, 96 바이트
         block = mac(prk, block + info + bytes([i]))
         okm += block
     return okm[0:32], okm[32:64], okm[64:96]
+
+
+def config(raw):
+    """net_config 를 읽기 쉬운 글로: "10.0.0.3/24 mtu 1400 routes 10.20.0.0/16,..." (proto.h).
+
+    형식이 맞지 않으면 "malformed". 길이는 경로 개수와 정확히 맞아야 한다."""
+    if raw is None or len(raw) < 8:
+        return "malformed"
+    tun_ip, prefix, count, mtu = struct.unpack("!4sBBH", raw[:8])
+    if len(raw) != 8 + count * 5:
+        return "malformed"
+    routes = ["%s/%d" % (socket.inet_ntoa(raw[o:o + 4]), raw[o + 4]) for o in range(8, len(raw), 5)]
+    return "%s/%d mtu %d routes %s" % (socket.inet_ntoa(tun_ip), prefix, mtu, ",".join(routes) or "-")
 
 
 def nonce(counter):
@@ -274,17 +287,17 @@ class Client:
             pass
         self.sock.settimeout(1.0)
 
-    def request(self, dev_id=DEV_ID, tun_ip=TUN_IP):
-        self.send(header(REQ_HANDSHAKE) + tun_ip + dev_id)
+    def request(self, dev_id=DEV_ID):
+        self.send(header(REQ_HANDSHAKE) + dev_id)
         return self.recv()
 
-    def auth(self, challenge, key=DEV_KEY, dev_id=DEV_ID, tun_ip=TUN_IP, post=None, tamper=None, pub=None):
+    def auth(self, challenge, key=DEV_KEY, dev_id=DEV_ID, post=None, tamper=None, pub=None):
         """AUTH 를 보내고 답을 받는다. 수락이면 세션 키를 뽑아 SESSIONS 에 넣는다.
 
         수락의 tag 가 맞지 않으면 body 를 None 으로 돌려준다. 진짜 클라이언트는 그런
         수락을 받지 않는다."""
         ecdh = Ecdh()
-        signed = header(AUTH) + tun_ip + dev_id + challenge + (pub or ecdh.pub) + (post or posture())
+        signed = header(AUTH) + dev_id + challenge + (pub or ecdh.pub) + (post or posture())
         self.auth_tag = mac(key, signed)
         if tamper:
             signed = tamper(signed)
@@ -300,9 +313,11 @@ class Client:
             c2s, s2c, res_key = session_keys(key, ecdh.secret(head[HDR_LEN:]), pkt, head)
         except RuntimeError:
             return r[0], r[1], None
-        if gcm_open(res_key, bytes(12), head, rest) is None:
+        sealed = gcm_open(res_key, bytes(12), head, rest)
+        if sealed is None:
             return r[0], r[1], None
         SESSIONS[r[1]] = [c2s, s2c, 0]
+        self.config = config(sealed)    # 서버가 이 기기에 정해 준 터널 설정
         return r
 
     def handshake(self, **kw):
@@ -349,9 +364,9 @@ def handshake_tests():
     c = Client()
 
     check("unknown device id", c.request(dev_id=bytes(16)), "DENY(1)")
-    check("request too short", (c.send(header(REQ_HANDSHAKE) + TUN_IP + DEV_ID[:8]), c.recv())[1], "no response")
+    check("request too short", (c.send(header(REQ_HANDSHAKE) + DEV_ID[:8]), c.recv())[1], "no response")
     check("old client (tunnel ip only, no device id)", (c.send(header(REQ_HANDSHAKE) + TUN_IP), c.recv())[1], "no response")
-    c.send(struct.pack("!BBHI", 2, REQ_HANDSHAKE, 0, 0) + TUN_IP + DEV_ID)
+    c.send(struct.pack("!BBHI", 3, REQ_HANDSHAKE, 0, 0) + TUN_IP + DEV_ID)
     check("previous protocol version", c.recv(), "no response")
     check("registered device gets a challenge", c.request(), "CHALLENGE")
 
@@ -373,21 +388,24 @@ def handshake_tests():
     check("posture changed after signing", c.handshake(tamper=flip), "DENY(2)")
 
     # 사이에 낀 쪽이 일회용 공개키를 자기 것으로 바꿔 끼운 경우. mac 이 공개키까지 덮는다.
-    swap = lambda s: s[:HDR_LEN + 36] + Ecdh().pub + s[HDR_LEN + 36 + PUB_LEN:]
+    swap = lambda s: s[:HDR_LEN + 32] + Ecdh().pub + s[HDR_LEN + 32 + PUB_LEN:]
     check("ephemeral key replaced after signing", c.handshake(tamper=swap), "DENY(2)")
 
     # 서명은 맞는데 공개키가 곡선 위의 점이 아니다. 계산해 주지 않는다.
     check("ephemeral key that is not on the curve", c.handshake(pub=bytes(PUB_LEN - 1) + b"\x01"), "no response")
 
-    r = c.handshake(tun_ip=socket.inet_aton("10.0.0.9"))
-    check("tunnel ip not assigned to this device (properly signed)", r, "DENY(3)")
-    expect("that denial is signed with the device key", c.deny_mac_ok(r), True)
+    # 터널 주소는 클라이언트가 대지 않는다. 기기 목록에 적힌 것을 서버가 수락에 실어 준다.
+    # 이 서버는 ACL 없이 떴으므로 터널 대역 밖으로 가는 경로는 없다.
+    c.handshake()
+    expect("the server assigns the tunnel configuration", c.config, "10.0.0.3/24 mtu 1400 routes -")
+    strict(c)
+    expect("each device gets its own address", c.config, "10.0.0.4/24 mtu 1400 routes -")
 
     r = c.handshake(key=bytes(32))
     expect("a denial before authentication carries no mac",
            "zeros" if r[2][1:1 + MAC_LEN] == bytes(MAC_LEN) else "present", "zeros")
 
-    c.send(header(AUTH) + TUN_IP + DEV_ID)
+    c.send(header(AUTH) + DEV_ID)
     check("AUTH too short", c.recv(), "no response")
 
     # 세션 키는 핸드셰이크마다 새로 뽑힌다.
@@ -418,16 +436,18 @@ def disruption_tests():
            "new nonce" if after[2] != r[2] else "same nonce", "new nonce")
 
     # 서명은 맞지만 거절된 AUTH 도 nonce 를 쓴 것이다 (엿들은 AUTH 의 재전송 방지).
-    wrong_ip = socket.inet_aton("10.0.0.9")
-    check("properly signed AUTH for a wrong tunnel ip", victim.auth(after[2], tun_ip=wrong_ip), "DENY(3)")
-    check("the same nonce, now with the right tunnel ip", victim.auth(after[2]), "DENY(2)")
+    # 포스처 조건이 걸린 두 번째 기기로 본다.
+    strict_auth = lambda challenge, **post: victim.auth(challenge, key=DEV2_KEY, dev_id=DEV2_ID, post=posture(**post))
+    r = victim.request(dev_id=DEV2_ID)
+    check("properly signed AUTH that the policy rejects", strict_auth(r[2], firewall=STATE_OFF), "DENY(4)")
+    check("the same nonce, now with a posture that would pass", strict_auth(r[2]), "DENY(2)")
 
 
 def strict(c, **post):
     """포스처 조건이 걸린 두 번째 기기로 핸드셰이크한다."""
-    r = c.request(dev_id=DEV2_ID, tun_ip=TUN2_IP)
+    r = c.request(dev_id=DEV2_ID)
     assert r and r[0] == CHALLENGE, "no challenge: %r" % (r,)
-    return c.auth(r[2], key=DEV2_KEY, dev_id=DEV2_ID, tun_ip=TUN2_IP, post=posture(**post))
+    return c.auth(r[2], key=DEV2_KEY, dev_id=DEV2_ID, post=posture(**post))
 
 
 def posture_tests():
@@ -787,6 +807,62 @@ def acl_tests(srv, acl_path):
     expect("posture from the handshake, firewall off", verdict(udp(53), r[1]), "denied")
 
 
+def config_tests(srv, acl_path, dev_path):
+    """서버가 터널 설정을 정책에서 뽑아 내려 주는지. ACL 을 켠 서버로 돌린다."""
+    c = Client()
+
+    def rules(*lines):
+        with open(acl_path, "w") as f:
+            f.write("\n".join(lines) + "\n")
+        srv.reload()
+
+    def refreshed(idx):
+        """keepalive 를 보내고 응답에 실려 온 설정을 읽는다."""
+        c.send(keepalive(idx))
+        r = c.recv()
+        return config(r[2]) if r and r[0] == KEEPALIVE else describe(r)
+
+    base = ("10.0.0.0/24 10.0.0.1 icmp any allow",      # 터널 대역 안: 주소를 받으면 이미 그리로 간다
+            "10.0.0.3 10.20.0.0/16 tcp 443 allow",      # 첫 번째 기기만
+            "10.0.0.3 10.20.0.0/16 tcp 22 allow",       # 같은 대역을 한 번 더: 경로는 하나다
+            "10.0.0.4 10.30.0.0/16 any any allow",      # 두 번째 기기만
+            "any 192.168.5.0/24 any any deny",          # 막는 곳을 터널로 끌어올 이유가 없다
+            "any any udp 53 allow")                     # 목적지가 any: 전체를 터널로 돌리지 않는다
+    rules(*base)
+
+    idx = session(c)
+    expect("routes are the allowed destinations of this device",
+           c.config, "10.0.0.3/24 mtu 1400 routes 10.20.0.0/16")
+    session(c, strict_dev=True)
+    expect("another device, another set of routes",
+           c.config, "10.0.0.4/24 mtu 1400 routes 10.30.0.0/16")
+
+    # 열려 있는 세션은 keepalive 응답으로 지금의 설정을 계속 받는다. 다시 붙을 필요가 없다.
+    expect("the keepalive answer repeats the configuration",
+           refreshed(idx), "10.0.0.3/24 mtu 1400 routes 10.20.0.0/16")
+    rules(*(base + ("10.0.0.0/24 10.40.0.0/16 any any allow",)))
+    expect("acl changed: the open session learns the new route",
+           refreshed(idx), "10.0.0.3/24 mtu 1400 routes 10.20.0.0/16,10.40.0.0/16")
+    rules(base[0])
+    expect("acl changed: the routes are withdrawn",
+           refreshed(idx), "10.0.0.3/24 mtu 1400 routes -")
+
+    # 관리자가 기기의 터널 주소를 바꿨다. 열린 세션은 새 주소를 통보받고, 다시
+    # 핸드셰이크하면 새 주소로 세션이 열린다. 예전 주소의 세션은 남지 않는다.
+    write_devices(dev_path, LINE1.replace("10.0.0.3", "10.0.0.7"), LINE2)
+    srv.reload()
+    expect("device readdressed: the open session is told",
+           refreshed(idx), "10.0.0.7/24 mtu 1400 routes -")
+    session(c)
+    expect("device readdressed: a new handshake gets the new address",
+           c.config, "10.0.0.7/24 mtu 1400 routes -")
+    mine = sorted(s["tunnel_ip"] for s in srv.status()["sessions"] if s["device_id"] == DEV_ID.hex())
+    expect("device readdressed: its old session is gone", mine, ["10.0.0.7"])
+
+    write_devices(dev_path, LINE1, LINE2)
+    srv.reload()
+
+
 def status_tests(srv):
     """상태 소켓이 서버의 피어 테이블과 판정 횟수를 그대로 보여 주는지. ACL 을 켠 서버로 돌린다."""
     c = Client()
@@ -932,6 +1008,7 @@ def main():
         srv.acl_path = acl_path
         try:
             acl_tests(srv, acl_path)
+            config_tests(srv, acl_path, path)
             status_tests(srv)
         finally:
             srv.stop()

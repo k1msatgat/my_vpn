@@ -58,7 +58,7 @@ const requirements = z.object({
 
 const deviceId = z.string().regex(/^[0-9a-fA-F]{32}$/).describe('device id, 32 hex digits (from device_list)');
 const label = z.string().max(32).describe('human-readable name, e.g. "woo-laptop"');
-const tunnelIp = z.string().describe('tunnel IPv4 address assigned to this device, e.g. 10.0.0.3');
+const tunnelIp = z.string().describe('tunnel IPv4 address assigned to this device, e.g. 10.0.0.3. The server pushes it to the device; nothing is typed on the client');
 
 const READ = { readOnlyHint: true, openWorldHint: false };
 const WRITE = { readOnlyHint: false, destructiveHint: false, openWorldHint: false };
@@ -161,7 +161,7 @@ server.registerTool('acl_get', {
 }, () => call('acl_get'));
 
 server.registerTool('acl_set', {
-	description: 'Replace the whole ACL: which destinations an admitted device may reach, optionally with a stricter posture per destination than the device needs to connect. Rules are checked top to bottom, the first match wins, and a packet matching no rule is denied. Applied from the next packet if the server is already running with an ACL; if it was started without one, restart_required comes back true and server_restart turns it on.',
+	description: 'Replace the whole ACL: which destinations an admitted device may reach, optionally with a stricter posture per destination than the device needs to connect. The allowed destination ranges are also what each device is told to route into the tunnel (ranges inside the tunnel subnet and "any" are not pushed), so a rule for 10.20.0.0/16 both permits and routes it; connected devices pick up route changes within 10s. Rules are checked top to bottom, the first match wins, and a packet matching no rule is denied. Applied from the next packet if the server is already running with an ACL; if it was started without one, restart_required comes back true and server_restart turns it on.',
 	inputSchema: {
 		rules: z.array(z.object({
 			src: z.string().describe('a.b.c.d, a.b.c.d/n or "any"'),

@@ -41,6 +41,7 @@ Zero Trust Network Access(ZTNA)의 기반 구조를 학습하는 것을 목표�
 - **기기 인증** — 등록된 기기만 세션을 받는다. 기기별 키로 서버의 nonce에 HMAC-SHA256 서명 (챌린지-응답)
 - **세션 암호화** — 핸드셰이크마다 일회용 ECDH(P-256)로 키를 합의하고, 세션의 모든 패킷을 AES-256-GCM으로 감싼다. 내용은 보이지 않고, 고치거나 다시 보낸 패킷은 열리지 않는다
 - **서로를 확인** — 세션 키에 기기 키가 들어간다. 그 키를 모르는 쪽은 서버인 척해도 클라이언트가 받아들일 수락을 만들지 못한다
+- **서버가 내려 주는 터널 설정** — 터널 주소와 터널로 보낼 대역을 클라이언트에 적지 않는다. 서버가 기기 목록과 ACL에서 뽑아 내려 주고, 정책을 고치면 붙어 있는 기기의 경로가 다음 keepalive에서 따라 바뀐다
 - **포스처 기반 접근 제어** — 클라이언트가 OS 빌드 / 방화벽 / 백신 상태를 보고하고, 서버가 기기별 정책에 대 본다
 - **지속 검증** — keepalive마다 포스처를 다시 보고·평가하고, 정책에 못 미치면 세션 중에도 차단
 - **정책 무중단 변경** — `kill -HUP`으로 기기 목록과 ACL을 다시 읽는다. 지워진 기기는 다음 keepalive에서 끊기고, 새 ACL은 다음 패킷부터 적용된다
@@ -79,12 +80,12 @@ Zero Trust Network Access(ZTNA)의 기반 구조를 학습하는 것을 목표�
 
 | type | 값 | 페이로드 |
 |---|---|---|
-| `MSG_TYPE_REQ_HANDSHAKE` | 1 | `msg_header` + 터널 IP (4B) + 기기 ID (16B) |
-| `MSG_TYPE_RES_HANDSHAKE` | 2 | `msg_header` (발급된 `session_idx` 포함) + 서버의 일회용 공개키 (64B) + tag (16B) |
+| `MSG_TYPE_REQ_HANDSHAKE` | 1 | `msg_header` + 기기 ID (16B) |
+| `MSG_TYPE_RES_HANDSHAKE` | 2 | `msg_header` (발급된 `session_idx` 포함) + 서버의 일회용 공개키 (64B) + 암호화된 터널 설정 + tag (16B) |
 | `MSG_TYPE_DATA` | 3 | 세션 패킷. 암호문 = IP 패킷 |
-| `MSG_TYPE_KEEPALIVE` | 4 | 세션 패킷. C→S: 암호문 = 포스처 (8B) / S→C: 암호문 없이 tag만 |
+| `MSG_TYPE_KEEPALIVE` | 4 | 세션 패킷. C→S: 암호문 = 포스처 (8B) / S→C: 암호문 = 지금의 터널 설정 |
 | `MSG_TYPE_CHALLENGE` | 5 | `msg_header` + nonce (16B) |
-| `MSG_TYPE_AUTH` | 6 | `msg_header` + 터널 IP (4B) + 기기 ID (16B) + nonce (16B) + 클라이언트의 일회용 공개키 (64B) + 포스처 (8B) + mac (32B) |
+| `MSG_TYPE_AUTH` | 6 | `msg_header` + 기기 ID (16B) + nonce (16B) + 클라이언트의 일회용 공개키 (64B) + 포스처 (8B) + mac (32B) |
 | `MSG_TYPE_DENY` | 7 | 핸드셰이크 중 (`session_idx` = 0): `msg_header` + 사유 (1B) + mac (32B) / 세션 중: 세션 패킷, 암호문 = 사유 (1B) |
 
 포스처 보고는 8바이트 고정입니다: `os_build`(4B, BE) + `firewall`(1B) + `antivirus`(1B) + 예약(2B).
@@ -99,14 +100,14 @@ Zero Trust Network Access(ZTNA)의 기반 구조를 학습하는 것을 목표�
 sequenceDiagram
     participant C as Client
     participant S as Server
-    C->>S: REQ_HANDSHAKE (tun_ip, device_id)
+    C->>S: REQ_HANDSHAKE (device_id)
     Note over S: 등록된 기기인가<br/>nonce 발급 (1회용, 5초)
     S->>C: CHALLENGE (nonce)
-    Note over C: 포스처 수집, 일회용 키 쌍 생성<br/>mac = HMAC(기기 키, 헤더|tun_ip|id|nonce|pub_c|posture)
-    C->>S: AUTH (tun_ip, device_id, nonce, pub_c, posture, mac)
-    Note over S: nonce / mac → 터널 IP → 포스처 정책<br/>통과하면 peer_register(), 일회용 키 쌍 생성<br/>세션 키 = KDF(기기 키, ECDH(pub_c, pub_s), 주고받은 패킷)
-    S->>C: RES_HANDSHAKE (idx=0x5F3A9C02, pub_s, tag)
-    Note over C: 같은 세션 키를 뽑아 tag 확인<br/>맞지 않으면 받지 않는다
+    Note over C: 포스처 수집, 일회용 키 쌍 생성<br/>mac = HMAC(기기 키, 헤더|id|nonce|pub_c|posture)
+    C->>S: AUTH (device_id, nonce, pub_c, posture, mac)
+    Note over S: nonce / mac → 포스처 정책<br/>통과하면 peer_register(), 일회용 키 쌍 생성<br/>세션 키 = KDF(기기 키, ECDH(pub_c, pub_s), 주고받은 패킷)
+    S->>C: RES_HANDSHAKE (idx=0x5F3A9C02, pub_s, 터널 설정, tag)
+    Note over C: 같은 세션 키를 뽑아 tag 확인<br/>맞지 않으면 받지 않는다<br/>받은 주소와 경로로 어댑터를 올린다
     C->>S: DATA (idx=0x5F3A9C02, counter=0, 암호문, tag)
     S->>C: DATA (idx=0x5F3A9C02, counter=0, 암호문, tag)
 ```
@@ -117,13 +118,13 @@ sequenceDiagram
 |---|---|---|
 | `DENY_UNKNOWN_DEVICE` | 1 | 기기 목록에 없는 ID |
 | `DENY_BAD_AUTH` | 2 | nonce가 다르거나 만료됐거나 mac이 틀림 |
-| `DENY_TUN_IP` | 3 | 그 기기에 배정된 터널 IP가 아님 |
+| `DENY_TUN_IP` | 3 | (버전 3까지) 그 기기에 배정된 터널 IP가 아님. 이제 터널 IP는 서버가 정해 내려 주므로 보내지 않음 |
 | `DENY_POSTURE` | 4 | 인증은 됐지만 포스처가 그 기기의 정책에 못 미침 |
 
 - **챌린지-응답**이라 키 자체는 와이어에 나오지 않습니다. nonce는 서명이 맞는 `AUTH`를 받는 순간 버리므로(뒤의 검사에서 거절되더라도) 엿들은 `AUTH`를 다시 보내도 통과하지 못합니다.
 - **확인되지 않은 패킷은 진행 중인 핸드셰이크를 건드리지 못합니다.** 살아 있는 nonce가 있는 동안 다시 온 `REQ`에는 같은 nonce를 내주고, 서명이 틀린 `AUTH`는 nonce를 버리지 않습니다. 기기 ID만 아는 제3자가 `REQ`나 엉터리 `AUTH`를 계속 보내 진짜 기기의 핸드셰이크를 깨뜨릴 수 없습니다.
 - **포스처는 mac의 서명 범위 안**이라 전달 도중에 "방화벽 꺼짐"을 "켜짐"으로 고칠 수 없습니다.
-- **검사 순서**는 기기 → nonce / mac → 터널 IP → 포스처입니다. 키를 가졌다는 것을 확인하기 전에는 구체적인 거절 이유를 알려 주지 않습니다.
+- **검사 순서**는 기기 → nonce / mac → 포스처입니다. 키를 가졌다는 것을 확인하기 전에는 구체적인 거절 이유를 알려 주지 않습니다.
 - 클라이언트는 `AUTH`를 보내기 전에 온 `RES_HANDSHAKE`를 받지 않습니다. 받아 주면 서버인 척하는 쪽이 `REQ`에 곧바로 `RES`를 돌려주는 것만으로 인증 단계가 건너뛰어집니다.
 - 클라이언트는 1초 타임아웃으로 최대 5회 `REQ`부터 다시 하며, 서버 주소에서 온 응답만 받습니다.
 - 새로 인증하면 새 세션입니다. 서버는 그 터널 IP의 기존 세션을 내리고 새 idx와 새 키를 발급합니다.
@@ -135,7 +136,7 @@ sequenceDiagram
 ```
 secret = ECDH(이번 핸드셰이크의 일회용 P-256 키 쌍)
 prk    = HKDF-Extract(salt = 기기 키, ikm = secret)
-keys   = HKDF-Expand(prk, "my_vpn v3 session" | SHA-256(AUTH 패킷 | RES 의 헤더와 pub_s), 96B)
+keys   = HKDF-Expand(prk, "my_vpn v4 session" | SHA-256(AUTH 패킷 | RES 의 헤더와 pub_s), 96B)
        = C→S 키 | S→C 키 | RES_HANDSHAKE 키
 ```
 
@@ -156,6 +157,29 @@ keys   = HKDF-Expand(prk, "my_vpn v3 session" | SHA-256(AUTH 패킷 | RES 의 �
 - **P-256과 AES-GCM을 고른 기준은 "양쪽 OS가 기본으로 주는가"입니다.** 처음 계획은 X25519 + ChaCha20-Poly1305였지만, CNG에서 ChaCha20-Poly1305는 최근 Windows에만 있고 P-256과 AES-GCM은 버전을 가리지 않고 있습니다. 클라이언트에 암호 라이브러리를 따로 실어 보내는 것보다 OS가 보안 패치와 함께 갱신해 주는 구현을 쓰는 쪽을 골랐습니다.
 
 > **Linux 클라이언트(`client/`)는 인증 이전의 프로토콜에 머물러 있습니다.** 예전 형식의 `REQ_HANDSHAKE`를 보내므로 지금 서버에는 붙지 못하며, 더 발전시킬 계획이 없습니다. 이 프로젝트의 클라이언트는 Windows 쪽이고, 인증 핸드셰이크는 Windows 클라이언트와 `test/auth_check.py`로 확인됩니다.
+
+### Tunnel configuration
+
+터널 주소와 "무엇을 터널로 보낼 것인가"는 클라이언트에 적지 않습니다. 서버가 정책에서 뽑아 내려 주고, 클라이언트는 받은 대로 어댑터를 맞춥니다.
+
+```
+tun_ip(4) | prefix_len(1) | n_routes(1) | mtu(2) | n_routes x ( addr(4) | prefix_len(1) )
+```
+
+| 값 | 어디서 오는가 |
+|---|---|
+| 터널 주소 | 기기 목록에 그 기기 앞으로 적힌 주소 |
+| 대역의 prefix, MTU | 서버를 띄울 때의 `-n` / `-m` (서버 자신의 tun에 붙인 값) |
+| 경로 | ACL에서 그 기기의 터널 주소가 출발지에 걸리는 `allow` 규칙들의 목적지 대역 |
+
+- **전에는 클라이언트가 터널 IP를 직접 적어야 했습니다.** 서버가 이미 아는 값을 사용자가 한 번 더 똑같이 입력하는 것이고, 틀리면 거절당할 뿐이었습니다. 그리고 터널 대역 밖으로는 갈 방법이 없었습니다 — 어떤 목적지를 터널로 보낼지 정하는 곳이 없었기 때문입니다.
+- **경로는 ACL에서 뽑습니다.** 어디로 갈 수 있는지는 이미 ACL이 말하고 있습니다. 경로 목록을 따로 두면 둘이 어긋납니다 — 경로는 있는데 규칙이 없어 터널로 들어간 패킷이 버려지거나, 규칙은 있는데 경로가 없어 터널로 가지도 않습니다.
+- **빼는 것**: `deny` 규칙, 터널 대역 안의 목적지(주소를 받으면 이미 그리로 갑니다), 목적지가 `any`인 규칙. 마지막은 모든 트래픽을 터널로 보내라는 뜻이 되는데, 그러면 서버가 인터넷으로 나가는 길까지 맡아야 합니다. 접근시킬 대역은 적어서 엽니다.
+- **`RES_HANDSHAKE`와 서버의 keepalive 응답에 실립니다.** keepalive마다 통째로 다시 보내므로 클라이언트는 받은 것과 지금 적용한 것을 비교하기만 하면 됩니다. 바뀐 것만 따로 알리는 메시지를 두면, 그 한 통이 사라졌을 때를 위한 확인과 재전송이 필요해집니다.
+- **정책을 고치면 붙어 있는 기기가 따라옵니다.** ACL을 고치고 `kill -HUP`하면 다음 keepalive(10초 이내)에서 경로가 더해지거나 빠집니다. 세션은 그대로입니다. 클라이언트는 달라진 경로만 고칩니다 — 통째로 지우고 다시 넣으면 바뀌지 않은 경로까지 잠깐 사라집니다.
+- **터널 주소가 바뀐 경우만은 다시 핸드셰이크합니다.** 서버의 세션은 예전 주소로 등록돼 있어서, 어댑터만 새 주소로 바꾸면 보내는 패킷이 "세션의 주소가 아닌 출발지"로 버려집니다.
+- **클라이언트는 받은 경로를 그대로 믿지 않습니다.** 서버는 인증된 상대지만, `/0`과 서버 자신의 주소를 덮는 대역은 넣지 않습니다. 뒤의 것을 넣으면 터널 패킷을 싣고 가야 할 길이 터널 자신이 되어 그 순간 연결이 끊깁니다.
+- **세션 키로 감싸서 보냅니다.** 그 기기 말고는 읽을 수 없고, 도중에 경로를 끼워 넣을 수도 없습니다.
 
 ### Keepalive & session lifetime
 
@@ -358,6 +382,8 @@ my_vpn/
 - **기기 키는 서버에 평문으로 있습니다.** 기기 목록 파일의 권한(600)에 기대며, 서버가 뚫리면 모든 기기의 키가 드러납니다. 공개키 방식이면 서버에는 공개키만 두면 됩니다.
 - **암호 프로토콜은 검토를 받은 적이 없습니다.** 알고리즘은 OpenSSL과 CNG의 것이고 조립하는 방식(사전 공유 키 + 일회용 ECDH + HKDF + AEAD)도 널리 쓰이는 구조이지만, 이 조립 자체를 다른 사람이 분석한 적은 없습니다. 테스트가 보여 주는 것은 "의도한 대로 동작한다"까지입니다.
 - **세션 키를 도중에 바꾸지 않습니다.** 키는 다시 핸드셰이크할 때에만 바뀝니다. 오래 열린 세션에 주기적으로 새 키를 합의하는 절차는 없습니다.
+- **모든 트래픽을 터널로 보내는 구성은 없습니다.** 터널로 가는 것은 터널 대역과, ACL이 그 기기에 허용한 대역뿐입니다. 목적지가 `any`인 규칙은 통과는 시키지만 경로로 내려가지는 않습니다.
+- **경로는 대역 단위입니다.** 도메인 이름으로 접근 대상을 정하는 방법은 없습니다. 그러려면 클라이언트가 DNS 질의를 가로채야 합니다.
 - **IPv4만 터널링합니다.** IPv6 패킷은 건너뜁니다.
 - **멀티캐스트 / 브로드캐스트는 터널을 통과하지 못합니다.** 서버가 inner dst로 피어를 1:1로 찾는 구조라
   전달할 상대가 없습니다. Windows 클라이언트는 이를 송신 경로에서 명시적으로 버립니다.
@@ -375,6 +401,7 @@ my_vpn/
 - [x] 클라이언트 재핸드셰이크 (서버 재시작 / 세션 만료 복구)
 - [x] 시나리오 테스트 스크립트
 - [x] 암호화 & 키 교환 — 일회용 ECDH(P-256) + 기기 키로 세션 키 유도, AES-256-GCM, `counter`를 nonce 및 재전송 방지에 사용 (`test/auth_check.py` 119개 통과)
+- [x] 서버가 내려 주는 터널 설정 — 터널 주소 / prefix / MTU와 ACL에서 뽑은 경로를 `RES_HANDSHAKE`와 keepalive 응답에 싣고, 클라이언트가 달라진 부분만 어댑터에 맞춤 (`test/auth_check.py` 130개 통과, 실제 Windows 클라이언트로 주소 / 경로 적용과 그 경로로의 ping 확인)
 - [x] 신원 기반 인증 — 기기 키 챌린지-응답, 포스처 기반 정책 (ZTNA)
   - [x] 와이어 포맷 정의 (`CHALLENGE` / `AUTH` / `DENY`, 포스처 보고)
   - [x] Windows 클라이언트 — 포스처 수집, 기기 등록, 인증 핸드셰이크
@@ -416,6 +443,7 @@ my_vpn/
 | AI 작성 | `proto.h` / `proto.c`의 인증·포스처 메시지 정의와 `posture_encode` / `posture_decode`. 메시지 흐름은 AI가 제안하고 검토 후 채택 |
 | AI 작성 | 서버의 ZTNA 확장 (2차) — `server/src/policy.c`, `server/src/status.c`, `alc.c`의 다시 읽기(임시 표)와 규칙별 포스처 조건 / 줄 형식 검사, `server.c`의 nonce 재사용과 상태 소켓 연결 / 카운터, `peer.c`의 단조 시계와 세션별 카운터. ACL의 매칭 로직과 피어 테이블의 구조는 직접 구현한 것 그대로 |
 | AI 작성 | 세션 암호화 — `lib/common`의 `crypt.h` / `secure.{h,c}`, `server/src/crypt.c`(OpenSSL), `windows/core/crypt.c`(CNG), `server.c`와 `tunnel.c`의 핸드셰이크 / 데이터 / keepalive 경로를 세션 키로 감싸도록 고친 것, `test/auth_check.py`의 암호화 검사. 키를 어떻게 뽑고 무엇을 tag로 덮을지는 AI가 제안했고, 기존의 `auth.c` / `hmac.c` / `mock_server.py`는 이 과정에서 대체돼 지웠음 |
+| AI 작성 | 서버가 내려 주는 터널 설정 — `proto.{h,c}`의 `net_config`, `alc.c`의 `acl_routes`, `server.c`의 `net_config_for`와 keepalive 응답, `tunnel.c`의 `netcfg_apply` / `netcfg_refresh`(주소 · MTU · 경로를 달라진 만큼만 고침), GUI의 터널 IP 칸을 입력에서 표시로 바꾼 것. 경로를 ACL에서 뽑는 방식은 AI가 제안 |
 | AI 작성 | `mcp/` MCP 서버 전체 — `server.js`(도구 선언), `ctl.cjs`(root 헬퍼), systemd 유닛, 설치 스크립트, `docs/mcp.md` |
 | AI 작성 | GUI 재설계 — `gui/ui_theme.cpp`, `gui/ui_controls.cpp`, `MainDlg`의 배치와 그리기, `EnrollDlg`의 그리기, `vpn_gui.rc`, 앱 아이콘(`windows/tools/mkicon.py`). Linux 장비에서 작성했고 MSVC 빌드는 CI로 확인, 실행은 아직 확인하지 못함 |
 | AI 작성 | `.github/workflows/ci.yml`, CI가 찾은 `posture.c`의 `wscapi.dll` 동적 로드 |

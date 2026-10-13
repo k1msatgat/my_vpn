@@ -13,7 +13,7 @@
  * 세션 키
  *   secret = ECDH(이번 핸드셰이크의 일회용 키 쌍)
  *   prk    = HKDF-Extract(salt = 기기 키, ikm = secret)
- *   keys   = HKDF-Expand(prk, "my_vpn v3 session" | SHA-256(AUTH 패킷 | RES 의 앞부분), 96B)
+ *   keys   = HKDF-Expand(prk, "my_vpn v4 session" | SHA-256(AUTH 패킷 | RES 의 앞부분), 96B)
  *            = C->S 키 | S->C 키 | RES_HANDSHAKE 키
  *
  *   - 기기 키가 들어간다: 기기 키를 모르는 쪽은 사이에 끼어 자기 일회용 키를 내밀어도
