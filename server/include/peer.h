@@ -14,6 +14,19 @@
 
 _Static_assert(MAX_PEERS <= (1 << IDX_SLOT_BIT), "MAX_PEERS exceeds slot bits");
 
+/* 감사 로그가 "이 세션이 이 목적지에 닿았다"를 목적지마다 한 번씩만 적으려고 기억하는
+ * 자리 (audit.c). */
+#define AUDIT_FLOWS 8
+
+typedef struct audit_flow {
+    uint32_t dst;
+    uint16_t dport;
+    uint8_t proto;
+    uint8_t allowed;
+    uint8_t used;
+    time_t at;		/* 마지막으로 적은 때, CLOCK_MONOTONIC 초 */
+} audit_flow_t;
+
 typedef struct peer {
     int32_t used;
     uint32_t session_idx;
@@ -43,6 +56,9 @@ typedef struct peer {
     /* 마지막으로 받아들인 keepalive 의 counter. 예전 포스처 보고의 재전송을 걸러낸다. */
     uint64_t ka_counter;
     int32_t ka_seen;
+
+    audit_flow_t flows[AUDIT_FLOWS];
+    int32_t flow_next;
 } peer_t;
 
 void peer_check_expired(void);
@@ -51,7 +67,8 @@ void peer_init(void);
 peer_t *peer_register(struct in_addr inner,
                         const struct sockaddr_in *outer, socklen_t len);
 peer_t *peer_find_idx(uint32_t idx);
-void peer_drop(peer_t *peer);
+/* reason 은 감사 로그에 남는 단어다 (audit.h). */
+void peer_drop(peer_t *peer, const char *reason);
 peer_t *peer_lookup(struct in_addr inner);
 peer_t *peer_find_device(const uint8_t id[DEVICE_ID_LEN]);
 void peer_dump(void);

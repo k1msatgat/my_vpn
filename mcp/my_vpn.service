@@ -8,6 +8,11 @@ Type=simple
 EnvironmentFile=/etc/my_vpn/server.env
 RuntimeDirectory=my_vpn
 RuntimeDirectoryMode=0700
+
+# 감사 로그가 쌓이는 곳 (/var/log/my_vpn). ProtectSystem=strict 아래에서 서버가 쓸 수 있는
+# 곳은 systemd 가 이렇게 내준 디렉터리뿐이다.
+LogsDirectory=my_vpn
+LogsDirectoryMode=0700
 ExecStart=/opt/my_vpn/libexec/service.sh run
 ExecStartPost=/opt/my_vpn/libexec/service.sh tun-up $MAINPID
 ExecReload=/bin/kill -HUP $MAINPID

@@ -76,6 +76,7 @@ command="/usr/local/bin/my_vpn_mcp",restrict ssh-ed25519 AAAA... ai-client
 | `server_start` / `server_stop` / `server_restart` | 서비스 제어. 재시작하면 모든 세션이 끊기고 클라이언트가 스스로 다시 붙는다 |
 | `server_reload` | `SIGHUP` — 기기 목록과 ACL 다시 읽기 (세션 유지). 파일을 손으로 고쳤을 때만 필요 |
 | `server_logs` | 서버 로그. `lines`, `contains`, `since_seconds` |
+| `audit_log` | 감사 로그 — 누가 붙었고 어디에 닿았고 왜 거절됐는지를 사건마다 한 줄씩. `lines`, `event`, `device`, `since_seconds` |
 | `device_list` | 등록된 기기 — ID, 이름, 터널 IP, 포스처 조건 (키 제외) |
 | `device_add` | 기기 등록. ID와 키는 기기의 `vpn_client.exe enroll`에서 나온 값 |
 | `device_update` | 포스처 조건 / 터널 IP / 이름 변경 |

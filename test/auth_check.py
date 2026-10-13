@@ -712,7 +712,9 @@ class Server:
     def __init__(self, *args):
         self.log = tempfile.TemporaryFile()
         self.status_path = tempfile.mktemp(prefix="vpn_status.", suffix=".sock")
-        self.proc = subprocess.Popen(["stdbuf", "-oL", SERVER, "-s", self.status_path, str(PORT)] + list(args),
+        self.audit_path = tempfile.mktemp(prefix="vpn_audit.", suffix=".log")
+        self.proc = subprocess.Popen(["stdbuf", "-oL", SERVER, "-s", self.status_path, "-a", self.audit_path,
+                                      str(PORT)] + list(args),
                                      stdout=self.log, stderr=subprocess.STDOUT)
         time.sleep(0.7)
         if self.proc.poll() is not None:
@@ -741,10 +743,17 @@ class Server:
         s.close()
         return json.loads(buf.decode())
 
+    def events(self):
+        """감사 로그의 사건들. 한 줄이 JSON 하나여야 한다 — 아니면 여기서 예외가 난다."""
+        with open(self.audit_path) as f:
+            return [json.loads(line) for line in f]
+
     def stop(self):
         self.proc.terminate()
         self.proc.wait()
         self.socket_left = os.path.exists(self.status_path)
+        if os.path.exists(self.audit_path):
+            os.unlink(self.audit_path)
 
 
 def udp_packet(src, dst, dport, ident):
@@ -976,6 +985,87 @@ def status_tests(srv):
     expect("status: input on the socket is ignored", find(srv.status(), "10.0.0.3") is not None, True)
 
 
+def audit_tests(srv):
+    """감사 로그가 사건마다 한 줄을 남기는지. ACL 을 켠 서버로 돌린다 (규칙은 icmp 만 허용)."""
+    c = Client()
+    server_ip = socket.inet_aton("10.0.0.1")
+    start = len(srv.events())
+
+    def since(event, **want):
+        """start 뒤에 적힌 사건 중 종류와 주어진 값이 맞는 것들."""
+        return [e for e in srv.events()[start:]
+                if e["event"] == event and all(e.get(k) == v for k, v in want.items())]
+
+    expect("audit: log file mode", "%03o" % (os.stat(srv.audit_path).st_mode & 0o777), "600")
+
+    idx = session(c)
+    opened = since("session_open", session="%08x" % idx)
+    expect("audit: session_open", len(opened), 1)
+    expect("audit: session_open says who and from where",
+           opened and (opened[0]["device"], opened[0]["tunnel_ip"], opened[0]["endpoint"].startswith("127.0.0.1:"),
+                       opened[0]["posture"]["firewall"]),
+           (DEV_ID.hex(), "10.0.0.3", True, "on"))
+
+    c.handshake(key=bytes(32))
+    c.request(dev_id=bytes(range(0xa0, 0xb0)))
+    expect("audit: auth_denied for a wrong key", len(since("auth_denied", device=DEV_ID.hex(), reason="bad_auth")), 1)
+    expect("audit: auth_denied for an unknown device, with the id it claimed",
+           len(since("auth_denied", device=bytes(range(0xa0, 0xb0)).hex(), reason="unknown_device")), 1)
+
+    # 패킷마다 적지 않는다. 같은 목적지와 같은 판정은 한 줄이다.
+    for seq in range(3):
+        c.send(data(idx, None, echo_request(TUN_IP, server_ip, 950 + seq)))
+        c.recv()
+    for seq in range(2):
+        c.send(data(idx, None, udp_packet(TUN_IP, server_ip, 53, 960 + seq)))
+    c.send(data(idx, None, udp_packet(TUN_IP, server_ip, 54, 970)))
+    time.sleep(0.3)
+    expect("audit: three pings to one destination, one line",
+           len(since("access", session="%08x" % idx, dst="10.0.0.1", proto=1, verdict="allow")), 1)
+    denied = since("access", session="%08x" % idx, verdict="deny")
+    expect("audit: denied destinations, one line each, with the reason",
+           sorted((e["dst"], e["proto"], e["dport"], e["why"]) for e in denied),
+           [("10.0.0.1", 17, 53, "acl"), ("10.0.0.1", 17, 54, "acl")])
+
+    sidx = session(c, strict_dev=True)
+    c.send(data(sidx, None, echo_request(TUN2_IP, server_ip, 980)))
+    c.recv()
+    c.send(keepalive(sidx, post=posture(firewall=STATE_OFF)))
+    c.recv()
+    closed = since("session_close", session="%08x" % sidx)
+    expect("audit: session_close says why and how much went through",
+           closed and (closed[0]["reason"], closed[0]["device"], closed[0]["rx_packets"], closed[0]["tx_packets"]),
+           ("posture", DEV2_ID.hex(), 1, 1))
+
+    # 같은 기기가 다시 인증하면 앞의 세션은 "replaced" 로 닫힌다.
+    session(c)
+    expect("audit: re-authentication closes the previous session",
+           len(since("session_close", session="%08x" % idx, reason="replaced")), 1)
+
+    srv.reload()
+    expect("audit: reload", [(e["what"], e["ok"]) for e in since("reload")], [("acl", True), ("devices", True)])
+    with open(srv.acl_path, "a") as f:
+        f.write("any any any any allwo\n")
+    srv.reload()
+    expect("audit: a reload that failed", len(since("reload", what="acl", ok=False)), 1)
+    with open(srv.acl_path, "w") as f:
+        f.write("10.0.0.0/24 10.0.0.1 icmp any allow\n")
+    srv.reload()
+
+    # 틀린 요청을 쏟아부어도 줄 수가 따라 늘지 않는다. 버린 만큼은 다음 줄에 적힌다.
+    before = len(srv.events())
+    for i in range(300):
+        c.send(header(REQ_HANDSHAKE) + bytes([0xee] * 15 + [i & 0xff]))
+    time.sleep(1.2)
+    c.drain()
+    c.request(dev_id=bytes([0xee] * 16))
+    flood = srv.events()[before:]
+    expect("audit: 300 bad requests in a burst are not 300 lines",
+           "limited" if len(flood) < 80 else "%d lines" % len(flood), "limited")
+    expect("audit: the suppressed count is written down",
+           "counted" if any(e.get("suppressed", 0) > 0 for e in flood) else "lost", "counted")
+
+
 def acl_loader_tests(dev_path):
     """ACL 파일의 실수를 조용히 넘기지 않는지. 서버는 tun 을 만들기 전에 끝난다."""
     global failed
@@ -1033,6 +1123,7 @@ def main():
             acl_tests(srv, acl_path)
             config_tests(srv, acl_path, path)
             status_tests(srv)
+            audit_tests(srv)
         finally:
             srv.stop()
             logs.append(srv.text())

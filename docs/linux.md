@@ -30,7 +30,7 @@ TUN 디바이스 생성에 root 권한(`CAP_NET_ADMIN`)이 필요합니다.
 ### Server
 
 ```bash
-sudo ./server/bin/vpn_server [-s status-socket] [-n prefix-len] [-m mtu] <port> <device-file> [acl-file]
+sudo ./server/bin/vpn_server [-s status-socket] [-a audit-log] [-n prefix-len] [-m mtu] <port> <device-file> [acl-file]
 
 # 다른 터미널에서 인터페이스 설정 (생성된 이름은 로그의 "tun device:" 확인)
 sudo ip addr add 10.0.0.1/24 dev tun0
@@ -43,6 +43,7 @@ sudo kill -HUP $(pidof vpn_server)    # 기기 목록과 ACL 을 다시 읽는�
 - `<device-file>`은 필수입니다. 등록된 기기만 세션을 받으므로, 목록이 없으면 누구도 받아 줄 수 없습니다.
   아래 [기기 등록과 포스처 정책](#기기-등록과-포스처-정책)을 보세요.
 - `-s <path>`를 주면 그 경로에 [상태 소켓](#상태-소켓)을 엽니다. 주지 않으면 열지 않습니다.
+- `-a <path>`를 주면 그 파일에 [감사 로그](#감사-로그)를 남깁니다.
 - `-n` / `-m`은 터널 대역의 prefix 길이와 MTU입니다 (기본 `24`, `1400`). 서버 자신의 tun에 붙인 값(`ip addr add ...`, `ip link set ... mtu`)과 같게 주세요. 서버는 이 값과 기기 목록의 터널 주소, ACL에서 뽑은 경로를 클라이언트에 내려 줍니다 — 클라이언트 쪽에는 터널 주소를 적지 않습니다.
 - 서비스로 띄우고 AI 클라이언트로 제어하려면 [MCP 서버](mcp.md)를 보세요.
 
@@ -238,6 +239,33 @@ keepalive(10초)마다 다시 보고합니다.
 ```
 
 ---
+
+## 감사 로그
+
+`-a <path>`로 띄우면 서버가 그 파일에 사건마다 한 줄씩 JSON을 덧붙입니다. 주지 않으면 남기지 않습니다.
+
+서버가 stdout에 찍는 로그는 사람이 따라 읽으라고 쓴 것이라 패킷마다 한 줄이고, 기기 ID와 세션과 목적지가 서로 다른 줄에 흩어져 있습니다. "어제 이 기기가 어디에 접근했는가"에 답하려면 처음부터 따라가며 다시 맞춰야 합니다. 상태 소켓은 지금의 상태만 보여 주고 지나간 일은 모릅니다. 감사 로그에는 패킷이 아니라 사건을 적습니다.
+
+```json
+{"time":"2026-10-13T12:34:56Z","event":"session_open","device":"86a5…53a3","tunnel_ip":"10.0.0.3","session":"9862b000","endpoint":"218.145.242.230:62975","posture":{"os_build":19045,"firewall":"on","antivirus":"on"}}
+{"time":"2026-10-13T12:35:02Z","event":"access","device":"86a5…53a3","tunnel_ip":"10.0.0.3","session":"9862b000","endpoint":"218.145.242.230:62975","dst":"10.101.0.1","proto":1,"dport":0,"verdict":"allow"}
+{"time":"2026-10-13T12:35:09Z","event":"access","device":"86a5…53a3","tunnel_ip":"10.0.0.3","session":"9862b000","endpoint":"218.145.242.230:62975","dst":"10.101.0.7","proto":6,"dport":22,"verdict":"deny","why":"posture"}
+{"time":"2026-10-13T12:41:30Z","event":"session_close","device":"86a5…53a3","tunnel_ip":"10.0.0.3","session":"9862b000","endpoint":"218.145.242.230:62975","reason":"expired","duration_sec":394,"rx_packets":41,"rx_bytes":3120,"tx_packets":38,"tx_bytes":2980,"acl_denied":3}
+```
+
+| 사건 | 언제 | 덧붙는 값 |
+|---|---|---|
+| `session_open` | 기기가 인증을 통과해 세션이 열렸다 | 기기, 터널 주소, 세션, 외부 주소, 포스처 |
+| `session_close` | 세션이 닫혔다 | `reason`: `expired`(60초 무응답) / `posture` / `device_removed` / `replaced`(같은 기기가 다시 인증) / `evicted`(표가 가득 참) / `error`, 열려 있던 시간, 오간 패킷과 바이트, 막힌 횟수 |
+| `auth_denied` | 핸드셰이크가 거절됐다 | 상대가 댄 기기 ID, 외부 주소, `reason`: `unknown_device` / `bad_auth` / `posture` |
+| `access` | 세션이 어떤 목적지에 닿았다 / 막혔다 | 목적지 주소, 프로토콜, 포트, `verdict`, 막혔으면 `why`: `acl` / `posture` / `no_acl_file` |
+| `reload` | `SIGHUP`으로 기기 목록이나 ACL을 다시 읽었다 | `what`, `ok`, 읽은 개수 |
+
+- **`access`는 패킷마다 적지 않습니다.** 같은 세션의 같은 목적지(주소, 프로토콜, 포트)와 같은 판정은 60초에 한 번입니다. 기억하는 자리는 세션마다 8개라, 목적지를 많이 오가는 세션은 60초 안에 같은 목적지가 다시 적힐 수 있습니다 — 덜 적는 쪽이 아니라 더 적는 쪽으로 틀립니다.
+- **거절된 핸드셰이크는 1초에 20줄까지만 적습니다.** 기기 ID는 공개된 이름표라 누구나 틀린 요청을 쏟아부을 수 있고, 그때마다 한 줄씩 쓰면 디스크가 먼저 찹니다. 넘친 만큼은 세어 두었다가 다음 줄의 `suppressed`에 적습니다.
+- 파일은 `600`으로 만들어집니다. `SIGHUP`을 받으면 같은 경로를 다시 엽니다 — 로그를 돌리는 쪽이 파일 이름을 바꾼 뒤 `SIGHUP`을 보내면 새 파일에 이어 씁니다.
+- 값은 전부 주소, 숫자, 16진수, 서버가 정한 단어입니다. 바깥에서 온 문자열은 적지 않습니다.
+- 서비스로 설치하면 `/var/log/my_vpn/audit.log`에 쌓이고, MCP의 `audit_log` 도구로 걸러 읽을 수 있습니다.
 
 ## 상태 소켓
 

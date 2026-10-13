@@ -26,6 +26,11 @@ const ACL_APPLIED = '/run/my_vpn/acl.applied';
 const STATUS_SOCK = '/run/my_vpn/status.sock';
 const SERVER_BIN = '/opt/my_vpn/server/bin/vpn_server';
 const AUTH_CHECK = '/opt/my_vpn/test/auth_check.py';
+const AUDIT_FILE = '/var/log/my_vpn/audit.log';
+const AUDIT_EVENTS = ['session_open', 'session_close', 'auth_denied', 'access', 'reload'];
+
+/* 감사 로그는 계속 자란다. 통째로 읽지 않고 끝에서 이만큼만 본다. */
+const AUDIT_TAIL_BYTES = 4 * 1024 * 1024;
 
 /* server/include 의 값과 같아야 한다. */
 const MAX_DEVICES = 16;
@@ -353,6 +358,23 @@ function aclPending(running) {
 	return running && applied !== null && applied !== aclHash();
 }
 
+/* 파일의 끝 max 바이트. 중간부터 읽었으면 첫 줄은 잘려 있으므로 버린다. */
+function readTail(path, max) {
+	const fd = fs.openSync(path, 'r');
+
+	try {
+		const size = fs.fstatSync(fd).size;
+		const start = Math.max(0, size - max);
+		const buf = Buffer.alloc(size - start);
+		const n = fs.readSync(fd, buf, 0, buf.length, start);
+		const text = buf.toString('utf8', 0, n);
+
+		return start === 0 ? text : text.slice(text.indexOf('\n') + 1);
+	} finally {
+		fs.closeSync(fd);
+	}
+}
+
 /* ---- systemd / journal ---------------------------------------------------- */
 
 function unit() {
@@ -619,6 +641,51 @@ const COMMANDS = {
 		}
 
 		return { lines: out.slice(-lines).map((e) => `${e.time} ${e.msg}`) };
+	},
+
+	/* 감사 로그는 서버가 직접 쓰는 파일이다 (server/include/audit.h). 한 줄이 사건 하나의
+	 * JSON 이라 그대로 읽어 걸러서 돌려준다. journal 의 로그와 달리 재시작해도 이어지고,
+	 * 패킷마다가 아니라 사건마다 한 줄이다. */
+	audit(a) {
+		const lines = a.lines === undefined ? 50 : wantInt(a.lines, 'lines', 1, 500);
+		const device = a.device === undefined ? null : wantId(a.device);
+		const since = a.since_seconds === undefined ? null :
+			Date.now() - wantInt(a.since_seconds, 'since_seconds', 1, 30 * 86400) * 1000;
+		const events = [];
+		let text;
+
+		if (a.event !== undefined && !AUDIT_EVENTS.includes(a.event)) {
+			fail(`event must be one of ${AUDIT_EVENTS.join(', ')}`);
+		}
+
+		try {
+			text = readTail(AUDIT_FILE, AUDIT_TAIL_BYTES);
+		} catch (e) {
+			if (e.code === 'ENOENT') {
+				return { events, note: 'no audit log yet; the server creates it when it starts' };
+			}
+			throw e;
+		}
+
+		for (const line of text.split('\n')) {
+			let e;
+
+			if (!line) {
+				continue;
+			}
+			try {
+				e = JSON.parse(line);
+			} catch (err) {
+				continue;	/* 서버가 쓰는 중인 마지막 줄 */
+			}
+			if ((a.event && e.event !== a.event) || (device && e.device !== device) ||
+					(since !== null && Date.parse(e.time) < since)) {
+				continue;
+			}
+			events.push(e);
+		}
+
+		return { events: events.slice(-lines) };
 	},
 
 	device_list() {

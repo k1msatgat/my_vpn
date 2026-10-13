@@ -6,6 +6,7 @@
 
 #include "common.h"
 #include "peer.h"
+#include "audit.h"
 
 static peer_t peers[MAX_PEERS];
 
@@ -70,6 +71,7 @@ void peer_check_expired(void) {
 	for (i = 0; i < MAX_PEERS; i++){
 		if(peers[i].used){
 			if (now - peers[i].last_seen > SESSION_TIMEOUT_SEC){
+				audit_session_close(&peers[i], "expired");
 				secure_session_close(&peers[i].secure);
 				peers[i].used = 0;
 				printf("[peer] expire inner ip[%s] idx=%08x\n",ip4(peers[i].inner, dst), peers[i].session_idx);
@@ -118,6 +120,11 @@ peer_t *peer_register(struct in_addr inner, const struct sockaddr_in *outer, soc
 	}
 
 	peer = &peers[slot];
+	/* 이 자리에 아직 세션이 있었다면 밀려나는 것이다: 표가 가득 차 가장 오래된 것이
+	 * 나가거나, 같은 터널 주소가 다른 외부 주소에서 다시 등록됐다. */
+	if (peer->used) {
+		audit_session_close(peer, peer->inner.s_addr == inner.s_addr ? "replaced" : "evicted");
+	}
 	/* 이 자리에 있던 세션의 키를 먼저 놓는다. 그냥 덮으면 키 객체가 샌다. */
 	secure_session_close(&peer->secure);
 	memset(peer, 0, sizeof(*peer));
@@ -138,11 +145,12 @@ peer_t *peer_register(struct in_addr inner, const struct sockaddr_in *outer, soc
 
 /* 만료를 기다리지 않고 세션을 바로 내린다. 포스처가 정책에 못 미치게 됐거나 기기가
  * 목록에서 지워졌을 때 쓴다. 이후 이 idx 로 오는 패킷은 unknown session 으로 버려진다. */
-void peer_drop(peer_t *peer)
+void peer_drop(peer_t *peer, const char *reason)
 {
 	char ib[INET_ADDRSTRLEN];
 
 	printf("[peer] drop %s idx=%08x\n", ip4(peer->inner, ib), peer->session_idx);
+	audit_session_close(peer, reason);
 	secure_session_close(&peer->secure);
 	peer->used = 0;
 }

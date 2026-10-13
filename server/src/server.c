@@ -18,6 +18,7 @@
 #include "secure.h"
 #include "device.h"
 #include "status.h"
+#include "audit.h"
 
 #define MAX_EVENTS 8
 
@@ -158,6 +159,7 @@ static void handle_request(int32_t sock, const uint8_t *packet, int32_t n,
 	dev = device_find(body);
 	if (dev == NULL) {
 		printf("[HS] unknown device %s\n", device_id_str(body, ids));
+		audit_auth_denied(body, src, DENY_UNKNOWN_DEVICE);
 		send_deny(sock, src, srclen, DENY_UNKNOWN_DEVICE, NULL, NULL);
 		return;
 	}
@@ -285,6 +287,7 @@ static void handle_auth(int32_t sock, const uint8_t *packet, int32_t n,
 	dev = device_find(body + AUTH_OFF_DEVICE_ID);
 	if (dev == NULL) {
 		printf("[HS] unknown device %s\n", device_id_str(body + AUTH_OFF_DEVICE_ID, ids));
+		audit_auth_denied(body + AUTH_OFF_DEVICE_ID, src, DENY_UNKNOWN_DEVICE);
 		send_deny(sock, src, srclen, DENY_UNKNOWN_DEVICE, NULL, NULL);
 		return;
 	}
@@ -304,6 +307,7 @@ static void handle_auth(int32_t sock, const uint8_t *packet, int32_t n,
 			crypt_hmac(dev->key, AUTH_KEY_LEN, packet, AUTH_SIGNED_LEN, mac) < 0 ||
 			!crypt_equal(mac, auth_mac, AUTH_MAC_LEN)) {
 		printf("[HS] bad auth from device %s\n", ids);
+		audit_auth_denied(dev->id, src, DENY_BAD_AUTH);
 		send_deny(sock, src, srclen, DENY_BAD_AUTH, NULL, NULL);
 		return;
 	}
@@ -321,6 +325,7 @@ static void handle_auth(int32_t sock, const uint8_t *packet, int32_t n,
 	if (!device_posture_ok(dev, &posture)) {
 		printf("[HS] device %s posture rejected (build=%u firewall=%u antivirus=%u)\n",
 				ids, posture.os_build, posture.firewall, posture.antivirus);
+		audit_auth_denied(dev->id, src, DENY_POSTURE);
 		send_deny(sock, src, srclen, DENY_POSTURE, dev, auth_mac);
 		return;
 	}
@@ -329,14 +334,14 @@ static void handle_auth(int32_t sock, const uint8_t *packet, int32_t n,
 	 * 엿들은 패킷은 번호가 달라 찾지 못하고, 찾더라도 키가 달라 열리지 않는다. */
 	peer = peer_lookup(tun_ip);
 	if (peer != NULL) {
-		peer_drop(peer);
+		peer_drop(peer, "replaced");
 	}
 
 	/* 이 기기가 다른 주소로 열어 둔 세션도 내린다. 관리자가 기기의 터널 주소를 바꾸면
 	 * 예전 주소의 세션이 남는데, 그 주소는 이제 이 기기의 것이 아니다. 만료(60초)를
 	 * 기다리는 동안 그 주소를 새로 받은 다른 기기와 겹친다. */
 	while ((peer = peer_find_device(dev->id)) != NULL) {
-		peer_drop(peer);
+		peer_drop(peer, "replaced");
 	}
 
 	peer = peer_register(tun_ip, src, srclen);
@@ -345,16 +350,18 @@ static void handle_auth(int32_t sock, const uint8_t *packet, int32_t n,
 		return;
 	}
 
+	memcpy(peer->device_id, dev->id, DEVICE_ID_LEN);
+	peer->posture = posture;
+
 	len = open_session(peer, dev, packet, res, sizeof(res));
 	if (len < 0) {
 		printf("[HS] key agreement failed for device %s\n", ids);
-		peer_drop(peer);
+		peer_drop(peer, "error");
 		return;
 	}
 
-	memcpy(peer->device_id, dev->id, DEVICE_ID_LEN);
-	peer->posture = posture;
 	stats.handshake_ok++;
+	audit_session_open(peer);
 
 	printf("[HS] device %s authenticated as %s (build=%u firewall=%u antivirus=%u)\n",
 			ids, ip_str(tun_ip, ib), posture.os_build, posture.firewall, posture.antivirus);
@@ -421,7 +428,7 @@ static void handle_keepalive(int32_t sock, peer_t *peer, const uint8_t *body, in
 	if (dev == NULL) {
 		printf("[ka] device %s is no longer registered\n", ids);
 		send_session_deny(sock, peer, src, srclen, DENY_UNKNOWN_DEVICE);
-		peer_drop(peer);
+		peer_drop(peer, "device_removed");
 		return;
 	}
 
@@ -443,7 +450,7 @@ static void handle_keepalive(int32_t sock, peer_t *peer, const uint8_t *body, in
 		printf("[ka] device %s posture rejected (build=%u firewall=%u antivirus=%u)\n",
 				ids, posture.os_build, posture.firewall, posture.antivirus);
 		send_session_deny(sock, peer, src, srclen, DENY_POSTURE);
-		peer_drop(peer);
+		peer_drop(peer, "posture");
 		return;
 	}
 
@@ -488,9 +495,15 @@ int main(int argc, char *argv[])
 		return crypt_selftest();
 	}
 
-	while ((opt = getopt(argc, argv, "s:n:m:")) != -1) {
+	while ((opt = getopt(argc, argv, "s:n:m:a:")) != -1) {
 		if (opt == 's') {
 			status_path = optarg;
+		}
+		else if (opt == 'a') {
+			if (audit_open(optarg) < 0) {
+				fprintf(stderr, "cannot open the audit log : %s\n", optarg);
+				return 1;
+			}
 		}
 		else if (opt == 'n') {
 			tun_prefix = (int)strtol(optarg, &end, 10);
@@ -520,7 +533,7 @@ int main(int argc, char *argv[])
 	}
 
 	if (argc != 3 && argc != 4) {
-		fprintf(stderr, "usage: %s [-s status-socket] [-n tunnel-prefix-len] [-m tunnel-mtu] <port> <device-file> [acl-file]\n", argv[0]);
+		fprintf(stderr, "usage: %s [-s status-socket] [-a audit-log] [-n tunnel-prefix-len] [-m tunnel-mtu] <port> <device-file> [acl-file]\n", argv[0]);
 		fprintf(stderr, "       -n, -m: what the tun device is configured with (default /24, mtu %d);\n", TUN_MTU);
 		fprintf(stderr, "               they are pushed to every client\n");
 		fprintf(stderr, "       %s selftest\n", argv[0]);
@@ -640,6 +653,9 @@ int main(int argc, char *argv[])
 		if (reload_requested) {
 			reload_requested = 0;
 
+			/* 감사 로그를 돌리는 쪽이 파일 이름을 바꿔 두었으면 새 파일에 이어 쓴다. */
+			audit_reopen();
+
 			/* ACL 은 패킷마다 대 보므로 다음 패킷부터 바로 새 규칙이다. 시작할 때
 			 * 규칙 파일을 주지 않은 서버는 다시 읽어도 ACL 이 켜지지 않는다. 파일이
 			 * 생겼다고 도중에 켜면, 파일이 사라졌을 때 끄는 것도 받아 줘야 하고 그건
@@ -648,9 +664,11 @@ int main(int argc, char *argv[])
 				int nr = acl_load(argv[3]);
 				if (nr < 0) {
 					printf("acl: reload failed, keeping the previous rules\n");
+					audit_reload("acl", 0, 0);
 				}
 				else {
 					printf("acl: reloaded, %d rules\n", nr);
+					audit_reload("acl", 1, nr);
 					acl_dump();
 				}
 			}
@@ -658,9 +676,11 @@ int main(int argc, char *argv[])
 			nd = device_load(argv[2]);
 			if (nd < 0) {
 				printf("device: reload failed, keeping the previous list\n");
+				audit_reload("devices", 0, 0);
 			}
 			else {
 				printf("device: reloaded, %d devices\n", nd);
+				audit_reload("devices", 1, nd);
 				device_dump();
 			}
 		}
@@ -778,9 +798,12 @@ int main(int argc, char *argv[])
 								peer->posture.antivirus);
 					}
 					printf("\n");
+					audit_access(peer, ip, n, 0, !acl_enabled ? "no_acl_file" :
+							verdict == ACL_DENY_POSTURE ? "posture" : "acl");
 					continue;
 				}
 
+				audit_access(peer, ip, n, 1, NULL);
 				peer_touch(peer, &src, srclen);
 				peer->rx_packets++;
 				peer->rx_bytes += (uint64_t)n;
@@ -849,6 +872,7 @@ out:
 	}
 	close(sock);
 	close(tun_fd);
+	audit_close();
 	return ret;
 }
 

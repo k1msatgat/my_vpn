@@ -50,6 +50,7 @@ Zero Trust Network Access(ZTNA)의 기반 구조를 학습하는 것을 목표�
 - **ACL** — `src / dst / proto / dport` 기반 first-match 정책, 기본 거부(default deny)
 - **리소스별 포스처 조건** — ACL 규칙마다 요구하는 포스처를 따로 건다. 터널에 들어온 기기라도 방화벽을 끄면 SSH 같은 민감한 목적지만 닫힌다
 - **상태 소켓** — 지금 붙어 있는 세션(기기, 포스처, 트래픽)과 사유별 거부 횟수를 읽기 전용 유닉스 소켓으로 내보낸다
+- **감사 로그** — 누가 언제 들어와 어디에 닿았고 왜 거절됐는지를 사건마다 한 줄씩 JSON으로 남긴다. 패킷마다가 아니라 세션과 목적지마다 한 번
 - **MCP 제어** — AI 클라이언트가 서버를 올리고 내리고, 기기와 ACL을 바꾸고, 상태를 본다 ([docs/mcp.md](docs/mcp.md))
 - **위조 방어** — 서버는 inner src가 세션에 등록된 터널 IP와 같은지, 클라이언트는 출발지가 서버인지 확인
 - **Keepalive & 세션 만료** — 유휴 시 10초마다 keepalive, 서버는 60초 무응답 세션을 정리
@@ -299,6 +300,7 @@ my_vpn/
 │       ├── crypt.c        # crypt.h 의 OpenSSL 구현 — SHA-256 / HMAC, ECDH P-256, AES-256-GCM, 난수
 │       ├── policy.c       # 포스처 조건의 문법과 판정 (기기 목록과 ACL이 함께 쓴다)
 │       ├── status.c       # 상태 소켓 — 세션과 카운터를 JSON으로
+│       ├── audit.c        # 감사 로그 — 세션 / 거절 / 접근 판정을 사건마다 한 줄씩
 │       └── alc.c          # ACL 파싱 및 매칭, 규칙별 포스처 조건
 ├── windows/               # Windows 클라이언트 (Visual Studio 솔루션)
 │   ├── README.md          #   Windows 클라이언트, GUI, 패킷 분석기
@@ -379,7 +381,7 @@ my_vpn/
 - **Linux 클라이언트의 재핸드셰이크 판정은 벽시계(`time()`) 기준입니다.** 시스템 시간이 크게 바뀌면 재핸드셰이크가 일찍 일어날 수 있습니다. 서버의 세션 만료와 nonce 수명, Windows 클라이언트는 단조 시계를 씁니다.
 - **ACL이 막은 패킷은 클라이언트에게 알리지 않습니다.** 조용히 버리므로 사용자에게는 타임아웃으로 보입니다. 포스처 때문에 막힌 것인지 알려 주려면 와이어에 메시지가 하나 더 필요합니다.
 - **ACL 규칙의 출발지는 터널 IP입니다.** 터널 IP는 기기에 묶여 있고 위조할 수 없어 기기를 가리키는 셈이지만, 여러 기기를 역할로 묶어 쓰는 방법은 없습니다.
-- **서버의 카운터는 쌓아 두지 않습니다.** 상태 소켓의 숫자는 서버가 뜬 뒤부터 센 값이고 재시작하면 0으로 돌아갑니다.
+- **서버의 카운터는 쌓아 두지 않습니다.** 상태 소켓의 숫자는 서버가 뜬 뒤부터 센 값이고 재시작하면 0으로 돌아갑니다. 지나간 일은 감사 로그(`-a`)에 남습니다.
 - **Linux 클라이언트는 인증 이전의 프로토콜에 머물러 있고, 더 발전시키지 않습니다.** 지금 서버에 붙지 못하며 `test/client.sh`의 시나리오도 통과하지 못합니다. 초기 단계(터널, 핸드셰이크, keepalive, 재핸드셰이크)를 구현하고 검증한 기록으로 남겨 둡니다. 포스처 수집은 Windows 전용입니다.
 - **기기 키는 서버에 평문으로 있습니다.** 기기 목록 파일의 권한(600)에 기대며, 서버가 뚫리면 모든 기기의 키가 드러납니다. 공개키 방식이면 서버에는 공개키만 두면 됩니다.
 - **암호 프로토콜은 검토를 받은 적이 없습니다.** 알고리즘은 OpenSSL과 CNG의 것이고 조립하는 방식(사전 공유 키 + 일회용 ECDH + HKDF + AEAD)도 널리 쓰이는 구조이지만, 이 조립 자체를 다른 사람이 분석한 적은 없습니다. 테스트가 보여 주는 것은 "의도한 대로 동작한다"까지입니다.
@@ -405,6 +407,7 @@ my_vpn/
 - [x] 암호화 & 키 교환 — 일회용 ECDH(P-256) + 기기 키로 세션 키 유도, AES-256-GCM, `counter`를 nonce 및 재전송 방지에 사용 (`test/auth_check.py` 119개 통과)
 - [x] 서버가 내려 주는 터널 설정 — 터널 주소 / prefix / MTU와 ACL에서 뽑은 경로를 `RES_HANDSHAKE`와 keepalive 응답에 싣고, 클라이언트가 달라진 부분만 어댑터에 맞춤 (`test/auth_check.py` 130개 통과, 실제 Windows 클라이언트로 주소 / 경로 적용과 그 경로로의 ping 확인)
 - [x] 서버 뒤의 네트워크로 전달 — 규칙 파일이 없으면 터널 대역 안까지만, 서비스의 `FORWARD_OUT`으로 IP 전달 / 주소 변환 / 되돌아오는 답만 허용 (`test/auth_check.py` 136개 통과, 실제 Windows 클라이언트로 서버 뒤의 게이트웨이까지 ping, 규칙을 빼면 경로와 함께 끊기고 넣으면 돌아오는 것 확인)
+- [x] 감사 로그 — 세션의 시작과 끝, 거절된 핸드셰이크, 목적지별 접근 판정, 정책 다시 읽기를 JSON 줄로 (`test/auth_check.py` 149개 통과), MCP `audit_log` 도구
 - [x] 신원 기반 인증 — 기기 키 챌린지-응답, 포스처 기반 정책 (ZTNA)
   - [x] 와이어 포맷 정의 (`CHALLENGE` / `AUTH` / `DENY`, 포스처 보고)
   - [x] Windows 클라이언트 — 포스처 수집, 기기 등록, 인증 핸드셰이크
@@ -448,6 +451,7 @@ my_vpn/
 | AI 작성 | 세션 암호화 — `lib/common`의 `crypt.h` / `secure.{h,c}`, `server/src/crypt.c`(OpenSSL), `windows/core/crypt.c`(CNG), `server.c`와 `tunnel.c`의 핸드셰이크 / 데이터 / keepalive 경로를 세션 키로 감싸도록 고친 것, `test/auth_check.py`의 암호화 검사. 키를 어떻게 뽑고 무엇을 tag로 덮을지는 AI가 제안했고, 기존의 `auth.c` / `hmac.c` / `mock_server.py`는 이 과정에서 대체돼 지웠음 |
 | AI 작성 | 서버가 내려 주는 터널 설정 — `proto.{h,c}`의 `net_config`, `alc.c`의 `acl_routes`, `server.c`의 `net_config_for`와 keepalive 응답, `tunnel.c`의 `netcfg_apply` / `netcfg_refresh`(주소 · MTU · 경로를 달라진 만큼만 고침), GUI의 터널 IP 칸을 입력에서 표시로 바꾼 것. 경로를 ACL에서 뽑는 방식은 AI가 제안 |
 | AI 작성 | 서버 뒤의 네트워크로 전달 — `server.c`의 규칙 파일이 없을 때의 판정, `mcp/service.sh`의 `forward_up` / `forward-down`(nftables), `docs/linux.md`의 해당 절 |
+| AI 작성 | 감사 로그 — `server/src/audit.c`, `server.c` / `peer.c`의 사건 지점, `mcp/ctl.cjs`의 `audit`와 MCP `audit_log` 도구 |
 | AI 작성 | `mcp/` MCP 서버 전체 — `server.js`(도구 선언), `ctl.cjs`(root 헬퍼), systemd 유닛, 설치 스크립트, `docs/mcp.md` |
 | AI 작성 | GUI 재설계 — `gui/ui_theme.cpp`, `gui/ui_controls.cpp`, `MainDlg`의 배치와 그리기, `EnrollDlg`의 그리기, `vpn_gui.rc`, 앱 아이콘(`windows/tools/mkicon.py`). Linux 장비에서 작성했고 MSVC 빌드는 CI로 확인, 실행은 아직 확인하지 못함 |
 | AI 작성 | `.github/workflows/ci.yml`, CI가 찾은 `posture.c`의 `wscapi.dll` 동적 로드 |
