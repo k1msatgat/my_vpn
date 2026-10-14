@@ -29,7 +29,7 @@ SERVER=/opt/my_vpn/server/bin/vpn_server
 #
 # 규칙은 우리 표(table ip my_vpn) 하나에 모은다. 장비에 이미 있는 방화벽 규칙을 고치지
 # 않고, 지울 때도 그 표만 지우면 된다. firewalld 같은 다른 방화벽이 전달을 막고 있으면
-# 그쪽에서도 열어야 한다 (docs/mcp.md).
+# 그쪽에서도 열어야 한다 (README).
 forward_up() {
 	local dev=$1 net
 

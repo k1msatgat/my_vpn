@@ -100,7 +100,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Wintun 은 저장소에 넣지 않는다 (windows/README.md 의 "빌드와 실행" 1번).
+      # Wintun 은 저장소에 넣지 않는다 (wintun.net 에서 받아 windows/third_party 에 푼다).
       # 받은 파일이 wintun.net 에 공개된 해시와 같은지 확인한 뒤에 푼다.
       - name: Fetch Wintun
         shell: pwsh

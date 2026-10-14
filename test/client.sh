@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 클라이언트 장비에서 실행. 빌드 -> vpn_client 실행까지 한 번에 한다. tun 의 주소와 MTU 는
 # 서버가 정해 내려 주므로 여기서 붙이지 않는다. 서버에서 test/server.sh 가 먼저 떠 있어야 하고,
-# 이 기기가 등록돼 있어야 한다 (vpn_client enroll, docs/linux.md).
+# 이 기기가 등록돼 있어야 한다 (vpn_client enroll, README 의 "장비 두 대").
 #
 #   test/client.sh                 일반 실행 (Ctrl-C 로 종료)
 #   test/client.sh idle [sec]      sec 초(기본 120) 방치: 재핸드셰이크가 없어야 하고 세션이 살아 있어야 함

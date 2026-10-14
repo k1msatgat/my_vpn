@@ -279,7 +279,7 @@ function readDevices() {
 function writeDevices(devices) {
 	const lines = [
 		'# my_vpn 기기 목록. MCP(my_vpn_ctl)가 관리한다 — 손으로 고쳐도 되지만 주석은 줄 끝의',
-		'# 이름표만 남는다. 형식은 docs/linux.md 의 "기기 등록과 포스처 정책".',
+		'# 이름표만 남는다. 형식은 README 의 "설정 파일".',
 		'#',
 		'# id (32 hex)  key (64 hex)  tunnel-ip  requirements  # label',
 	];
@@ -990,7 +990,7 @@ const COMMANDS = {
 	},
 
 	acl_set(a) {
-		const lines = ['# my_vpn ACL. MCP(my_vpn_ctl)가 관리한다. 형식은 docs/linux.md 의 "ACL".',
+		const lines = ['# my_vpn ACL. MCP(my_vpn_ctl)가 관리한다. 형식은 README 의 "설정 파일".',
 			'# src  dst  proto  dport  action'];
 
 		if (!Array.isArray(a.rules) || a.rules.length === 0) {

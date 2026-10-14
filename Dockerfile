@@ -7,7 +7,7 @@
 #       -v my_vpn_id:/var/lib/my_vpn my_vpn client
 #
 # --privileged 는 쓰지 않는다. tun 을 만들고 주소 / 경로 / nft 를 다루는 데 필요한 것은
-# CAP_NET_ADMIN 과 /dev/net/tun 뿐이다. 자세한 것은 docs/linux.md 의 "Docker".
+# CAP_NET_ADMIN 과 /dev/net/tun 뿐이다. compose 로 서버 + 클라이언트를 돌리려면 docker/demo.sh.
 
 # ---- 빌드 --------------------------------------------------------------------
 FROM debian:bookworm-slim AS build
