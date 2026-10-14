@@ -450,6 +450,14 @@ test/linux_e2e.sh       # netns 두 개: 등록 → 연결 → ACL 차단 → �
 
 root 가 아니면 사용자 네임스페이스(`unshare -rn`) 안에서 돌고, 장비의 네트워크는 건드리지 않습니다.
 
+### 컨테이너 (서버 + 클라이언트)
+
+```bash
+docker/demo.sh          # docker compose 로 두 컨테이너: 같은 시나리오 (CAP_NET_ADMIN + /dev/net/tun 만)
+```
+
+단독 서버 / 클라이언트 컨테이너 실행은 [docs/linux.md#docker](docs/linux.md#docker).
+
 ### 장비 두 대 (Linux 서버 + Linux 클라이언트)
 
 **서버**
@@ -498,6 +506,7 @@ ping 10.0.0.1
 | 서버의 프로토콜 | `sudo python3 test/auth_check.py` — 클라이언트인 척 UDP 패킷을 직접 만들어 보낸다. **176개.** 세션 키 유도와 패킷 형식을 서버의 코드를 거치지 않고 따로 구현했다 | CI, 한 장비 |
 | 암호 도구 | `vpn_server selftest` / `vpn_client selftest` / `vpn_client.exe selftest` — 같은 표준 벡터 20개 | CI |
 | 빌드 | Linux `-Wall -Wextra -Werror`, Windows `/W4` 경고 없음 | CI |
+| 컨테이너 | `docker/demo.sh` — 서버 + 클라이언트 두 컨테이너로 같은 시나리오 | CI |
 | 서버 처리량 | `tools/loadgen/bench.sh` — 아래 [성능](#성능) | CI |
 | 두 장비 시나리오 | `test/server.sh` + `test/client.sh [idle\|stop\|restart]` — 유휴 중 keepalive, 클라이언트 정지 뒤 만료와 복구, 서버 재시작 복구 | 실제 장비 (v4 클라이언트로는 아직 돌려 보지 않음) |
 
@@ -570,6 +579,7 @@ my_vpn/
 │   ├── linux_e2e.sh           # Linux 서버 <-> 클라이언트 (netns 두 개)
 │   ├── auth_check.py          # 서버의 프로토콜 검사
 │   └── server.sh, client.sh   # 두 장비 시나리오
+├── Dockerfile, docker-compose.yml, docker/   # 이미지(서버 + 클라이언트), entrypoint, 등록 코드, 데모
 ├── mcp/                       # 서버 관리 — MCP 서버(Node.js)와 root 헬퍼 my_vpn_ctl, systemd 유닛
 ├── windows/                   # Windows 클라이언트 (서비스 + GUI + 콘솔, Visual Studio 솔루션)
 ├── docs/{linux,experiments,mcp}.md
@@ -654,7 +664,8 @@ my_vpn/
 | OpenSSL 암호 구현을 `server/src/crypt.c` 에서 `lib/common/src/crypt_openssl.c` 로 옮긴 것 |
 | Linux 클라이언트 v4 — `client/src/session.c`(핸드셰이크, 등록, 세션 송신 — loadgen 과 공유), `identity.c`(신원 파일), `posture.c`(커널 버전, nftables), `netcfg.c`(ioctl 로 주소·MTU·경로), `client.c` 의 v4 루프와 명령. 동작 규칙은 Windows 클라이언트의 `tunnel.c` 를 따랐다 |
 | `test/linux_e2e.sh`(netns 두 개의 전체 경로 시험)와 CI 단계, `test/client.sh` / `common.sh` 를 새 명령행으로 고친 것 |
-| `docs/linux.md`의 Linux 클라이언트 절, `docs/experiments.md`의 실험 절차와 해석 초안 (실험 0은 CI 가 돌린 측정, 1~8은 직접 실행) |
+| Docker — `Dockerfile`, `docker/entrypoint.sh`, `docker/enroll-code.sh`, `docker-compose.yml`, `docker/demo.sh`, CI 의 `docker` 잡 |
+| `docs/linux.md`의 Linux 클라이언트 절과 Docker 절, `docs/experiments.md`의 실험 절차와 해석 초안 (실험 0은 CI 가 돌린 측정, 1~8은 직접 실행) |
 | 이 README — Linux 기준 재구성, "표준 프로토콜과의 대조", 보안 모델의 확인 열 |
 
 </details>

@@ -2,6 +2,7 @@
 #
 #   server   Linux 서버와 클라이언트를 경고 없이 빌드하고, 패킷 수준의 인증 검사와
 #            Linux 서버 <-> Linux 클라이언트 전체 경로(netns 두 개)를 돌린다.
+#   docker   이미지를 빌드하고 서버 + 클라이언트 두 컨테이너로 전체 시나리오를 돌린다.
 #   bench    부하 생성기로 서버 데이터 경로의 처리량을 재고 perf 로 어디서 시간을 쓰는지 본다.
 #   windows  Windows 클라이언트(콘솔 + 서비스 + MFC GUI)를 MSVC 로 빌드한다.
 #
@@ -49,6 +50,18 @@ jobs:
           npm ci --omit=dev --no-audit --no-fund
           node --check server.js
           node --check ctl.cjs
+
+  # Dockerfile 과 docker-compose.yml 이 실제로 도는지. 개발 장비에는 docker 가 없다.
+  docker:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Server + client containers (docker/demo.sh)
+        run: docker/demo.sh
+
+      - name: Image size
+        run: docker image ls my_vpn --format '{{.Repository}} {{.Size}}'
 
   # 서버 데이터 경로의 처리량. 개발 장비는 CPU 가 하나라 서버와 부하 생성기를 같이
   # 띄우면 서로 CPU 를 뺏는다 — 러너(4 vCPU)에서 둘을 다른 CPU 에 묶어 잰다.

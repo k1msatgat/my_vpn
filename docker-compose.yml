@@ -1,0 +1,36 @@
+# 서버와 Linux 클라이언트 두 컨테이너. docker/demo.sh 가 이것으로 등록 -> 연결 -> ACL 차단 ->
+# 포스처 거부와 복구를 돌린다 (test/linux_e2e.sh 와 같은 시나리오).
+#
+#   docker compose up -d server
+#   docker compose exec server enroll-code.sh 10.0.0.2 -l laptop     # -> 코드
+#   ENROLL_CODE=<code> docker compose up -d client
+#   docker compose exec client ping 10.0.0.1
+#
+# 두 컨테이너 모두 CAP_NET_ADMIN 과 /dev/net/tun 만 받는다 (--privileged 아님).
+
+name: my_vpn
+
+services:
+  server:
+    build: .
+    image: my_vpn
+    command: server
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    volumes: ["server-etc:/etc/my_vpn"]
+    ports: ["9000:9000/udp"]
+
+  client:
+    image: my_vpn
+    command: client
+    depends_on: [server]
+    environment:
+      SERVER: server
+      ENROLL_CODE: ${ENROLL_CODE:-}
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    volumes: ["client-id:/var/lib/my_vpn"]
+
+volumes:
+  server-etc:
+  client-id:

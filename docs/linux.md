@@ -181,6 +181,22 @@ docker run -d --cap-add NET_ADMIN --device /dev/net/tun \
 - **서버 뒤의 네트워크로 내보내기(NAT)는 컨테이너 예시에 넣지 않았습니다.** 호스트의 forwarding 과 nftables 설정이 얽힙니다.
 - **컨테이너의 포스처는 그 컨테이너의 것입니다.** 클라이언트 컨테이너가 보고하는 방화벽 상태는 컨테이너 네트워크 네임스페이스의 nft 규칙셋이고, 호스트의 방화벽이 아닙니다. 커널 버전은 호스트의 커널입니다.
 
+### docker compose — 서버 + 클라이언트
+
+```bash
+docker/demo.sh          # 등록 -> 연결 -> ACL 차단 -> 포스처 거부와 복구 (test/linux_e2e.sh 와 같은 시나리오)
+```
+
+`docker-compose.yml` 의 두 서비스(`server`, `client`)를 띄워 위 시나리오를 돌리고 PASS / FAIL 을 찍습니다. 끝나면 컨테이너와 볼륨을 지웁니다(`KEEP=1` 이면 남김). CI 의 `docker` 잡이 매번 돌립니다. 손으로 해 보려면:
+
+```bash
+docker compose up -d server
+docker compose exec server enroll-code.sh 10.0.0.2 -l laptop
+ENROLL_CODE=<code> docker compose up -d client
+docker compose exec client ping 10.0.0.1
+docker compose logs -f
+```
+
 ---
 
 ## 기기 등록과 포스처 정책
