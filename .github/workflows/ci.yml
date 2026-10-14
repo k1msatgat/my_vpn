@@ -1,6 +1,7 @@
 # 푸시할 때마다 양쪽을 실제로 빌드한다.
 #
 #   server   Linux 서버를 경고 없이 빌드하고, 패킷 수준의 인증 검사를 돌린다.
+#   bench    부하 생성기로 서버 데이터 경로의 처리량을 재고 perf 로 어디서 시간을 쓰는지 본다.
 #   windows  Windows 클라이언트(콘솔 + 서비스 + MFC GUI)를 MSVC 로 빌드한다.
 #
 # 서버는 Linux 장비에서, 클라이언트는 Windows PC 에서 개발한다. 한쪽에서 고친 것이
@@ -37,6 +38,38 @@ jobs:
           npm ci --omit=dev --no-audit --no-fund
           node --check server.js
           node --check ctl.cjs
+
+  # 서버 데이터 경로의 처리량. 개발 장비는 CPU 가 하나라 서버와 부하 생성기를 같이
+  # 띄우면 서로 CPU 를 뺏는다 — 러너(4 vCPU)에서 둘을 다른 CPU 에 묶어 잰다.
+  # 공유 VM 이라 절대값은 흔들린다. 같은 실행 안의 행끼리, 그리고 커밋 전후를 비교한다.
+  bench:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: make CFLAGS="-Wall -Wextra -Werror -g -O2" server tools
+
+      - name: Install perf
+        continue-on-error: true
+        run: sudo apt-get install -y -qq linux-tools-common "linux-tools-$(uname -r)" > /dev/null
+
+      - name: Bench (tools/loadgen/bench.sh)
+        run: |
+          sudo PERF=1 tools/loadgen/bench.sh bench-out
+          enc() { sed -e 's/%/%25/g' | sed -e ':a;N;$!ba;s/\n/%0A/g'; }
+          echo "::notice title=bench::$(enc < bench-out/result.md)"
+          if [ -s bench-out/perf.txt ]; then
+            echo "::notice title=perf (56B, server log to file)::$(grep -v '^#' bench-out/perf.txt | grep -v '^$' | head -n 25 | enc)"
+          fi
+          cat bench-out/result.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench
+          path: bench-out/
+          if-no-files-found: ignore
 
   windows:
     runs-on: windows-2022

@@ -20,3 +20,6 @@ windows/test/logs/
 
 # MCP 서버 (Node)
 mcp/node_modules/
+
+# 부하 측정 결과 (tools/loadgen/bench.sh)
+tools/loadgen/out/
