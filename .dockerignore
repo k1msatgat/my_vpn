@@ -1,0 +1,11 @@
+# 이미지에는 Linux 서버와 클라이언트를 빌드할 것만 보낸다.
+.git
+windows
+mcp
+docs
+test
+tools
+**/bin
+*.o
+*.d
+*.a

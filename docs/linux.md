@@ -146,6 +146,43 @@ sudo python3 test/auth_check.py        # -v 를 붙이면 서버 로그도 출�
 
 ---
 
+## Docker
+
+서버와 Linux 클라이언트를 한 이미지(`Dockerfile`, debian bookworm-slim)에 담았습니다. 첫 인자 `server` / `client` 로 고릅니다.
+
+```bash
+docker build -t my_vpn .
+
+# 서버. 설정(기기 목록, ACL, 등록 대기 목록, 감사 로그)은 /etc/my_vpn 볼륨에 남는다.
+docker run -d --name vpn --cap-add NET_ADMIN --device /dev/net/tun \
+    -p 9000:9000/udp -v my_vpn_etc:/etc/my_vpn my_vpn server
+
+# 등록 코드 (서버 컨테이너 안에서, 셸과 openssl 만으로 만든다)
+docker exec vpn enroll-code.sh 10.0.0.2 firewall=on -l laptop
+#   -> 7K2QF-9XWM4-ABCDE-FGHJK-MNPQR
+
+# 클라이언트. 신원은 /var/lib/my_vpn 볼륨에 남고, 다음부터는 ENROLL_CODE 없이 붙는다.
+docker run -d --cap-add NET_ADMIN --device /dev/net/tun \
+    -e SERVER=203.0.113.10 -e ENROLL_CODE=7K2QF-9XWM4-ABCDE-FGHJK-MNPQR \
+    -v my_vpn_id:/var/lib/my_vpn my_vpn client
+```
+
+| 환경 변수 | 쪽 | 뜻 |
+|---|---|---|
+| `PORT` | 둘 다 | UDP 포트 (기본 9000) |
+| `TUN_ADDR`, `MTU` | 서버 | 서버 tun 의 주소와 MTU (기본 `10.0.0.1/24`, 1400). prefix 와 MTU 는 `-n` / `-m` 으로 클라이언트에 그대로 내려간다 |
+| `SERVER` | 클라이언트 | 서버 주소 (이름이면 entrypoint 가 IPv4 로 푼다) |
+| `ENROLL_CODE` | 클라이언트 | 신원 파일이 없을 때만 쓴다 |
+
+- **권한은 `CAP_NET_ADMIN` 과 `/dev/net/tun` 만 줍니다.** tun 을 만들고, 주소와 경로를 넣고, nft 를 읽는 데 필요한 것이 이것뿐입니다. `--privileged` 는 쓰지 않습니다.
+- 서버 tun 에 주소를 붙이는 일(호스트에서 하던 `ip addr add 10.0.0.1/24 dev tun0`)은 `docker/entrypoint.sh` 가 합니다.
+- `/etc/my_vpn` 에 `acl.conf` 가 있으면 서버가 뜰 때 읽습니다. ACL 을 쓸지는 시작할 때만 정해지므로, 처음 넣었다면 컨테이너를 다시 띄웁니다. 그 뒤의 수정은 `docker exec vpn pkill -HUP -x vpn_server`.
+- 설정 파일은 서버가 권한 `600` 이 아니면 읽지 않습니다. 호스트 디렉터리를 바인드 마운트할 때는 호스트 쪽 권한을 맞춰야 합니다 (entrypoint 가 고치기는 하지만 읽기 전용 마운트면 못 고친다).
+- **서버 뒤의 네트워크로 내보내기(NAT)는 컨테이너 예시에 넣지 않았습니다.** 호스트의 forwarding 과 nftables 설정이 얽힙니다.
+- **컨테이너의 포스처는 그 컨테이너의 것입니다.** 클라이언트 컨테이너가 보고하는 방화벽 상태는 컨테이너 네트워크 네임스페이스의 nft 규칙셋이고, 호스트의 방화벽이 아닙니다. 커널 버전은 호스트의 커널입니다.
+
+---
+
 ## 기기 등록과 포스처 정책
 
 서버는 기기 목록 파일에 있는 기기만 받습니다. 한 줄에 기기 하나입니다.
