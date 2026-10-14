@@ -9,14 +9,15 @@ LOG_DIR=$TEST_DIR/logs
 : "${SERVER_IP:=49.247.139.39}"   # 클라이언트가 접속할 서버의 외부 주소
 : "${PORT:=9000}"
 : "${SERVER_TUN_IP:=10.0.0.1}"
-: "${CLIENT_TUN_IP:=10.0.0.2}"
+: "${CLIENT_TUN_IP:=10.0.0.2}"    # 서버 전용 스크립트가 쓴다. 클라이언트의 주소는 서버가 정해 준다
 : "${PREFIX:=24}"
-: "${CLIENT_IF:=tun0}"
+: "${CLIENT_IF:=myvpn0}"
+: "${IDENTITY_FILE:=/var/lib/my_vpn/device}"   # 클라이언트 전용, vpn_client enroll 이 만든 신원
 : "${MTU:=1400}"
 : "${ACL_FILE:=}"                 # 서버 전용, 비우면 ACL 비활성
 : "${DEVICE_FILE:=$TEST_DIR/devices.conf}"   # 서버 전용, 등록된 기기 목록 (필수)
 
-CFG_VARS=(SERVER_IP PORT SERVER_TUN_IP CLIENT_TUN_IP PREFIX CLIENT_IF MTU ACL_FILE DEVICE_FILE)
+CFG_VARS=(SERVER_IP PORT SERVER_TUN_IP CLIENT_TUN_IP PREFIX CLIENT_IF IDENTITY_FILE MTU ACL_FILE DEVICE_FILE)
 
 VPN_PID=
 TAIL_PID=

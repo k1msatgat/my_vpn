@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# 클라이언트 장비에서 실행. 빌드 -> vpn_client 실행 -> tun 인터페이스 설정까지 한 번에 한다.
-# 서버에서 test/server.sh 가 먼저 떠 있어야 한다.
+# 클라이언트 장비에서 실행. 빌드 -> vpn_client 실행까지 한 번에 한다. tun 의 주소와 MTU 는
+# 서버가 정해 내려 주므로 여기서 붙이지 않는다. 서버에서 test/server.sh 가 먼저 떠 있어야 하고,
+# 이 기기가 등록돼 있어야 한다 (vpn_client enroll, docs/linux.md).
 #
 #   test/client.sh                 일반 실행 (Ctrl-C 로 종료)
 #   test/client.sh idle [sec]      sec 초(기본 120) 방치: 재핸드셰이크가 없어야 하고 세션이 살아 있어야 함
@@ -37,12 +38,10 @@ show_idx() {
 	grep -F "$EST_LOG" "$LOG" | sed 's/^/[test]   /'
 }
 
-say "client: $CLIENT_IF $CLIENT_TUN_IP -> server $SERVER_IP:$PORT (tunnel $SERVER_TUN_IP)"
+say "client: $CLIENT_IF ($IDENTITY_FILE) -> server $SERVER_IP:$PORT (tunnel $SERVER_TUN_IP)"
 
-start_proc "$ROOT_DIR/client/bin/vpn_client" "$CLIENT_IF" "$SERVER_IP" "$PORT" "$CLIENT_TUN_IP"
-wait_log "tun device ready" 5 || die "client failed to start (see $LOG)"
-setup_if "$CLIENT_IF" "$CLIENT_TUN_IP"
-wait_log "$EST_LOG" 10 || die "handshake failed: is the server running at $SERVER_IP:$PORT?"
+start_proc "$ROOT_DIR/client/bin/vpn_client" -k "$IDENTITY_FILE" -i "$CLIENT_IF" run "$SERVER_IP" "$PORT"
+wait_log "] connected" 10 || die "client did not connect (see $LOG): is the server running at $SERVER_IP:$PORT, is this device enrolled?"
 
 if ping_check "$SERVER_TUN_IP"; then
 	say "ping $SERVER_TUN_IP ok"
