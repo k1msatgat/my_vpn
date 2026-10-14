@@ -572,7 +572,7 @@ my_vpn/
 │   └── server.sh, client.sh   # 두 장비 시나리오
 ├── mcp/                       # 서버 관리 — MCP 서버(Node.js)와 root 헬퍼 my_vpn_ctl, systemd 유닛
 ├── windows/                   # Windows 클라이언트 (서비스 + GUI + 콘솔, Visual Studio 솔루션)
-├── docs/{linux,mcp}.md
+├── docs/{linux,experiments,mcp}.md
 └── .github/workflows/ci.yml
 ```
 
@@ -582,6 +582,7 @@ my_vpn/
 |---|---|
 | **이 문서** | 전체 구조, 프로토콜, 보안 모델, 표준과의 대조 |
 | [docs/linux.md](docs/linux.md) | 서버와 클라이언트의 빌드와 실행, 기기 등록, Linux 포스처, ACL, 서버 뒤로 전달, 감사 로그, 상태 소켓 |
+| [docs/experiments.md](docs/experiments.md) | 직접 돌려 보고 깨뜨려 본 실험의 기록 (한 일 / 본 것 / 그 이유) |
 | [docs/mcp.md](docs/mcp.md) | MCP 서버 — 설치, 연결, 도구 |
 | [windows/README.md](windows/README.md) | Windows 클라이언트 — 서비스와 GUI, Wintun, 패킷 분석 화면 |
 
@@ -615,11 +616,14 @@ my_vpn/
 
 이 프로젝트는 학습이 목적이므로, AI(Claude Code)를 어디에 썼는지 구분해서 밝힙니다.
 
+**검증 방식: AI로 구현하고, 직접 실행하고 패킷을 캡처·재전송·변조해 보는 실험으로 검증합니다 — [docs/experiments.md](docs/experiments.md).** 실험 기록은 진행 중이고, 지금 기록된 것은 0번(성능 측정의 해석)입니다. 자동 시험(`auth_check.py`, `linux_e2e.sh`)은 CI에서 매번 돕니다.
+
 | 구분 | 내용 |
 |---|---|
-| 직접 구현 | 와이어 프로토콜, 핸드셰이크, 피어 테이블, 위조 방어, keepalive, 세션 만료, 재핸드셰이크 등 초기 클라이언트 / 서버 기능 로직. ACL의 매칭 로직과 피어 테이블의 구조 |
+| 직접 구현 | 와이어 프로토콜, 핸드셰이크, 피어 테이블, 위조 방어, keepalive, 세션 만료, 재핸드셰이크 등 초기 클라이언트 / 서버 기능 로직. ACL의 매칭 로직과 피어 테이블의 구조. 초기 Linux 클라이언트(`client.c`) — v4 로 올리면서 epoll 루프의 골격만 남고 나머지는 AI가 다시 썼다 |
 | AI 리뷰 | 위 구현의 diff를 AI에게 검토받고, 지적받은 버그는 직접 수정 |
-| 방향은 직접, 구현은 AI | ZTNA로의 확장 범위와 순서, "터널을 돌리는 서비스 + 조종하는 GUI" 구조 |
+| 방향은 직접, 구현은 AI | ZTNA로의 확장 범위와 순서, "터널을 돌리는 서비스 + 조종하는 GUI" 구조, Linux 기준으로의 재구성(Linux 클라이언트 v4, 테스트, 문서) |
+| AI 구현 | 아래 목록 |
 
 <details>
 <summary><b>AI가 작성한 부분의 목록</b></summary>
@@ -634,10 +638,10 @@ my_vpn/
 | `proto.h` / `proto.c` 분리 (기존 코드 이동) |
 | Windows 유휴 시 비유니캐스트 송신이 keepalive를 억제해 불필요한 재핸드셰이크가 생기는 문제를 테스트로 재현하고 `windows/` 쪽을 수정 |
 | ZTNA 확장의 Windows 쪽 — `core/posture.c`, `core/device.c`, `core/tunnel.c`의 인증 핸드셰이크와 지속 검증, GUI의 포스처 탭과 기기 등록 창 |
-| ZTNA 확장의 서버 쪽 — `server/src/device.c`, `server.c`의 `handle_request` / `handle_auth` / `handle_keepalive` / `send_deny`와 SIGHUP 처리, `peer.c`의 `peer_drop`, `test/auth_check.py`. 목표 직무가 Windows 클라이언트라 서버 쪽 확장은 AI에게 맡겼고, 기존 서버 로직(피어 테이블, 데이터 경로, ACL)은 직접 구현한 것 그대로 |
+| ZTNA 확장의 서버 쪽 — `server/src/device.c`, `server.c`의 `handle_request` / `handle_auth` / `handle_keepalive` / `send_deny`와 SIGHUP 처리, `peer.c`의 `peer_drop`, `test/auth_check.py`. 기존 서버 로직(피어 테이블, 데이터 경로, ACL)은 직접 구현한 것 그대로 |
 | `proto.h` / `proto.c`의 인증 · 포스처 메시지 정의. 메시지 흐름은 AI가 제안하고 검토 후 채택 |
 | 서버의 ZTNA 확장 (2차) — `policy.c`, `status.c`, `alc.c`의 다시 읽기와 규칙별 포스처 조건, `server.c`의 nonce 재사용과 상태 소켓, `peer.c`의 단조 시계와 세션별 카운터 |
-| 세션 암호화 — `lib/common`의 `crypt.h` / `secure.{h,c}`, `server/src/crypt.c`(OpenSSL), `windows/core/crypt.c`(CNG), 핸드셰이크 / 데이터 / keepalive 경로를 세션 키로 감싸도록 고친 것. 키를 어떻게 뽑고 무엇을 tag로 덮을지는 AI가 제안 |
+| 세션 암호화 — `lib/common`의 `crypt.h` / `secure.{h,c}`, OpenSSL 구현(지금의 `lib/common/src/crypt_openssl.c`), `windows/core/crypt.c`(CNG), 핸드셰이크 / 데이터 / keepalive 경로를 세션 키로 감싸도록 고친 것. 키를 어떻게 뽑고 무엇을 tag로 덮을지는 AI가 제안 |
 | 서버가 내려 주는 터널 설정 — `net_config`, `acl_routes`, `netcfg_apply` / `netcfg_refresh`, GUI의 터널 IP 칸을 입력에서 표시로. 경로를 ACL에서 뽑는 방식은 AI가 제안 |
 | 서버 뒤의 네트워크로 전달 — 규칙 파일이 없을 때의 판정, `mcp/service.sh`의 `forward_up` / `forward-down` |
 | 감사 로그 — `server/src/audit.c`, MCP `audit_log` 도구 |
@@ -646,6 +650,11 @@ my_vpn/
 | `mcp/` MCP 서버 전체 — `server.js`, `ctl.cjs`, systemd 유닛, 설치 스크립트, `docs/mcp.md` |
 | GUI 재설계 — `gui/ui_theme.cpp`, `gui/ui_controls.cpp`, `MainDlg`의 배치와 그리기, `vpn_gui.rc`, 앱 아이콘 |
 | `.github/workflows/ci.yml`, CI가 찾은 `posture.c`의 `wscapi.dll` 동적 로드 |
-| 이 README |
+| 서버 부하 생성기와 측정 — `tools/loadgen/loadgen.c`, `tools/loadgen/bench.sh`, CI의 `bench` 잡 |
+| OpenSSL 암호 구현을 `server/src/crypt.c` 에서 `lib/common/src/crypt_openssl.c` 로 옮긴 것 |
+| Linux 클라이언트 v4 — `client/src/session.c`(핸드셰이크, 등록, 세션 송신 — loadgen 과 공유), `identity.c`(신원 파일), `posture.c`(커널 버전, nftables), `netcfg.c`(ioctl 로 주소·MTU·경로), `client.c` 의 v4 루프와 명령. 동작 규칙은 Windows 클라이언트의 `tunnel.c` 를 따랐다 |
+| `test/linux_e2e.sh`(netns 두 개의 전체 경로 시험)와 CI 단계, `test/client.sh` / `common.sh` 를 새 명령행으로 고친 것 |
+| `docs/linux.md`의 Linux 클라이언트 절, `docs/experiments.md`의 실험 절차와 해석 초안 (실험 0은 CI 가 돌린 측정, 1~8은 직접 실행) |
+| 이 README — Linux 기준 재구성, "표준 프로토콜과의 대조", 보안 모델의 확인 열 |
 
 </details>
