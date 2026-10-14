@@ -277,7 +277,7 @@ flowchart LR
 |---|---|
 | `proto.{h,c}` | 와이어 헤더, 메시지 종류, 포스처 보고와 터널 설정의 직렬화 |
 | `secure.{h,c}` | 세션 키 유도, 패킷 감싸기 / 풀기, 재전송 창, 등록 코드에서 임시 신원 뽑기, selftest 벡터 |
-| `crypt.h` | 암호 도구의 선언. 서버는 OpenSSL(`server/src/crypt.c`), Windows는 CNG(`windows/core/crypt.c`)가 채운다 |
+| `crypt.h` | 암호 도구의 선언. Linux 쪽은 OpenSSL(`lib/common/src/crypt_openssl.c`), Windows는 CNG(`windows/core/crypt.c`)가 채운다 |
 
 키를 어떻게 뽑고 패킷을 어떻게 감싸는지가 양쪽에 따로 적혀 있으면, 한쪽만 고친 순간 서로의 패킷을 열지 못합니다. 그래서 OS별로 갈라지는 것은 알고리즘 호출뿐이고, 양쪽 `selftest`가 같은 표준 벡터(FIPS 180-4, RFC 4231, RFC 5869, GCM 명세, RFC 5903)를 통과하는 것이 서로 통한다는 근거입니다.
 
@@ -515,7 +515,7 @@ sendto(buf, n + 32)     └─────────────────�
 my_vpn/
 ├── lib/common/                # 서버와 Windows 클라이언트가 함께 빌드하는 코드
 │   ├── include/{proto,crypt,secure}.h
-│   └── src/{proto,secure}.c
+│   └── src/{proto,secure}.c, crypt_openssl.c (Linux 쪽 암호 도구, OpenSSL)
 ├── server/                    # Linux 서버
 │   └── src/
 │       ├── server.c           # epoll 루프, 핸드셰이크, 데이터 경로
@@ -524,7 +524,6 @@ my_vpn/
 │       ├── enroll.c           # 등록 코드의 대기 목록, 기기를 목록에 올리기
 │       ├── alc.c              # ACL 파싱과 매칭, 규칙별 포스처 조건, 경로 뽑기
 │       ├── policy.c           # 포스처 조건의 문법과 판정
-│       ├── crypt.c            # 암호 도구 (OpenSSL)
 │       ├── audit.c            # 감사 로그
 │       └── status.c           # 상태 소켓
 ├── windows/                   # Windows 클라이언트 (Visual Studio 솔루션)

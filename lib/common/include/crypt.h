@@ -3,7 +3,7 @@
 
 /* 암호 도구의 창구.
  *
- * 알고리즘은 직접 구현하지 않는다. 서버(Linux)는 OpenSSL(server/src/crypt.c), Windows
+ * 알고리즘은 직접 구현하지 않는다. Linux 쪽은 OpenSSL(lib/common/src/crypt_openssl.c), Windows
  * 클라이언트는 OS 에 내장된 CNG(windows/core/crypt.c)가 이 선언을 채운다. 직접 짠
  * 구현은 테스트 벡터를 통과해도 타이밍 같은 부채널까지 검증하기 어렵고, OS 와
  * 라이브러리의 구현은 보안 패치와 함께 갱신된다.

@@ -11,16 +11,12 @@ LOADGEN_DIR	= tools/loadgen
 
 CPPFLAGS	+= -I$(LIB_DIR)/include -I$(CLIENT_DIR)/include -I$(SERVER_DIR)/include
 LDFLAGS		+=
-LDLIBS		+=
+# Every Linux component does the session crypto through lib/common (crypt_openssl.c,
+# OpenSSL). The static library only pulls in what a binary references.
+LDLIBS		+= -lcrypto
 
-# The server authenticates devices with HMAC-SHA256 from OpenSSL (openssl-devel).
-# Only the server links it; the client does not need it.
-SERVER_LDLIBS	= -lcrypto
-# The load generator does the client side of the handshake and session crypto with the
-# same code the server uses (lib/common secure.c + the server's OpenSSL crypt.c), and runs
-# a sender and a receiver thread.
-LOADGEN_LDLIBS	= -lcrypto -lpthread
-LOADGEN_CRYPT	= $(SERVER_DIR)/bin/crypt.o
+# The load generator runs a sender and a receiver thread.
+LOADGEN_LDLIBS	= -lpthread
 
 # ---- sources / objects ----------------------------------------------------
 LIB_SRCS	= $(wildcard $(LIB_DIR)/src/*.c)
@@ -74,9 +70,9 @@ endif
 
 tools: $(LOADGEN_BIN)
 
-$(LOADGEN_BIN): $(LOADGEN_OBJS) $(LOADGEN_CRYPT) $(LIB)
+$(LOADGEN_BIN): $(LOADGEN_OBJS) $(LIB)
 	@mkdir -p $(@D)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(LOADGEN_OBJS) $(LOADGEN_CRYPT) $(LIB) $(LOADGEN_LDLIBS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(LOADGEN_OBJS) $(LIB) $(LDLIBS) $(LOADGEN_LDLIBS)
 
 $(CLIENT_BIN): $(CLIENT_OBJS) $(LIB)
 	@mkdir -p $(@D)
@@ -84,7 +80,7 @@ $(CLIENT_BIN): $(CLIENT_OBJS) $(LIB)
 
 $(SERVER_BIN): $(SERVER_OBJS) $(LIB)
 	@mkdir -p $(@D)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(SERVER_OBJS) $(LIB) $(LDLIBS) $(SERVER_LDLIBS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(SERVER_OBJS) $(LIB) $(LDLIBS)
 
 # ---- compile --------------------------------------------------------------
 # <component>/src/foo.c -> <component>/bin/foo.o (+ foo.d for header tracking)

@@ -1,4 +1,5 @@
-/* crypt.h 의 OpenSSL 구현 (서버). Windows 클라이언트 쪽은 windows/core/crypt.c 다. */
+/* crypt.h 의 OpenSSL 구현. Linux 쪽(서버, Linux 클라이언트, 부하 생성기)이 모두 이것을 쓴다.
+ * Windows 클라이언트 쪽은 windows/core/crypt.c (CNG) 다. */
 
 #include <stdlib.h>
 #include <string.h>
