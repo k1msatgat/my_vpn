@@ -12,14 +12,16 @@ make clean      # 오브젝트/산출물 삭제
 make distclean  # bin/ 디렉터리 전체 삭제
 ```
 
-- 요구사항: Linux, GCC, `/dev/net/tun`, OpenSSL 3.0 이상의 개발 헤더 (`openssl-devel` / `libssl-dev`) — 서버가 기기 인증과 세션 암호화에 씁니다
+- 요구사항: Linux, GCC, `/dev/net/tun`, OpenSSL 3.0 이상의 개발 헤더 (`openssl-devel` / `libssl-dev`) — 서버와 클라이언트가 기기 인증과 세션 암호화에 씁니다. 클라이언트의 방화벽 포스처는 `nft`(nftables)를 읽습니다
 - `-Wall -Wextra` 경고 없이 빌드됩니다.
 
 | 산출물 | 경로 |
 |---|---|
-| 공용 라이브러리 | `lib/common/bin/libcommon.a` |
+| 공용 라이브러리 | `lib/common/bin/libcommon.a` (프로토콜, 세션 암호화, OpenSSL 암호 도구) |
+| 클라이언트 쪽 프로토콜 | `client/bin/libclient.a` (핸드셰이크 / 등록 / 신원 / 포스처 / 터널 설정 — 클라이언트와 부하 생성기가 함께 쓴다) |
 | 클라이언트 | `client/bin/vpn_client` |
 | 서버 | `server/bin/vpn_server` |
+| 부하 생성기 | `tools/loadgen/bin/loadgen` |
 
 ---
 
@@ -51,38 +53,58 @@ sudo kill -HUP $(pidof vpn_server)    # 기기 목록과 ACL 을 다시 읽는�
 ### Client
 
 ```bash
-sudo ./client/bin/vpn_client <ifname> <server-ip> <port> <tunnel-ip>
-# 예) sudo ./client/bin/vpn_client tun0 203.0.113.10 9000 10.0.0.2
+# 1. 등록 (한 번). 관리자에게 받은 등록 코드를 적는다. 신원은 서버가 받아 준 뒤에 저장된다.
+sudo ./client/bin/vpn_client enroll 203.0.113.10 9000 7K2QF-9XWM4-ABCDE-FGHJK-MNPQR
 
-sudo ip addr add 10.0.0.2/24 dev tun0
-sudo ip link set tun0 mtu 1400 up
+# 2. 연결. 터널 주소, MTU, 경로는 서버가 내려 준다 — 여기서 적지 않는다.
+sudo ./client/bin/vpn_client run 203.0.113.10 9000
+
+./client/bin/vpn_client posture     # 서버에 보고할 포스처를 미리 본다 (nft 를 읽으려면 root)
+./client/bin/vpn_client selftest    # 암호 도구의 표준 벡터
 ```
 
-> **Linux 클라이언트는 인증 이전의 프로토콜에 머물러 있고, 더 발전시키지 않습니다.** 예전 형식의
-> 핸드셰이크를 보내므로 지금 서버에는 붙지 못합니다(`[HS] short request`로 버려집니다). 아래 내용과
-> `test/client.sh`의 시나리오는 기기 인증을 넣기 전 단계의 기록입니다. 지금 서버에 붙는 클라이언트는
-> [Windows 클라이언트](../windows/README.md)입니다.
+| 옵션 | 뜻 |
+|---|---|
+| `-k <file>` | 기기 신원 파일 (기본 `/var/lib/my_vpn/device`). `id(32 hex) key(64 hex)` 한 줄, 권한 `600`. 넓으면 읽지 않는다 |
+| `-i <name>` | tun 장치 이름 (기본 `myvpn0`) |
+| `-f` | `enroll`: 이미 있는 신원을 바꾼다 (서버에 등록된 예전 키는 더 이상 맞지 않는다) |
+| `-v` | 패킷마다 로그 |
 
-- `<tunnel-ip>`는 인터페이스에 할당한 주소와 같아야 합니다. 서버는 이 주소로 응답 패킷의 목적지 피어를 찾습니다.
-- MTU 1400은 외부 IP(20) + UDP(8) + 터널 헤더(16)를 고려한 값입니다.
+```
+[HS] posture: kernel=331264 firewall=off antivirus=unknown
+[HS] request 1/5
+[HS] established idx=b892bf00
+[myvpn0] tun device ready
+[cfg] address 10.0.0.2/24
+[cfg] mtu 1400
+[cfg] route + 198.51.100.0/24
+[myvpn0] connected
+```
 
-### Test
+- 서버가 받아 준 뒤에 tun 을 만든다. 거절되면 장치를 만들지 않고 종료 코드 2로 끝난다.
+- 동작은 Windows 클라이언트와 같다: 10초마다 keepalive 로 포스처를 다시 보고하고(포스처는 2초마다 읽어 바뀌면 바로 보고), 서버가 30초 동안 조용하면 다시 핸드셰이크한다. 세션 중에 거절되면 tun 은 두고 패킷만 막으며, 포스처가 바뀌면 바로 다시 묻는다.
+- MTU 1400 은 바깥 IP(20) + UDP(8) + 우리 헤더(16) + GCM tag(16) = 60바이트를 더해도 1500 을 넘지 않는 값이다.
+
+**Linux 포스처**: 와이어 형식은 Windows 와 같고, 칸마다 Linux 에서 뜻이 있는 값을 넣는다 (`client/include/posture.h`).
+
+| 항목 | Linux 에서 | 서버 정책 |
+|---|---|---|
+| OS 빌드 | 커널 버전, `LINUX_VERSION_CODE` 모양 (`major<<16 \| minor<<8 \| patch`, 5.14.0 → 331264) | `min-build=331264` |
+| 방화벽 | nftables 에 input 훅 `policy drop` 체인이 있거나 firewalld 의 표(`table inet firewalld`)가 있으면 켜짐. nft 를 못 읽으면 "모름" | `firewall=on` |
+| 백신 | 수집하지 않는다 (늘 "모름") | Linux 기기에 `antivirus=on` 을 걸지 않는다 |
+
+### End-to-end (Linux 서버 ↔ Linux 클라이언트, 한 장비)
 
 ```bash
-ping 10.0.0.1     # client → server
+make && test/linux_e2e.sh          # root 가 아니면 unshare -rn 으로 사용자 네임스페이스 안에서 돈다
 ```
 
-```
-[HS] request 1/5
-[HS] established idx=5f3a9c02
-[tun0][tun->udp] 84 bytes, proto=1, icmp type=8
-[tun0][udp->tun] 84 bytes, proto=1, icmp type=0
-```
+네트워크 네임스페이스 두 개(서버 / 클라이언트)를 veth 로 이어 등록 → 연결(서버가 준 주소·MTU·경로) → ACL 차단 → 포스처 거부와 복구(nft 로 방화벽 켜기)까지 확인한다. CI 에서도 돈다.
 
 ### Test scripts
 
-`test/`의 스크립트는 빌드, 실행, 인터페이스 설정(IP/MTU)을 한 번에 하고 시나리오별로 `PASS` / `FAIL`을 출력합니다.
-서버 장비에서 먼저 실행한 뒤 클라이언트 장비에서 실행합니다.
+`test/`의 스크립트는 빌드와 실행을 한 번에 하고 시나리오별로 `PASS` / `FAIL`을 출력합니다.
+서버 장비에서 먼저 실행한 뒤 클라이언트 장비에서 실행합니다. 클라이언트는 미리 등록돼 있어야 합니다(`IDENTITY_FILE`, 기본 `/var/lib/my_vpn/device`).
 
 | 시나리오 | 서버 | 클라이언트 | 확인하는 것 |
 |---|---|---|---|
@@ -136,16 +158,16 @@ sudo python3 test/auth_check.py        # -v 를 붙이면 서버 로그도 출�
 
 기기를 이 파일에 올리는 방법은 둘입니다. 보통은 [등록 코드](#등록-코드)를 씁니다. 아래는 손으로 옮기는 방법이고, 서버를 `-e` 없이 띄웠을 때 씁니다.
 
-1. 기기에서 ID와 키를 만듭니다. Windows 콘솔은 `vpn_client.exe enroll`, GUI는 `포스처` 탭의 `기기 등록...` → `코드 없이...` → `복사`.
+1. 기기에서 ID와 키를 만듭니다. Linux 클라이언트는 코드 없이 만드는 길이 없으므로 등록 코드를 씁니다. Windows 콘솔은 `vpn_client.exe enroll`, GUI는 `포스처` 탭의 `기기 등록...` → `코드 없이...` → `복사`.
 2. 그 값을 이 파일에 옮겨 적고 터널 IP를 배정합니다. `test/devices.conf.example`을 복사해 시작하면 됩니다.
 3. `chmod 600`. 모든 기기의 키가 평문으로 들어 있어, 그룹이나 다른 사용자가 읽을 수 있으면 서버가 읽기를 거부합니다.
 4. 서버를 띄우거나, 이미 돌고 있으면 `sudo kill -HUP $(pidof vpn_server)`.
 
 | 조건 | 뜻 |
 |---|---|
-| `firewall=on` | Windows 방화벽이 켜져 있어야 함 (활성 프로필 기준) |
-| `antivirus=on` | Windows 보안 센터가 백신을 정상으로 봐야 함 |
-| `min-build=N` | OS 빌드가 N 이상 (Windows 11은 22000부터) |
+| `firewall=on` | Windows: 방화벽이 켜져 있어야 함 (활성 프로필 기준). Linux: nftables 인바운드 기본 거부 또는 firewalld |
+| `antivirus=on` | Windows 보안 센터가 백신을 정상으로 봐야 함 (Linux 는 수집하지 않아 늘 거절된다) |
+| `min-build=N` | Windows: OS 빌드가 N 이상 (Windows 11은 22000부터). Linux: 커널 버전 코드가 N 이상 (위 표) |
 
 - 조건은 **기기마다 따로** 겁니다. 생략한 항목은 검사하지 않습니다.
 - 클라이언트가 값을 읽지 못해 "모름"으로 보고한 항목은 **통과로 치지 않습니다.** 통과시키면 조회를 실패하게 만드는 것만으로 정책을 피할 수 있습니다.
@@ -248,7 +270,7 @@ keepalive(10초)마다 다시 보고합니다.
 기기의 ID(32자)와 키(64자)를 손으로 옮기면 키가 화면과 클립보드와 메신저를 거치고, 한 글자만 틀려도 "인증 실패"만 돌아옵니다. `-e <path>`로 띄운 서버는 등록 코드를 받습니다.
 
 1. 관리자가 코드를 만듭니다. 그 기기가 받을 터널 주소, 포스처 조건, 이름을 이때 정합니다. MCP의 `enroll_create`가 이 일을 합니다 — 코드에서 뽑은 임시 신원을 대기 목록(`-e`의 파일)에 한 줄 쓰고 `SIGHUP`을 보냅니다.
-2. 기기에서 코드를 적습니다. `vpn_client.exe enroll <server-ip> <port> <code>`, GUI는 `포스처` 탭의 `기기 등록...`.
+2. 기기에서 코드를 적습니다. Linux 는 `sudo vpn_client enroll <server-ip> <port> <code>`, Windows 는 `vpn_client.exe enroll <server-ip> <port> <code>` 또는 GUI 의 `포스처` 탭 `기기 등록...`.
 3. 기기가 코드로 서버와 세션을 열고, 그 세션 안에서 자기가 만든 ID와 키를 보냅니다. 서버가 기기 목록에 한 줄을 더하고 대기 목록에서 그 코드를 지웁니다.
 
 ```

@@ -1,6 +1,7 @@
 # 푸시할 때마다 양쪽을 실제로 빌드한다.
 #
-#   server   Linux 서버를 경고 없이 빌드하고, 패킷 수준의 인증 검사를 돌린다.
+#   server   Linux 서버와 클라이언트를 경고 없이 빌드하고, 패킷 수준의 인증 검사와
+#            Linux 서버 <-> Linux 클라이언트 전체 경로(netns 두 개)를 돌린다.
 #   bench    부하 생성기로 서버 데이터 경로의 처리량을 재고 perf 로 어디서 시간을 쓰는지 본다.
 #   windows  Windows 클라이언트(콘솔 + 서비스 + MFC GUI)를 MSVC 로 빌드한다.
 #
@@ -25,12 +26,22 @@ jobs:
       - name: Build (warnings are errors)
         run: make CFLAGS="-Wall -Wextra -Werror -g -O0"
 
-      - name: HMAC-SHA256 self test
-        run: ./server/bin/vpn_server selftest
+      - name: Crypto self test (server, client)
+        run: |
+          ./server/bin/vpn_server selftest
+          ./client/bin/vpn_client selftest
 
       # 서버를 띄우고 클라이언트인 척 UDP 패킷을 만들어 보낸다. tun 을 만들어야 해서 root.
       - name: Protocol checks (test/auth_check.py)
         run: sudo python3 test/auth_check.py
+
+      # 등록 -> 연결 -> ACL 차단 -> 포스처 거부와 복구. 클라이언트의 방화벽 포스처가 nft 를
+      # 읽는다. 러너에서는 비특권 사용자 네임스페이스가 막혀 있어(AppArmor) sudo 로 돌린다 —
+      # 스크립트가 root 면 unshare -n 으로 새 네트워크 네임스페이스를 만든다.
+      - name: Linux end-to-end (test/linux_e2e.sh)
+        run: |
+          sudo apt-get install -y -qq nftables > /dev/null
+          sudo test/linux_e2e.sh
 
       - name: MCP server syntax
         working-directory: mcp

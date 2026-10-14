@@ -493,7 +493,6 @@ sendto(buf, n + 32)     └─────────────────�
 - **종료 통지가 없습니다.** 클라이언트가 종료해도 서버는 알지 못하고, 세션은 60초 뒤 만료로 정리됩니다.
 - **IPv4만 터널링합니다.** 멀티캐스트 / 브로드캐스트도 통과하지 못합니다.
 - **서버와 관리 도구가 같은 순간에 기기 목록을 고치는 경우를 잠그지 않았습니다.** 파일이 깨지지는 않지만 한쪽이 쓴 줄을 다른 쪽이 덮을 수 있습니다.
-- **Linux 클라이언트(`client/`)는 인증 이전의 프로토콜에 머물러 있습니다.** 지금 서버에 붙지 못하며 더 발전시키지 않습니다. 초기 단계를 구현하고 검증한 기록으로 남겨 둡니다.
 
 </details>
 
@@ -501,6 +500,7 @@ sendto(buf, n + 32)     └─────────────────�
 
 | 무엇을 | 어떻게 | 어디서 |
 |---|---|---|
+| Linux 서버 ↔ Linux 클라이언트 | `test/linux_e2e.sh` — netns 두 개에서 등록 → 연결 → ACL 차단 → 포스처 거부와 복구 | CI, 한 장비 |
 | 서버의 프로토콜 | `sudo python3 test/auth_check.py` — 클라이언트인 척 UDP 패킷을 직접 만들어 보낸다. **176개.** 세션 키 유도와 패킷 형식을 서버의 코드를 거치지 않고 따로 구현했다 | CI, 서버 |
 | 암호 도구 | `vpn_server selftest` / `vpn_client.exe selftest` — 양쪽이 같은 표준 벡터 20개 | CI |
 | 빌드 | 서버 `-Wall -Wextra -Werror`, Windows `/W4` 경고 없음 (콘솔 + 서비스 + GUI) | CI |
@@ -542,7 +542,7 @@ my_vpn/
 │   ├── server.js              #   도구 선언 (권한 없음)
 │   ├── ctl.cjs                #   root 헬퍼 — 실제 일을 한다
 │   └── my_vpn.service, service.sh, install.sh
-├── client/                    # Linux 클라이언트 (인증 이전 단계의 기록)
+├── client/                    # Linux 클라이언트 (프로토콜 v4: 등록, 인증, 세션 암호화, 포스처, 서버가 준 설정)
 ├── test/auth_check.py         # 서버의 프로토콜 검사
 ├── docs/{linux,mcp}.md
 └── .github/workflows/ci.yml
