@@ -29,11 +29,16 @@ CLIENT_OBJS	= $(patsubst $(CLIENT_DIR)/src/%.c,$(CLIENT_DIR)/bin/%.o,$(CLIENT_SR
 SERVER_OBJS	= $(patsubst $(SERVER_DIR)/src/%.c,$(SERVER_DIR)/bin/%.o,$(SERVER_SRCS))
 LOADGEN_OBJS	= $(patsubst $(LOADGEN_DIR)/%.c,$(LOADGEN_DIR)/bin/%.o,$(LOADGEN_SRCS))
 
+# The client side of the protocol (session.c ...) is shared by vpn_client and the load
+# generator, so everything in client/src except main (client.c) goes into a library.
+CLIENT_LIB_OBJS	= $(filter-out $(CLIENT_DIR)/bin/client.o,$(CLIENT_OBJS))
+
 OBJS		= $(LIB_OBJS) $(CLIENT_OBJS) $(SERVER_OBJS) $(LOADGEN_OBJS)
 DEPS		= $(OBJS:.o=.d)
 
 # ---- artifacts ------------------------------------------------------------
 LIB		= $(LIB_DIR)/bin/libcommon.a
+CLIENT_LIB	= $(CLIENT_DIR)/bin/libclient.a
 CLIENT_BIN	= $(CLIENT_DIR)/bin/vpn_client
 SERVER_BIN	= $(SERVER_DIR)/bin/vpn_server
 LOADGEN_BIN	= $(LOADGEN_DIR)/bin/loadgen
@@ -70,9 +75,13 @@ endif
 
 tools: $(LOADGEN_BIN)
 
-$(LOADGEN_BIN): $(LOADGEN_OBJS) $(LIB)
+$(CLIENT_LIB): $(CLIENT_LIB_OBJS)
 	@mkdir -p $(@D)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(LOADGEN_OBJS) $(LIB) $(LDLIBS) $(LOADGEN_LDLIBS)
+	$(AR) rcs $@ $^
+
+$(LOADGEN_BIN): $(LOADGEN_OBJS) $(CLIENT_LIB) $(LIB)
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(LOADGEN_OBJS) $(CLIENT_LIB) $(LIB) $(LDLIBS) $(LOADGEN_LDLIBS)
 
 $(CLIENT_BIN): $(CLIENT_OBJS) $(LIB)
 	@mkdir -p $(@D)
@@ -105,7 +114,7 @@ $(LOADGEN_DIR)/bin/%.o: $(LOADGEN_DIR)/%.c
 # ---- housekeeping ---------------------------------------------------------
 # clean removes only what we generated; distclean drops the bin/ dirs too.
 clean:
-	$(RM) $(OBJS) $(DEPS) $(LIB) $(CLIENT_BIN) $(SERVER_BIN) $(LOADGEN_BIN)
+	$(RM) $(OBJS) $(DEPS) $(LIB) $(CLIENT_LIB) $(CLIENT_BIN) $(SERVER_BIN) $(LOADGEN_BIN)
 
 distclean:
 	$(RM) -r $(LIB_DIR)/bin $(CLIENT_DIR)/bin $(SERVER_DIR)/bin $(LOADGEN_DIR)/bin

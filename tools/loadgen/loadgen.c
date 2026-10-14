@@ -9,9 +9,9 @@
  *
  * 실제 클라이언트가 아니라 TUN 을 만들지 않는다. UDP 소켓 하나로 와이어 포맷만
  * 흉내 내므로 root 가 필요 없고, 클라이언트 쪽 tun / 커널 비용이 측정에 섞이지 않는다.
- * 핸드셰이크(ECDH)와 패킷 암호(AES-256-GCM)는 서버가 쓰는 lib/common 의 secure.c / crypt_openssl.c 를 그대로
- * 링크한다 — 같은 코드라 와이어가 어긋날 일이 없고, 암호화 비용도 실제와 같다.
- * 터널 주소는 서버가 RES_HANDSHAKE 로 내려 준 것을 쓴다.
+ * 핸드셰이크와 패킷 암호(AES-256-GCM)는 Linux 클라이언트와 같은 client/src/session.c 를
+ * 쓴다 — 같은 코드라 와이어가 어긋날 일이 없고, 암호화 비용도 실제와 같다. 터널 주소는
+ * 서버가 RES_HANDSHAKE 로 내려 준 것을 쓴다.
  *
  * 송신과 수신은 스레드를 나눈다. 한 스레드가 번갈아 하면 보내는 동안 받지 못한
  * 응답이 소켓 버퍼에서 넘쳐 "서버가 잃어버린 것"처럼 보인다. */
@@ -28,7 +28,7 @@
 #include <unistd.h>
 
 #include "proto.h"
-#include "secure.h"
+#include "session.h"
 
 #define ICMP_HDR_LEN	8
 #define ICMP_ECHO_REPLY	0
@@ -36,7 +36,6 @@
 #define STAMP_LEN	8		/* 페이로드 앞 8B 에 보낸 시각(ns)을 싣는다 */
 #define MIN_PAYLOAD	STAMP_LEN
 #define MAX_PAYLOAD	(TUN_MTU - IP_MIN_HDR - ICMP_HDR_LEN)	/* 서버의 -m 기본값 기준 */
-#define HS_TRIES	5
 
 /* 지연 히스토그램. 10ms 까지는 1us 단위, 그 위로는 10s 까지 1ms 단위로 센다.
  * 수신 스레드 하나만 쓰고 측정이 끝난 뒤에 읽으므로 잠금이 필요 없다. */
@@ -60,13 +59,12 @@ static _Atomic uint64_t tx_pkts, tx_errs, rx_pkts, rx_bytes, rx_other;
 static atomic_int tx_stop, rx_stop;
 
 static uint64_t hist[HIST_LEN];
-static uint32_t session_idx;
 static struct in_addr tun_ip;		/* 서버가 정해 준 이 기기의 터널 주소 */
 static uint16_t icmp_id;
 
 /* 송신 스레드는 tx 쪽(tx, tx_counter)만, 수신 스레드는 rx 쪽(rx, rx_max, rx_seen)만
  * 만진다. 두 방향의 키와 EVP 문맥이 따로라 잠금 없이 나눠 쓸 수 있다. */
-static secure_session_t sess;
+static vpn_session_t sess;
 
 static uint64_t now_ns(void)
 {
@@ -108,145 +106,6 @@ static uint16_t checksum(const uint8_t *p, size_t len)
 		sum = (sum & 0xffff) + (sum >> 16);
 	}
 	return (uint16_t)~sum;
-}
-
-/* ---- 핸드셰이크 ----------------------------------------------------------- */
-
-static const char *deny_str(uint8_t reason)
-{
-	switch (reason) {
-		case DENY_UNKNOWN_DEVICE: return "unknown device";
-		case DENY_BAD_AUTH:       return "bad auth";
-		case DENY_TUN_IP:         return "tunnel ip mismatch";
-		case DENY_POSTURE:        return "posture";
-		default:                  return "?";
-	}
-}
-
-/* 기다리는 type 이 올 때까지 받는다. 시간이 다 되면 -1, DENY 면 -2.
- * 핸드셰이크 중의 DENY 는 mac 을 확인하지 않고 사유만 찍는다 — 측정 도구라 서버를
- * 의심할 이유가 없다. 실제 클라이언트는 확인한다 (windows/core/tunnel.c: deny_verified). */
-static int recv_type(int sock, uint8_t type, uint8_t *buf, size_t cap, msg_header_t *h)
-{
-	ssize_t n;
-
-	for (;;) {
-		n = recv(sock, buf, cap, 0);
-		if (n < 0) {
-			return -1;
-		}
-		if (msg_decode(buf, (size_t)n, h) < 0 || h->version != PROTOCOL_VERSION) {
-			continue;
-		}
-		if (h->type == MSG_TYPE_DENY && n > (ssize_t)sizeof(*h)) {
-			fprintf(stderr, "denied: %s\n", deny_str(buf[sizeof(*h)]));
-			return -2;
-		}
-		if (h->type == type) {
-			return (int)n;
-		}
-	}
-}
-
-/* RES_HANDSHAKE: pub_s | 암호화된 net_config | tag. 세션 키를 뽑고 수락을 연다. */
-static int accept_res(const opts_t *o, crypt_ecdh_t *ecdh, const uint8_t *auth,
-		uint8_t *res, int len)
-{
-	uint8_t secret[VPN_SECRET_LEN];
-	secure_keys_t keys;
-	net_config_t cfg;
-	int cfg_len, ret = -1;
-
-	if (len < (int)RES_HS_MIN_LEN ||
-			crypt_ecdh_derive(ecdh, res + sizeof(msg_header_t), secret) < 0 ||
-			secure_derive(o->key, secret, auth, res, &keys) < 0) {
-		goto out;
-	}
-	cfg_len = secure_res_open(keys.res, res, (size_t)len);
-	if (cfg_len < 0 || net_config_decode(res + RES_HS_HEAD_LEN, (size_t)cfg_len, &cfg) < 0) {
-		fprintf(stderr, "cannot open RES_HANDSHAKE (wrong key?)\n");
-		goto out;
-	}
-	if (secure_session_open(&sess, keys.c2s, keys.s2c) < 0) {
-		goto out;
-	}
-	tun_ip.s_addr = cfg.tun_ip;
-	ret = 0;
-
-out:
-	crypt_wipe(secret, sizeof(secret));
-	crypt_wipe(&keys, sizeof(keys));
-	return ret;
-}
-
-/*   C -> S  REQ_HANDSHAKE  device_id
- *   S -> C  CHALLENGE      nonce
- *   C -> S  AUTH           device_id | nonce | pub_c | posture | mac
- *   S -> C  RES_HANDSHAKE  pub_s | net_config | tag
- * 순서와 바이트는 proto.h 의 주석과 같다. */
-static int handshake(int sock, const opts_t *o)
-{
-	uint8_t buf[BUF_SIZE];
-	uint8_t auth[AUTH_PACKET_LEN];
-	uint8_t *body = auth + sizeof(msg_header_t);
-	msg_header_t h = { .version = PROTOCOL_VERSION };
-	posture_report_t post = {
-		.os_build = 26200,
-		.firewall = POSTURE_STATE_ON,
-		.antivirus = POSTURE_STATE_ON,
-	};
-	crypt_ecdh_t *ecdh;
-	int off, n, try, ok;
-
-	for (try = 0; try < HS_TRIES; try++) {
-		h.type = MSG_TYPE_REQ_HANDSHAKE;
-		off = msg_encode(buf, sizeof(buf), &h);
-		memcpy(buf + off, o->dev_id, DEVICE_ID_LEN);
-		if (send(sock, buf, (size_t)off + REQ_HS_PAYLOAD_LEN, 0) < 0) {
-			perror("send req");
-			return -1;
-		}
-
-		n = recv_type(sock, MSG_TYPE_CHALLENGE, buf, sizeof(buf), &h);
-		if (n == -2) {
-			return -1;
-		}
-		if (n < (int)(sizeof(h) + AUTH_NONCE_LEN)) {
-			continue;
-		}
-
-		/* 핸드셰이크마다 새 일회용 키 쌍. mac 은 헤더부터 posture 까지를 덮는다. */
-		h.type = MSG_TYPE_AUTH;
-		msg_encode(auth, sizeof(auth), &h);
-		memcpy(body + AUTH_OFF_DEVICE_ID, o->dev_id, DEVICE_ID_LEN);
-		memcpy(body + AUTH_OFF_NONCE, buf + sizeof(h), AUTH_NONCE_LEN);
-		ecdh = crypt_ecdh_new(body + AUTH_OFF_PUB);
-		if (ecdh == NULL) {
-			fprintf(stderr, "key generation failed\n");
-			return -1;
-		}
-		posture_encode(body + AUTH_OFF_POSTURE, sizeof(post), &post);
-		if (crypt_hmac(o->key, AUTH_KEY_LEN, auth, AUTH_SIGNED_LEN, body + AUTH_OFF_MAC) < 0 ||
-				send(sock, auth, sizeof(auth), 0) < 0) {
-			crypt_ecdh_free(ecdh);
-			fprintf(stderr, "cannot send AUTH\n");
-			return -1;
-		}
-
-		n = recv_type(sock, MSG_TYPE_RES_HANDSHAKE, buf, sizeof(buf), &h);
-		ok = n > 0 && accept_res(o, ecdh, auth, buf, n) == 0;
-		crypt_ecdh_free(ecdh);
-		if (n == -2) {
-			return -1;
-		}
-		if (ok) {
-			session_idx = h.session_idx;
-			return 0;
-		}
-	}
-
-	fprintf(stderr, "no answer from the server after %d tries\n", HS_TRIES);
-	return -1;
 }
 
 /* ---- 송신 ----------------------------------------------------------------- */
@@ -316,7 +175,6 @@ static void *tx_main(void *arg)
 	size_t len = build_template(plain, o);
 	uint64_t seq = 0, start = now_ns(), due;
 	struct timespec nap = { 0, 20000 };
-	int n;
 
 	while (!atomic_load_explicit(&tx_stop, memory_order_relaxed)) {
 		/* -r 가 있으면 "지금까지 보냈어야 할 개수"를 따라간다. 패킷마다 자지 않고
@@ -333,8 +191,7 @@ static void *tx_main(void *arg)
 		/* 암호화가 제자리에서 일어나므로 평문을 매번 다시 놓는다. */
 		stamp(plain, o, seq);
 		memcpy(buf + PKT_HDR_LEN, plain, len);
-		n = secure_seal(&sess, MSG_TYPE_DATA, session_idx, buf, sizeof(buf), len);
-		if (n < 0 || send(w->sock, buf, (size_t)n, 0) < 0) {
+		if (session_send(&sess, MSG_TYPE_DATA, buf, sizeof(buf), len) < 0) {
 			/* ENOBUFS / ECONNREFUSED 등. 보내지 못한 것은 손실로 세지 않는다. */
 			atomic_fetch_add_explicit(&tx_errs, 1, memory_order_relaxed);
 			continue;
@@ -398,11 +255,11 @@ static void *rx_main(void *arg)
 			continue;		/* SO_RCVTIMEO — 멈추라는 신호를 보러 간다 */
 		}
 		if (msg_decode(buf, (size_t)n, &h) < 0 || h.type != MSG_TYPE_DATA ||
-				h.session_idx != session_idx) {
+				h.session_idx != sess.idx) {
 			atomic_fetch_add_explicit(&rx_other, 1, memory_order_relaxed);
 			continue;
 		}
-		len = secure_open(&sess, buf, (size_t)n, &counter);
+		len = secure_open(&sess.secure, buf, (size_t)n, &counter);
 		if (len < IP_MIN_HDR + ICMP_HDR_LEN + STAMP_LEN) {
 			atomic_fetch_add_explicit(&rx_other, 1, memory_order_relaxed);
 			continue;
@@ -444,6 +301,11 @@ static void usage(const char *prog)
 int main(int argc, char *argv[])
 {
 	opts_t o = { .payload = 56, .seconds = 10, .rate = 0 };
+	posture_report_t post = {
+		.os_build = 0,
+		.firewall = POSTURE_STATE_ON,
+		.antivirus = POSTURE_STATE_ON,
+	};
 	struct timeval tv = { 0, 200000 };
 	int bufsize = 4 << 20;
 	pthread_t tx, rx;
@@ -501,15 +363,18 @@ int main(int argc, char *argv[])
 
 	icmp_id = (uint16_t)getpid();
 
-	if (handshake(sock, &o) < 0) {
+	/* 측정용 기기라 포스처는 늘 통과하는 값을 싣는다. */
+	sess.sock = sock;
+	if (session_handshake(&sess, o.dev_id, o.key, &post) != HS_OK) {
 		return 1;
 	}
+	tun_ip.s_addr = sess.cfg.tun_ip;
 	if (o.rate) {
 		printf("session idx %08x, tunnel %s, payload %d B, %d s, target %" PRIu64 " pps\n",
-				session_idx, inet_ntoa(tun_ip), o.payload, o.seconds, o.rate);
+				sess.idx, inet_ntoa(tun_ip), o.payload, o.seconds, o.rate);
 	} else {
 		printf("session idx %08x, tunnel %s, payload %d B, %d s, as fast as possible\n",
-				session_idx, inet_ntoa(tun_ip), o.payload, o.seconds);
+				sess.idx, inet_ntoa(tun_ip), o.payload, o.seconds);
 	}
 
 	w.sock = sock;
@@ -554,7 +419,7 @@ int main(int argc, char *argv[])
 			(double)sent / secs, (double)got / secs, (double)bytes * 8 / secs / 1e6, loss,
 			percentile_us(0.50), percentile_us(0.99), percentile_us(0.999));
 
-	secure_session_close(&sess);
+	session_close(&sess);
 	close(sock);
 	return 0;
 }
