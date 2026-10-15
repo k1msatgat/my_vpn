@@ -90,10 +90,6 @@
     <ResourceCompile>
       <AdditionalIncludeDirectories>$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
-    <PostBuildEvent>
-      <Command>copy /Y "$(WindowsRoot)\third_party\wintun\bin\amd64\wintun.dll" "$(OutDir)"</Command>
-      <Message>Copy wintun.dll next to the executable</Message>
-    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>

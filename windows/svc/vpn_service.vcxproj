@@ -68,10 +68,6 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalDependencies>ws2_32.lib;iphlpapi.lib;bcrypt.lib;crypt32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
-    <PostBuildEvent>
-      <Command>copy /Y "$(WindowsRoot)\third_party\wintun\bin\amd64\wintun.dll" "$(OutDir)"</Command>
-      <Message>Copy wintun.dll next to the executable</Message>
-    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
@@ -111,4 +107,11 @@
     <ClInclude Include="..\..\lib\common\include\proto.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <!-- wintun.dll 을 실행 파일 옆에 둔다. 콘솔 클라이언트와 서비스가 같은 출력 폴더에 같은
+       파일을 두므로, 병렬 빌드(-m)에서 copy 명령 둘이 동시에 쓰다 한쪽이 실패했다. MSBuild 의
+       Copy 는 같은 파일이면 건너뛰고 잠겨 있으면 다시 시도한다. -->
+  <Target Name="CopyWintun" AfterTargets="Build">
+    <Copy SourceFiles="$(WindowsRoot)\third_party\wintun\bin\amd64\wintun.dll" DestinationFolder="$(OutDir)"
+          SkipUnchangedFiles="true" Retries="10" RetryDelayMilliseconds="200" />
+  </Target>
 </Project>
