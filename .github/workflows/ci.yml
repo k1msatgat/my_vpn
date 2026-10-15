@@ -72,7 +72,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build
-        run: make CFLAGS="-Wall -Wextra -Werror -g -O2" server tools
+        run: make CFLAGS="-Wall -Wextra -Werror -g -O2" server client tools
 
       - name: Install perf
         continue-on-error: true
@@ -87,6 +87,16 @@ jobs:
             echo "::notice title=perf (56B, server log to file)::$(grep -v '^#' bench-out/perf.txt | grep -v '^$' | head -n 25 | enc)"
           fi
           cat bench-out/result.md >> "$GITHUB_STEP_SUMMARY"
+
+      # 위의 값은 서버 혼자의 한계다. 사용자가 보는 속도(클라이언트의 TCP 가 터널을 지나
+      # 얼마나 나오는가)는 실제 클라이언트를 띄워 iperf3 로, 같은 veth 의 직결 값과 함께 잰다.
+      - name: Tunnel throughput (tools/loadgen/iperf.sh)
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iperf3 > /dev/null
+          sudo tools/loadgen/iperf.sh bench-out
+          enc() { sed -e 's/%/%25/g' | sed -e ':a;N;$!ba;s/\n/%0A/g'; }
+          echo "::notice title=iperf3::$(enc < bench-out/iperf.md)"
+          cat bench-out/iperf.md >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
         if: always()
