@@ -1,0 +1,173 @@
+#!/usr/bin/env python3
+"""IdP 에 로그인해 받은 토큰을 vpn_client -t 가 읽는 파일에 적는다.
+
+    my_vpn_login --issuer https://idp.example.com/realms/corp --client-id my_vpn [--keep]
+
+OAuth 2.0 기기 인가(RFC 8628)를 쓴다. 이 도구가 화면에 코드와 주소를 보여 주면, 사용자는
+아무 브라우저(휴대폰이어도 된다)에서 그 주소를 열고 회사 계정으로 로그인한다. 비밀번호도
+MFA 도 이 프로그램을 거치지 않는다 — 터널 프로그램이 사용자의 비밀번호를 받지 않게 하려는
+것이고, 로그인 화면과 MFA 는 IdP 가 이미 잘 하는 일이다.
+
+받은 토큰(기본은 access token)은 --token-file 에 0600 으로 쓴다. vpn_client 는 그 파일이
+바뀌는 것을 보고 세션 안으로 다시 보낸다. --keep 을 주면 이 도구가 떠 있으면서 토큰이 끝나기
+전에 refresh token 으로 새 토큰을 받아 파일을 갈아 끼운다. refresh token 은 메모리에만 두고
+파일에 쓰지 않는다.
+
+IdP 쪽 준비: 공개 클라이언트(client secret 없음) 하나에 기기 인가를 켜고, 토큰의 aud 에
+서버의 audience 가 들어가게 하고(Keycloak 이면 audience 매퍼), 그룹을 쓸 거면 groups 클레임을
+넣는다. README 의 "사용자 로그인".
+
+표준 라이브러리만 쓴다. 주소는 https 만 받는다 (localhost 는 http 도 된다 — 시험용).
+"""
+
+import argparse
+import json
+import os
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
+DEFAULT_TOKEN_FILE = os.path.expanduser("~/.config/my_vpn/token")
+
+
+def die(msg):
+    print("my_vpn_login: " + msg, file=sys.stderr)
+    sys.exit(1)
+
+
+def check_url(url, what):
+    u = urllib.parse.urlparse(url)
+    if u.scheme == "https" or (u.scheme == "http" and u.hostname in ("localhost", "127.0.0.1", "::1")):
+        return url
+    die("%s must be https: %s" % (what, url))
+
+
+def http_json(url, form=None):
+    """GET (form 이 없으면) 또는 form POST. (HTTP 상태, JSON) 을 돌려준다. 4xx 의 본문도
+    읽는다 — 토큰 엔드포인트는 "아직 로그인 안 함"을 400 으로 알린다."""
+    data = urllib.parse.urlencode(form).encode() if form is not None else None
+    req = urllib.request.Request(url, data=data, headers={"Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return r.status, json.load(r)
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.load(e)
+        except ValueError:
+            return e.code, {}
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        die("cannot reach %s: %s" % (url, e))
+
+
+def discover(issuer):
+    status, meta = http_json(issuer.rstrip("/") + "/.well-known/openid-configuration")
+    if status != 200:
+        die("no OpenID configuration at %s (HTTP %d)" % (issuer, status))
+    for k in ("device_authorization_endpoint", "token_endpoint"):
+        if k not in meta:
+            die("the IdP does not offer %s (enable the device authorization grant)" % k)
+        check_url(meta[k], k)
+    return meta
+
+
+def write_token(path, token):
+    """다른 사람이 읽을 수 없는 파일로, 반쯤 쓴 내용이 보이지 않게 이름 바꾸기로 갈아 끼운다."""
+    d = os.path.dirname(os.path.abspath(path))
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".token.")
+    try:
+        os.fchmod(fd, 0o600)
+        os.write(fd, (token + "\n").encode())
+        os.fsync(fd)
+        os.close(fd)
+        os.replace(tmp, path)
+    except BaseException:
+        os.unlink(tmp)
+        raise
+
+
+def pick(tokens, which):
+    tok = tokens.get("id_token" if which == "id" else "access_token")
+    if not tok:
+        die("the token response has no %s token" % which)
+    return tok
+
+
+def device_login(meta, client_id, scope):
+    status, auth = http_json(meta["device_authorization_endpoint"], {"client_id": client_id, "scope": scope})
+    if status != 200 or "device_code" not in auth:
+        die("device authorization failed: %s" % (auth.get("error_description") or auth.get("error") or status))
+
+    url = auth.get("verification_uri_complete") or auth["verification_uri"]
+    print("\nOpen this address in a browser and sign in:\n\n    %s\n" % url)
+    if "verification_uri_complete" not in auth:
+        print("and enter the code:  %s\n" % auth["user_code"])
+    sys.stdout.flush()
+
+    interval = int(auth.get("interval", 5))
+    deadline = time.monotonic() + int(auth.get("expires_in", 600))
+    while time.monotonic() < deadline:
+        time.sleep(interval)
+        status, tok = http_json(meta["token_endpoint"], {
+            "grant_type": DEVICE_GRANT, "device_code": auth["device_code"], "client_id": client_id})
+        if status == 200:
+            return tok
+        err = tok.get("error")
+        if err == "authorization_pending":
+            continue
+        if err == "slow_down":
+            interval += 5
+            continue
+        die("sign-in failed: %s" % (tok.get("error_description") or err or "HTTP %d" % status))
+    die("the code expired before sign-in finished")
+
+
+def refresh(meta, client_id, refresh_token):
+    status, tok = http_json(meta["token_endpoint"], {
+        "grant_type": "refresh_token", "refresh_token": refresh_token, "client_id": client_id})
+    return tok if status == 200 else None
+
+
+def main():
+    p = argparse.ArgumentParser(description="Sign in at the identity provider and write the token for vpn_client -t.")
+    p.add_argument("--issuer", required=True, help="the IdP's issuer URL (the same as issuer in the server's idp.conf)")
+    p.add_argument("--client-id", required=True, help="a public client with the device authorization grant enabled")
+    p.add_argument("--scope", default="openid", help="scopes to ask for (default: openid)")
+    p.add_argument("--token-file", default=DEFAULT_TOKEN_FILE, help="where to write the token (default %(default)s)")
+    p.add_argument("--use", choices=["access", "id"], default="access",
+                   help="which token to hand to the VPN server (default: access)")
+    p.add_argument("--keep", action="store_true", help="stay running and refresh the token before it expires")
+    a = p.parse_args()
+
+    # --keep 으로 띄워 두고 출력을 파일로 돌리면 블록 버퍼링이라 갱신 소식이 늦게 보인다.
+    sys.stdout.reconfigure(line_buffering=True)
+
+    meta = discover(check_url(a.issuer, "issuer"))
+    tokens = device_login(meta, a.client_id, a.scope)
+    write_token(a.token_file, pick(tokens, a.use))
+    print("signed in. token written to %s" % a.token_file)
+
+    while a.keep:
+        # 수명의 4분의 3 이 지나면 갈아 끼운다. 서버는 exp 에서 바로 사용자를 떼므로
+        # 끝나기 전에 새 것이 도착해 있어야 한다.
+        life = int(tokens.get("expires_in", 300))
+        time.sleep(max(10, life * 3 // 4))
+        new = refresh(meta, a.client_id, tokens["refresh_token"]) if tokens.get("refresh_token") else None
+        if new is None:
+            print("refresh failed — sign in again", file=sys.stderr)
+            tokens = device_login(meta, a.client_id, a.scope)
+        else:
+            tokens = dict(new, refresh_token=new.get("refresh_token", tokens.get("refresh_token")))
+        write_token(a.token_file, pick(tokens, a.use))
+        print("token refreshed (%s)" % time.strftime("%H:%M:%S"))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(130)

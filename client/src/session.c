@@ -26,6 +26,20 @@ const char *session_deny_name(uint8_t reason)
 	}
 }
 
+const char *session_login_name(uint8_t status)
+{
+	switch (status) {
+		case LOGIN_OK:		return "ok";
+		case LOGIN_NO_IDP:	return "this server does not take user logins";
+		case LOGIN_MALFORMED:	return "not a JWT, or too large";
+		case LOGIN_UNTRUSTED:	return "signature not trusted (algorithm, key id or signature)";
+		case LOGIN_WRONG_TOKEN:	return "token is for another issuer or audience";
+		case LOGIN_EXPIRED:	return "token expired or not yet valid";
+		case LOGIN_BAD_USER:	return "no usable user name in the token";
+		default:		return "?";
+	}
+}
+
 /* deadline 까지 패킷 하나를 기다린다. 받은 길이, 시간이 다 되면 0, 오류면 HS_FAIL.
  * 헤더가 깨졌거나 버전이 다른 것은 받지 않은 것으로 친다.
  *

@@ -12,12 +12,14 @@
 /* 규칙마다 경로 하나가 나올 수 있다. 내려 줄 자리가 규칙 수보다 적으면 일부가 조용히 빠진다. */
 _Static_assert(MAX_RULES <= NET_MAX_ROUTES, "every allow rule must fit in a pushed route list");
 
-/* 규칙의 action 은 ACL_DENY / ACL_ALLOW 둘뿐이다. ACL_DENY_POSTURE 는 acl_check 의
- * 판정으로만 나온다 — 허용 규칙에 걸렸지만 그 규칙이 요구하는 포스처에 못 미쳤다. */
+/* 규칙의 action 은 ACL_DENY / ACL_ALLOW 둘뿐이다. ACL_DENY_POSTURE 와 ACL_DENY_USER 는
+ * acl_check 의 판정으로만 나온다 — 허용 규칙에 걸렸지만 그 규칙이 요구하는 포스처에
+ * 못 미쳤거나, 그 규칙이 정한 사용자 / 그룹이 아니다 (로그인하지 않았거나 만료). */
 enum acl_action {
     ACL_DENY  = 0,
     ACL_ALLOW = 1,
-    ACL_DENY_POSTURE = 2
+    ACL_DENY_POSTURE = 2,
+    ACL_DENY_USER = 3
 };
 
 struct acl_rule {
@@ -32,14 +34,19 @@ struct acl_rule {
 
     /* 이 규칙으로 허용받으려면 채워야 하는 포스처 (allow 규칙에만 붙는다). */
     posture_req_t  require;
+
+    /* 이 규칙으로 허용받을 수 있는 사용자 / 그룹. 비어 있으면 기기만으로 된다. */
+    user_req_t     users;
 };
 
 void acl_init(void);
 /* 읽은 규칙 수를 돌려준다. 파일을 못 읽거나 형식이 틀리면 -1 이고, 그때는 이전에
  * 읽어 둔 규칙이 그대로 남는다. */
 int  acl_load(const char *path);
-/* posture 는 이 패킷을 보낸 세션이 마지막으로 보고한 값이다. */
-int  acl_check(const unsigned char *pkt, int len, const posture_report_t *posture);
+/* posture 는 이 패킷을 보낸 세션이 마지막으로 보고한 값이고, who 는 그 세션에 로그인한
+ * 사용자다 (없으면 NULL). */
+int  acl_check(const unsigned char *pkt, int len, const posture_report_t *posture,
+               const user_identity_t *who);
 void acl_dump(void);
 int  acl_count(void);
 

@@ -10,7 +10,8 @@
 ![server](https://img.shields.io/badge/server-Linux%20%C2%B7%20C%20%C2%B7%20epoll-2f6f4f)
 ![client](https://img.shields.io/badge/client-Linux%20%C2%B7%20C%20%C2%B7%20tun-2f6f4f)
 ![crypto](https://img.shields.io/badge/crypto-ECDH%20P--256%20%C2%B7%20AES--256--GCM-6b4fbb)
-![protocol](https://img.shields.io/badge/protocol-v4-555)
+![protocol](https://img.shields.io/badge/protocol-v5-555)
+![identity](https://img.shields.io/badge/identity-device%20%2B%20OIDC%20user-6b4fbb)
 ![windows](https://img.shields.io/badge/also-Windows%20client-888)
 
 [한눈에 보기](#한눈에-보기) · [시작하기](#시작하기) · [서버 구조](#서버-구조) · [프로토콜](#프로토콜) · [보안 모델](#보안-모델) · [표준 프로토콜과의 대조](#표준-프로토콜과의-대조) · [현재 한계](#현재-한계)
@@ -22,11 +23,11 @@
 **my_vpn**은 Linux 서버와 Linux 클라이언트 사이에 L3 터널을 만들고, 그 터널을 지나는 모든 패킷에 "이 기기가 지금 여기에 닿아도 되는가"를 묻는 VPN입니다.
 WireGuard나 IPsec이 하는 일(터널, 키 합의, 암호화)과 Tailscale·NetBird 같은 ZTNA 제품이 그 위에 얹는 일(기기 등록, 단말 상태 확인, 정책)을 외부 VPN 라이브러리 없이 C로 처음부터 짰습니다.
 
-서버는 epoll 단일 스레드로 TUN과 UDP 소켓을 함께 처리합니다. 기기마다 다른 키로 챌린지-응답 인증을 하고, 핸드셰이크마다 일회용 ECDH P-256 키와 기기 키를 HKDF로 섞어 방향별 AES-256-GCM 세션 키를 만듭니다. 세션 패킷은 64개 폭의 재전송 창을 지나 ACL(첫 일치, 기본 거부)에 대 본 뒤에만 tun에 쓰이고, 클라이언트가 10초마다 다시 보고하는 포스처(커널 버전, 방화벽)가 정책에 못 미치면 세션 중에도 끊깁니다. 터널 주소와 경로는 클라이언트가 아니라 서버가 정해서 내려 줍니다.
+서버는 epoll 단일 스레드로 TUN과 UDP 소켓을 함께 처리합니다. 기기마다 다른 키로 챌린지-응답 인증을 하고, 핸드셰이크마다 일회용 ECDH P-256 키와 기기 키를 HKDF로 섞어 방향별 AES-256-GCM 세션 키를 만듭니다. 세션 패킷은 64개 폭의 재전송 창을 지나 ACL(첫 일치, 기본 거부)에 대 본 뒤에만 tun에 쓰이고, 클라이언트가 10초마다 다시 보고하는 포스처(커널 버전, 방화벽)가 정책에 못 미치면 세션 중에도 끊깁니다. 터널 주소와 경로는 클라이언트가 아니라 서버가 정해서 내려 줍니다. 그 장비를 **누가** 쓰는지는 회사 IdP(OIDC)에서 받은 토큰으로 확인합니다 — 서버는 JWT의 서명을 IdP의 공개키로 검증하고, ACL 규칙에 `user=` / `group=`을 적어 그 사람에게만 엽니다.
 
 | | 전통적인 VPN | 이 프로젝트 |
 |---|---|---|
-| 누가 들어오는가 | 비밀번호나 인증서를 가진 사람 | **등록된 기기**. 기기마다 다른 키로 서버의 물음에 답해야 한다 |
+| 누가 들어오는가 | 비밀번호나 인증서를 가진 사람 | **등록된 기기 + 로그인한 사용자**. 기기는 자기 키로 서버의 물음에 답하고, 사용자는 IdP가 서명한 토큰을 낸다 |
 | 한 번 들어오면 | 세션이 끝날 때까지 믿는다 | **10초마다 다시 본다.** 방화벽을 끄면 세션 중에도 끊긴다 |
 | 어디까지 가는가 | 내부망 전체 | **적어서 연 곳만.** 규칙이 없으면 터널 대역 밖으로 나가지 못한다 |
 | 설정은 누가 갖는가 | 클라이언트의 설정 파일 | **서버.** 터널 주소와 경로를 서버가 내려 주고, 정책을 고치면 붙어 있는 기기가 따라온다 |
@@ -42,7 +43,10 @@ flowchart LR
         VC["vpn_client<br/><i>epoll · 포스처 · 설정 적용</i>"]
         CT(["tun (myvpn0)<br/>10.0.0.2 — 서버가 준 주소"])
         ID[("신원 파일<br/>0600")]
+        LG["my_vpn_login<br/><i>OIDC 기기 인가</i>"]
+        TK[("토큰 파일<br/>0600")]
         ID --> VC
+        LG --> TK --> VC
         VC <--> CT
     end
 
@@ -50,7 +54,7 @@ flowchart LR
         direction TB
         VS["vpn_server<br/><i>epoll 단일 스레드</i><br/>피어 테이블 · 재전송 창 · ACL"]
         TUN(["tun0<br/>10.0.0.1"])
-        CONF[("devices.conf<br/>acl.conf<br/>enroll.conf")]
+        CONF[("devices.conf<br/>acl.conf<br/>enroll.conf<br/>idp.conf · jwks.json")]
         AUD[("audit.log")]
         CONF --> VS
         VS --> AUD
@@ -65,12 +69,17 @@ flowchart LR
     WIN -.->|"UDP 9000"| VS
     TUN -->|"커널 전달 + NAT<br/>규칙으로 연 곳만"| NET
     ADMIN -->|"ssh + MCP"| CONF
+
+    IDP["IdP (Keycloak 등)<br/><i>로그인 · MFA · 그룹</i>"]
+    LG <-.->|"HTTPS"| IDP
+    IDP -.->|"JWKS (공개키)<br/>관리자가 받아 둔다"| CONF
 ```
 
 | 조각 | 어디서 도는가 | 하는 일 |
 |---|---|---|
 | **`vpn_server`** | Linux, root | 기기를 인증하고, 세션마다 키를 합의하고, 패킷마다 ACL에 대 본 뒤 tun에 쓴다. epoll 단일 스레드 |
-| **`vpn_client`** | Linux, root | 등록 코드로 기기를 올리고, 인증 핸드셰이크 뒤에 tun을 만들어 서버가 준 주소·MTU·경로를 넣는다. 10초마다 포스처(커널 버전, nftables 방화벽)를 다시 보고한다 |
+| **`vpn_client`** | Linux, root | 등록 코드로 기기를 올리고, 인증 핸드셰이크 뒤에 tun을 만들어 서버가 준 주소·MTU·경로를 넣는다. 10초마다 포스처(커널 버전, nftables 방화벽)를 다시 보고한다. 토큰 파일(`-t`)이 바뀌면 세션 안으로 보낸다 |
+| **`my_vpn_login`** | Linux, 일반 사용자 | IdP에 OAuth 기기 인가(RFC 8628)로 로그인해 토큰을 파일에 쓰고, 끝나기 전에 갈아 끼운다. 비밀번호는 브라우저에서 IdP에만 넣는다 |
 | **MCP 서버 / `my_vpn_ctl`** | Linux | 관리자(또는 AI 에이전트)가 서버를 올리고 내리고, 등록 코드를 만들고, 정책을 바꾸고, 감사 로그를 본다 |
 | **`tools/loadgen`** | Linux | 서버 데이터 경로의 부하 생성기. 클라이언트와 같은 프로토콜 코드를 쓴다 |
 | Windows 클라이언트 | Windows | 같은 프로토콜의 추가 구현 — 서비스 + GUI. [아래](#windows-클라이언트) |
@@ -205,6 +214,60 @@ any            any              any    any    deny
 | `-a <file>` | 감사 로그 (사건마다 JSON 한 줄) |
 | `-s <path>` | 읽기 전용 상태 소켓 (세션, 포스처, 사유별 거절 수) |
 | `-n <prefix>` `-m <mtu>` | 터널 대역의 prefix 길이와 MTU (기본 24, 1400). 클라이언트에 그대로 내려간다 |
+| `-u <file>` | 사용자 로그인을 받는다. IdP 설정 (아래 "사용자 로그인") |
+
+</details>
+
+<details>
+<summary><b>사용자 로그인 (IdP 연동)</b></summary>
+
+<br/>
+
+기기 인증은 "등록된 그 장비인가"까지만 말합니다. 그 장비를 누가 쓰는지는 회사의 IdP가 압니다. 사용자는 IdP에 로그인해 토큰(JWT)을 받고, 클라이언트는 그 토큰을 열린 세션 안에서 서버에 보냅니다. 서버는 토큰의 서명을 IdP의 공개키로 확인하고 사용자와 그룹을 세션에 붙입니다. 로그인하지 않아도 세션은 열리고, `user=` / `group=`이 걸린 규칙만 맞지 않습니다.
+
+```
+# acl.conf — 사용자 조건은 포스처 조건과 같은 자리에. 여럿이면 그중 하나면 된다
+10.0.0.0/24    10.101.0.7       tcp    22     allow   group=sre firewall=on
+10.0.0.0/24    10.101.0.20      tcp    5432   allow   user=alice user=bob
+10.0.0.0/24    10.101.0.0/16    tcp    443    allow
+any            any              any    any    deny
+```
+
+**서버.** IdP의 공개키 묶음(JWKS)을 파일로 받아 두고 `-u`로 설정을 줍니다. 서버는 IdP와 직접 통신하지 않습니다 — 단일 스레드 이벤트 루프가 HTTPS 응답을 기다리는 동안 모든 터널이 멈추기 때문입니다. IdP가 키를 바꾸면 파일을 갈아 끼우고 `SIGHUP`을 보냅니다.
+
+```bash
+curl -s https://idp.example.com/realms/corp/protocol/openid-connect/certs > /etc/my_vpn/jwks.json
+cat > /etc/my_vpn/idp.conf <<'EOF'
+issuer        https://idp.example.com/realms/corp    # 토큰의 iss 와 정확히 같아야 한다
+audience      my_vpn                                 # 토큰의 aud 에 들어 있어야 한다
+jwks          jwks.json                              # 상대 경로는 이 파일 기준
+user-claim    preferred_username                     # 기본 sub
+groups-claim  groups                                 # 기본 groups
+EOF
+./server/bin/vpn_server verify-token /etc/my_vpn/idp.conf < token.txt    # 서버를 띄우기 전에 토큰 하나를 대 본다
+# ok user=alice groups=ops expires_in=299s
+```
+
+**클라이언트.** `my_vpn_login`이 기기 인가로 로그인해 토큰을 파일에 쓰고, `vpn_client -t`가 그 파일을 지켜보다 바뀌면 보냅니다. 비밀번호와 MFA는 브라우저에서 IdP에만 넣습니다.
+
+```bash
+client/my_vpn_login --issuer https://idp.example.com/realms/corp --client-id my_vpn --keep
+#   Open this address in a browser and sign in:
+#       https://idp.example.com/realms/corp/device?user_code=WDJB-MJHT
+sudo ./client/bin/vpn_client -t ~/.config/my_vpn/token run <서버 IP> 9000
+#   [login] logged in as alice (token valid for 299s)
+```
+
+**IdP (Keycloak 기준).** `test/keycloak_check.sh`가 CI에서 관리 API로 그대로 만드는 설정입니다.
+
+1. 클라이언트 `my_vpn`: 공개 클라이언트(client secret 없음 — 사용자의 장비에 비밀을 둘 수 없다), *OAuth 2.0 Device Authorization Grant* 켜기.
+2. 그 클라이언트의 매퍼 두 개: *Audience*(`my_vpn`을 access token의 `aud`에), *Group Membership*(클레임 이름 `groups`, full path 끄기).
+3. 사용자를 그룹에 넣는다.
+
+- 받는 서명은 RS256, ES256뿐입니다. `alg: none`과 HS256은 받지 않습니다 (HS256을 받으면 공개키를 HMAC 키로 쓴 위조 토큰이 통과합니다). `kid`로 키를 고르고 키의 종류가 `alg`와 맞아야 합니다.
+- `iss`, `aud`, `exp`는 반드시 봅니다. 같은 IdP가 다른 앱에 준 토큰은 `aud`에서 걸립니다.
+- 토큰이 만료되면 그 순간부터 사용자 규칙은 맞지 않고, 다음 keepalive에서 세션에서 떼어 감사 로그에 `logout`으로 남깁니다. 세션과 터널은 그대로입니다.
+- 이름과 그룹에 쓸 수 있는 글자는 영문, 숫자, `. _ @ + - /`입니다. 감사 로그와 상태 소켓의 JSON에 그대로 들어가기 때문입니다.
 
 </details>
 
@@ -292,15 +355,26 @@ sequenceDiagram
     C->>C: nft 로 인바운드 기본 거부를 켠다 → 포스처가 바뀜
     C->>S: 곧바로 다시 핸드셰이크 → 수락
     end
+
+    rect rgb(245, 240, 255)
+    Note over A,C: ⑤ 사용자 — 이 장비를 누가 쓰는가
+    C->>C: my_vpn_login — IdP 기기 인가로 로그인, 토큰 파일 저장 (0600)
+    C->>S: LOGIN (세션 안에서 JWT)
+    S->>S: JWKS 로 서명 확인 → iss · aud · exp → 사용자와 그룹을 세션에
+    S->>C: LOGIN (ok · 만료 시각 · alice)
+    C->>S: DATA → group=ops 규칙이 열린다
+    Note over S: exp 가 지나면 그 순간부터 사용자 규칙만 닫힌다
+    end
 ```
 
-이 흐름(①~④)은 `test/linux_e2e.sh`가 netns 두 개에서 그대로 재현하고 CI에서 매 푸시마다 돕니다. ④의 거절은 SIGHUP 뒤 10초(keepalive 주기) 안에, 복구는 nft 규칙을 넣고 1~2초(포스처를 읽는 주기) 안에 일어났습니다.
+이 흐름(①~⑤)은 `test/linux_e2e.sh`가 netns 두 개에서 그대로 재현하고 CI에서 매 푸시마다 돕니다. ④의 거절은 SIGHUP 뒤 10초(keepalive 주기) 안에, 복구는 nft 규칙을 넣고 1~2초(포스처를 읽는 주기) 안에 일어났습니다. ⑤의 IdP 자리에는 시험용 OIDC 서버(`tools/idp/mock_oidc.py`)를 두고, 토큰의 갱신과 만료까지 봅니다.
 
 1. **등록.** 관리자가 일회용 코드를 만들어 건넵니다. 기기는 그 코드로 서버와 암호화된 세션을 열고, 자기가 만든 ID와 키를 그 안에서 보냅니다.
 2. **연결.** 기기는 서버가 방금 뽑은 nonce에 자기 키로 서명해 "내가 그 기기"임을 보이고, 양쪽은 이번에만 쓰는 ECDH 키로 세션 키를 합의합니다. 세션 키에는 기기 키가 섞여 있어서, 서버인 척하는 쪽은 클라이언트가 받아들일 답을 만들지 못합니다.
 3. **설정.** 터널 주소와 "어디를 터널로 보낼 것인가"는 서버가 수락에 실어 줍니다. 클라이언트에는 서버 주소만 적습니다.
 4. **통신.** 세션의 모든 패킷은 AES-256-GCM으로 감싸입니다. 서버는 tag가 맞는 패킷만 열고, ACL이 허용한 목적지로 갈 때만 tun에 씁니다.
 5. **지속 검증.** 기기는 10초마다 지금의 포스처를 다시 보고합니다. 정책에 못 미치면 서버가 세션을 내립니다. 관리자가 정책을 고치면 붙어 있는 기기의 경로가 다음 보고 주기에 따라 바뀝니다.
+6. **사용자.** 사용자가 IdP에 로그인해 받은 토큰을 클라이언트가 세션 안으로 보내면, 서버가 서명을 확인하고 사용자와 그룹을 세션에 붙입니다. ACL의 `user=` / `group=` 규칙은 그 사용자에게만 열리고, 토큰이 끝나는 순간 닫힙니다.
 
 ## 서버 구조
 
@@ -394,6 +468,7 @@ OS별로 갈라지는 것은 알고리즘 호출뿐이고, 양쪽 `selftest`가 
 | `AUTH` | 6 | 기기 ID + nonce + 클라이언트의 일회용 공개키 (64B) + 포스처 (8B) + mac (32B) |
 | `DENY` | 7 | 핸드셰이크 중: 사유 (1B) + mac (32B) / 세션 중: 세션 패킷, 암호문 = 사유 |
 | `ENROLL` | 8 | 세션 패킷, 등록 코드로 연 세션에서만. C→S: 기기 ID + 키 / S→C: 결과 (1B) |
+| `LOGIN` | 9 | 세션 패킷. C→S: 사용자의 토큰 (JWT) / S→C: 결과 (1B) + 만료 시각 (8B) + 사용자 이름 |
 
 ### 세션 키
 
@@ -478,6 +553,20 @@ key = HMAC-SHA256("my_vpn enroll key", 코드)               코드를 아는 �
 </details>
 
 <details>
+<summary><b>사용자 로그인</b> — 토큰을 어디에 싣고, 서버가 무엇을 믿는가</summary>
+
+<br/>
+
+- **토큰은 핸드셰이크가 아니라 세션이 열린 뒤에 보냅니다.** `AUTH`는 암호화되지 않으므로 거기에 실으면 토큰이 그대로 보이고, 토큰은 가진 사람이 곧 그 사용자인 증표입니다. 세션 패킷은 서버만 열 수 있고, 수락의 tag로 상대가 진짜 서버임도 이미 확인했습니다. 메시지 하나(`LOGIN`)만 늘었고 핸드셰이크는 그대로입니다.
+- **로그인은 세션의 조건이 아니라 규칙의 조건입니다.** 로그인하지 않은 세션도 열리고, 기기만으로 갈 수 있는 곳(사용자 조건이 없는 규칙)은 그대로 갑니다. 그래서 사용자 로그인을 서버에 붙이는 순간 모든 기기가 끊기지 않고, 사람이 로그인하기 전에 도는 것(업데이트, 백업 에이전트)도 따로 열어 둘 수 있습니다.
+- **서버는 IdP와 통신하지 않습니다.** 관리자가 받아 둔 JWKS로 서명만 확인합니다. 그래서 IdP가 잠깐 닿지 않아도 이미 받은 토큰은 계속 쓰이고, 데이터 경로에 네트워크 대기가 들어오지 않습니다. 대가로 토큰을 IdP에서 폐기해도 `exp`까지는 쓰입니다 — 토큰 수명을 짧게(분 단위) 두고 `my_vpn_login --keep`이 갈아 끼우게 하는 것이 그 보완입니다.
+- **만료는 패킷마다 봅니다.** keepalive(10초)에서만 보면 토큰이 끝난 뒤에도 최대 10초 동안 그 사용자의 권한이 남습니다. 벽시계는 사용자 조건이 걸린 규칙에 닿았을 때만 읽으므로, 그런 규칙이 없는 정책의 데이터 경로에는 비용이 없습니다.
+- **틀린 토큰은 있던 로그인을 떼지 않습니다.** 갱신하다 실패했다고 아직 유효한 로그인까지 잃을 이유가 없습니다. 다른 사용자의 맞는 토큰은 그 사용자로 바꿉니다.
+- **JSON은 직접 읽습니다** (`server/src/json.c`). 원문을 한 번 훑어 토큰 배열을 만드는 방식이라 메모리를 따로 잡지 않고, 받아 준 JSON을 다른 구현이 다르게 읽는 일이 없도록 같은 키가 두 번 나오는 객체, 끝의 쉼표, 이스케이프된 키를 받지 않습니다.
+
+</details>
+
+<details>
 <summary><b>keepalive와 세션의 수명</b></summary>
 
 <br/>
@@ -543,6 +632,11 @@ sendto(buf, n + 32)     └─────────────────�
 | 정책에 못 미치는 단말 | ✅ | 핸드셰이크와 매 keepalive에서 기기별 포스처 정책 평가, ACL 규칙별 포스처 조건 | auth_check, linux_e2e |
 | 분실 / 폐기된 기기 | ✅ | 목록에서 지우면 다음 keepalive(10초 이내)에서 차단 | auth_check |
 | 등록할 때 키가 새는 것 | ✅ | 기기의 키는 등록 코드로 연 세션의 키로 감싸여 간다. 코드는 일회용이고 만료된다 | auth_check, linux_e2e |
+| 다른 사용자인 척 (위조 토큰) | ✅ | IdP의 공개키로 서명 확인. RS256 / ES256만, `kid`와 키 종류가 맞아야 한다. `alg: none`, HS256 키 혼동, 서명 뒤 변조, 모르는 키를 거절 | auth_check (21가지 거절), keycloak_check |
+| 다른 앱에 준 토큰, 끝난 토큰 | ✅ | `iss`, `aud`, `exp`, `nbf`를 본다. 세션 중에 만료되면 그 순간부터 사용자 규칙이 닫힌다 | auth_check, linux_e2e, keycloak_check (`aud`) |
+| 토큰이 도청되는 것 | ✅ | 토큰은 세션 패킷 안에서만 오간다. 클라이언트는 수락의 tag로 서버를 확인한 뒤에 보낸다 | 코드 검토 |
+| 훔친 토큰을 다른 기기에서 쓰는 것 | ⚠️ | 토큰과 기기를 묶지 않는다 (DPoP 같은 결합 없음). 다만 등록된 기기의 키도 함께 있어야 세션이 열린다 | — |
+| IdP에서 막은 사용자 | ⚠️ | 서버는 IdP에 묻지 않으므로 이미 받은 토큰은 `exp`까지 쓰인다. 토큰 수명을 짧게 둔다 | — |
 | 가짜 거절로 접속 방해 | ⚠️ | 인증 뒤의 거절은 확인한다. 인증 전의 거절은 확인할 수 없어 진짜 답을 끝까지 기다린다. 경로 위에서 패킷을 지울 수 있는 공격자는 여전히 막을 수 있다 | 코드 검토 |
 | 가로챈 등록 코드 | ❌ | 만료 전의 코드를 가진 사람이 그 자리의 기기가 된다. 누가 올라왔는지는 감사 로그에 남는다 | — |
 | 메타데이터 노출 | ❌ | 기기 ID와 핸드셰이크의 포스처는 평문이다. 누가 언제 얼마나 주고받는지 보인다 | — |
@@ -615,15 +709,17 @@ sendto(buf, n + 32)     └─────────────────�
 
 | 무엇을 | 어떻게 | 어디서 |
 |---|---|---|
-| Linux 서버 ↔ Linux 클라이언트 | `test/linux_e2e.sh` — netns 두 개에서 등록 → 연결(서버가 준 주소·MTU·경로) → ACL 차단 → 포스처 거부와 nft 로 방화벽을 켠 뒤의 복구. 18개 | CI, 한 장비 |
-| 서버의 프로토콜 | `sudo python3 test/auth_check.py` — 클라이언트인 척 UDP 패킷을 직접 만들어 보낸다. **176개.** 세션 키 유도와 패킷 형식을 서버의 코드를 거치지 않고 따로 구현했다 | CI, 한 장비 |
+| Linux 서버 ↔ Linux 클라이언트 | `test/linux_e2e.sh` — netns 두 개에서 등록 → 연결(서버가 준 주소·MTU·경로) → ACL 차단 → 포스처 거부와 nft 로 방화벽을 켠 뒤의 복구 → 로그인 도구로 받은 토큰의 로그인, 갱신, 만료. 32개 | CI, 한 장비 |
+| 서버의 프로토콜 | `sudo python3 test/auth_check.py` — 클라이언트인 척 UDP 패킷을 직접 만들어 보낸다. **229개.** 세션 키 유도와 패킷 형식을 서버의 코드를 거치지 않고 따로 구현했다 | CI, 한 장비 |
 | 암호 도구 | `vpn_server selftest` / `vpn_client selftest` / `vpn_client.exe selftest` — 같은 표준 벡터 20개 | CI |
 | 빌드 | Linux `-Wall -Wextra -Werror`, Windows `/W4` 경고 없음 | CI |
 | 컨테이너 | `docker/demo.sh` — 서버 + 클라이언트 두 컨테이너로 같은 시나리오 | CI |
 | 서버 처리량 | `tools/loadgen/bench.sh` — 아래 [성능](#성능) | CI |
-| 두 장비 시나리오 | `test/server.sh` + `test/client.sh [idle\|stop\|restart]` — 유휴 중 keepalive, 클라이언트 정지 뒤 만료와 복구, 서버 재시작 복구 | 실제 장비 (v4 클라이언트로는 아직 돌려 보지 않음) |
+| 터널 처리량 | `tools/loadgen/iperf.sh` — 실제 서버와 클라이언트 사이의 iperf3 TCP / UDP, 같은 veth 의 직결 값과 나란히 | CI |
+| 실제 IdP | `test/keycloak_check.sh` — Keycloak 을 아래 설정대로 만들고, 그 토큰을 `vpn_server verify-token` 에 넣는다 (받기, 다른 앱의 토큰, 변조, 기기 인가 첫 단계) | CI |
+| 두 장비 시나리오 | `test/server.sh` + `test/client.sh [idle\|stop\|restart]` — 유휴 중 keepalive, 클라이언트 정지 뒤 만료와 복구, 서버 재시작 복구 | 실제 장비 (v4 이후의 클라이언트로는 아직 돌려 보지 않음) |
 
-`auth_check.py`가 보는 것: 모르는 기기와 틀린 키, `AUTH` 재전송과 만료된 nonce, 서명 뒤의 변조, 곡선 위에 없는 공개키, 핸드셰이크 방해, 포스처 정책의 경계값, 세션 패킷의 변조 / 재전송 / 다른 세션의 키, 순서가 바뀐 패킷과 창, 정책 다시 읽기, 규칙별 포스처, 터널 설정의 발급과 갱신, 규칙이 없을 때의 차단, 감사 로그, 등록 코드의 일회성과 등록용 세션의 제한.
+`auth_check.py`가 보는 것: 모르는 기기와 틀린 키, `AUTH` 재전송과 만료된 nonce, 서명 뒤의 변조, 곡선 위에 없는 공개키, 핸드셰이크 방해, 포스처 정책의 경계값, 세션 패킷의 변조 / 재전송 / 다른 세션의 키, 순서가 바뀐 패킷과 창, 정책 다시 읽기, 규칙별 포스처, 터널 설정의 발급과 갱신, 규칙이 없을 때의 차단, 감사 로그, 등록 코드의 일회성과 등록용 세션의 제한, 사용자 토큰의 검증(서명 · 알고리즘 · 키 · iss · aud · exp · nbf · 이름)과 사용자 / 그룹 규칙, 세션 중의 만료, 깨진 JWKS 를 다시 읽을 때.
 
 ### 성능
 
@@ -637,7 +733,7 @@ sendto(buf, n + 32)     └─────────────────�
 
 - **측정 환경**: GitHub Actions 러너 (AMD EPYC 9V74, 4 vCPU 공용 VM, 커널 6.17 azure), 루프백, 세션 하나, 서버를 CPU 0 에 고정하고 부하 생성기는 CPU 1–2. 공용 VM 이라 절대값은 흔들린다.
 - 크기와 상관없이 **초당 패킷 수에서 막힌다** — 바이트가 아니라 패킷마다 드는 비용(시스템 콜, 커널 네트워크 경로)이 한계다. perf 상위도 거의 커널 함수다.
-- iperf3 로 터널을 거친 TCP/UDP 처리량과 터널 없이 직결한 값을 비교하는 측정은 진행 중입니다. perf 해석은 [docs/experiments.md](docs/experiments.md)의 0번.
+- 터널을 거친 TCP / UDP 처리량은 `tools/loadgen/iperf.sh` 가 CI 의 bench 잡에서 같은 veth 의 직결 값과 나란히 잽니다 (결과는 그 잡의 요약). perf 해석은 [docs/experiments.md](docs/experiments.md)의 0번.
 
 ## 현재 한계
 
@@ -648,13 +744,14 @@ sendto(buf, n + 32)     └─────────────────�
 - **기기 키는 서버에 평문으로 있습니다.** 기기 목록 파일의 권한(600)에 기대며, 서버가 뚫리면 모든 기기의 키가 드러납니다. 공개키 방식이면 서버에는 공개키만 두면 됩니다.
 - **기기 ID 와 핸드셰이크의 포스처는 평문입니다.** 기기를 추적할 수 있습니다.
 - **포스처는 자기 보고입니다.** Linux 에서는 커널 버전과 nftables 만 봅니다. iptables-legacy 로 건 규칙은 보지 못하고, 백신 칸은 수집하지 않습니다.
-- **기기만 인증합니다.** 그 기기를 누가 쓰고 있는지(사용자 로그인)는 보지 않습니다.
+- **사용자 토큰은 기기에 묶이지 않습니다.** 훔친 토큰은 다른 등록 기기에서도 쓸 수 있습니다 (그 기기의 키도 있어야 하지만). 서버는 IdP에 묻지 않으므로 IdP에서 막은 사용자도 토큰의 `exp`까지는 쓰입니다. JWKS는 관리자가 받아 두고 `SIGHUP`으로 다시 읽게 해야 합니다 (자동으로 받아 오지 않습니다).
+- **Windows 클라이언트는 아직 사용자 로그인을 하지 않습니다.** 프로토콜(v5)은 같아 붙을 수는 있지만 `user=` / `group=` 규칙에는 닿지 못합니다.
 - **재핸드셰이크는 블로킹입니다.** 응답을 최대 5초 기다리는 동안 터널 패킷은 처리되지 않습니다.
 - **종료 통지가 없습니다.** 클라이언트가 종료해도 서버는 알지 못하고, 세션은 60초 뒤 만료로 정리됩니다.
 - **IPv4만 터널링합니다.** 멀티캐스트 / 브로드캐스트도 통과하지 못합니다.
 - **ACL이 막은 패킷은 클라이언트에게 알리지 않습니다.** 사용자에게는 타임아웃으로 보입니다.
 - **모든 트래픽을 터널로 보내는 구성은 없습니다.** 경로는 대역 단위이고, 도메인 이름으로 접근 대상을 정하는 방법은 없습니다.
-- **ACL 규칙의 출발지는 터널 IP입니다.** 여러 기기를 역할로 묶어 쓰는 방법은 없습니다.
+- **ACL 규칙의 출발지는 터널 IP입니다.** 사람은 `group=`으로 묶을 수 있지만, 여러 기기를 역할로 묶어 쓰는 방법(기기 그룹)은 없습니다.
 - **서버와 관리 도구가 같은 순간에 기기 목록을 고치는 경우를 잠그지 않았습니다.**
 
 ## Windows 클라이언트
@@ -676,8 +773,10 @@ my_vpn/
 │       ├── peer.c             # 세션 표, 세션 번호, 만료
 │       ├── device.c           # 등록된 기기 목록, 기기별 포스처 정책
 │       ├── enroll.c           # 등록 코드의 대기 목록, 기기를 목록에 올리기
-│       ├── alc.c              # ACL 파싱과 매칭, 규칙별 포스처 조건, 경로 뽑기
-│       ├── policy.c           # 포스처 조건의 문법과 판정
+│       ├── alc.c              # ACL 파싱과 매칭, 규칙별 포스처 / 사용자 조건, 경로 뽑기
+│       ├── policy.c           # 포스처 조건과 사용자 조건의 문법과 판정
+│       ├── idp.c              # 사용자 토큰(JWT) 검증, IdP 설정과 JWKS
+│       ├── json.c             # JWT / JWKS 를 읽는 만큼의 JSON
 │       ├── audit.c            # 감사 로그
 │       └── status.c           # 상태 소켓
 ├── client/                    # Linux 클라이언트
@@ -687,10 +786,13 @@ my_vpn/
 │       ├── identity.c         # 기기 신원 파일 (0600)
 │       ├── posture.c          # 커널 버전, nftables 방화벽
 │       └── netcfg.c           # 서버가 준 주소 · MTU · 경로를 tun 에
-├── tools/loadgen/             # 서버 부하 생성기와 측정 스크립트
+│   └── my_vpn_login           # IdP 로그인 (OIDC 기기 인가) -> 토큰 파일
+├── tools/loadgen/             # 서버 부하 생성기와 측정 스크립트 (bench.sh, iperf.sh)
+├── tools/idp/                 # 시험용 IdP — 키 / JWKS / 토큰(mint.py), OIDC 서버(mock_oidc.py)
 ├── test/
 │   ├── linux_e2e.sh           # Linux 서버 <-> 클라이언트 (netns 두 개)
 │   ├── auth_check.py          # 서버의 프로토콜 검사
+│   ├── keycloak_check.sh      # 실제 IdP(Keycloak)의 토큰
 │   └── server.sh, client.sh   # 두 장비 시나리오
 ├── Dockerfile, docker-compose.yml, docker/   # 이미지(서버 + 클라이언트), entrypoint, 등록 코드, 데모
 ├── mcp/                       # 서버 관리 — MCP 서버(Node.js)와 root 헬퍼 my_vpn_ctl, systemd 유닛
@@ -717,12 +819,15 @@ my_vpn/
 - [x] **Linux 클라이언트 v4** — 등록, 인증, 세션 암호화, Linux 포스처, 서버 설정 적용, netns 전체 경로 시험
 - [x] 서버 부하 생성기와 CI 측정
 - [x] Windows 클라이언트 — Wintun, 서비스 + GUI 분리, 패킷 분석 화면
+- [x] **사용자 로그인 (프로토콜 v5)** — IdP 토큰(JWT, RS256 / ES256) 검증, ACL 의 `user=` / `group=`, 세션 중 만료, OIDC 기기 인가 로그인 도구, Keycloak 으로 CI 확인
+- [x] 터널 처리량 측정 (iperf3, 직결과 나란히)
 
 </details>
 
 ### 다음 단계
 
-- mTLS/JWT 기반 IdP 연동 — 기기에 더해 "누가"(사용자)를 IdP 토큰으로 확인하고 ACL 에 쓴다
+- 앱 커넥터 — 내부망 쪽에서 서버로 밖으로만 연결을 여는 커넥터를 두어, 보호할 네트워크에 들어오는 포트를 열지 않는다
+- 토큰과 기기의 결합 (DPoP 같은 방식), Windows 클라이언트의 사용자 로그인
 - XDP 기반 빠른 경로 — 헤더가 깨졌거나 모르는 세션 번호인 패킷을 커널 앞단에서 버린다
 
 ## AI 사용 내역
@@ -763,12 +868,14 @@ my_vpn/
 | `mcp/` MCP 서버 전체 — `server.js`, `ctl.cjs`, systemd 유닛, 설치 스크립트 |
 | GUI 재설계 — `gui/ui_theme.cpp`, `gui/ui_controls.cpp`, `MainDlg`의 배치와 그리기, `vpn_gui.rc`, 앱 아이콘 |
 | `.github/workflows/ci.yml`, CI가 찾은 `posture.c`의 `wscapi.dll` 동적 로드 |
-| 서버 부하 생성기와 측정 — `tools/loadgen/loadgen.c`, `tools/loadgen/bench.sh`, CI의 `bench` 잡 |
+| 서버 부하 생성기와 측정 — `tools/loadgen/loadgen.c`, `tools/loadgen/bench.sh`, `tools/loadgen/iperf.sh`(터널을 지난 iperf3), CI의 `bench` 잡 |
 | OpenSSL 암호 구현을 `server/src/crypt.c` 에서 `lib/common/src/crypt_openssl.c` 로 옮긴 것 |
 | Linux 클라이언트 v4 — `client/src/session.c`(핸드셰이크, 등록, 세션 송신 — loadgen 과 공유), `identity.c`(신원 파일), `posture.c`(커널 버전, nftables), `netcfg.c`(ioctl 로 주소·MTU·경로), `client.c` 의 v4 루프와 명령. 동작 규칙은 Windows 클라이언트의 `tunnel.c` 를 따랐다 |
 | `test/linux_e2e.sh`(netns 두 개의 전체 경로 시험)와 CI 단계, `test/client.sh` / `common.sh` 를 새 명령행으로 고친 것 |
 | Docker — `Dockerfile`, `docker/entrypoint.sh`, `docker/enroll-code.sh`, `docker-compose.yml`, `docker/demo.sh`, CI 의 `docker` 잡 |
 | `docs/experiments.md`의 실험 절차와 해석 초안 (실험 0은 CI 가 돌린 측정, 1~8은 직접 실행) |
 | 이 README — Linux 기준 재구성, "표준 프로토콜과의 대조", 보안 모델의 확인 열 |
+| 사용자 로그인 (프로토콜 v5) — `server/src/idp.c`(JWT 검증, JWKS), `server/src/json.c`, `policy.c` 의 사용자 조건, `alc.c` / `server.c` / `audit.c` / `status.c` 의 연결, `vpn_server verify-token`, 클라이언트의 `-t` 와 `LOGIN`, `client/my_vpn_login`(OIDC 기기 인가), `tools/idp/`(시험용 IdP), `auth_check.py` 의 로그인 시험, `linux_e2e.sh` 의 5단계, `test/keycloak_check.sh` 와 CI 의 `idp` 잡, MCP 의 ACL 사용자 조건. 토큰을 세션이 열린 뒤에 싣는 것, 서버가 IdP 와 통신하지 않는 것, 로그인을 세션이 아니라 규칙의 조건으로 두는 것은 AI가 제안하고 검토 후 채택 |
+| `windows/my_vpn.sln` 에 빠져 있던 `vpn_service` 프로젝트를 넣은 것 (CI 가 서비스를 빌드하지 않고 있었다) |
 
 </details>

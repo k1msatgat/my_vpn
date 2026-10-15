@@ -11,6 +11,8 @@
 #include <sys/epoll.h>
 #include <netinet/in.h>
 #include <net/if.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 
 #include "common.h"
 #include "identity.h"
@@ -18,10 +20,10 @@
 #include "posture.h"
 #include "session.h"
 
-/* Linux 클라이언트 (프로토콜 버전 4).
+/* Linux 클라이언트 (프로토콜 버전 5).
  *
  *   vpn_client [-k 신원파일] enroll <server-ip> <port> <등록 코드>
- *   vpn_client [-k 신원파일] [-i tun 이름] [-v] run <server-ip> <port>
+ *   vpn_client [-k 신원파일] [-i tun 이름] [-t 토큰 파일] [-v] run <server-ip> <port>
  *   vpn_client posture
  *   vpn_client selftest
  *
@@ -38,6 +40,9 @@
 
 #define EXIT_DENIED	2	/* 서버가 거절했다 — 스크립트가 "닿지 못함"과 구분할 수 있게 */
 
+/* 답이 없는 LOGIN 을 다시 보내는 간격. keepalive 보다 짧게 잡아 로그인이 늦지 않게 한다. */
+#define LOGIN_RETRY_MSEC	3000
+
 typedef struct client {
 	vpn_session_t session;
 	identity_t ident;
@@ -49,6 +54,13 @@ typedef struct client {
 	uint32_t bcast;			/* 터널 대역의 브로드캐스트 주소 */
 	int denied;			/* 서버가 세션을 거절했다. 터널은 두고 패킷만 막는다 */
 	int readdress;			/* 서버가 다른 터널 주소를 주었다. 다시 핸드셰이크한다 */
+
+	/* 사용자 로그인 (-t). 토큰 파일이 바뀌거나 세션을 새로 열 때마다 보낸다. */
+	const char *token_path;
+	struct stat token_seen;		/* 마지막으로 읽은 파일 (바뀌었는지 보려고) */
+	int login_due;			/* 보내야 하는데 아직 답을 받지 못했다 */
+	uint64_t last_login_ms;
+	int64_t user_expires;		/* 서버가 받아 준 토큰의 exp. 0 이면 로그인하지 않은 상태 */
 	int verbose;
 } client_t;
 
@@ -172,6 +184,131 @@ static void netcfg_refresh(client_t *c, const uint8_t *body, int len)
 	netcfg_apply(&c->net, &cfg);
 }
 
+/* ---- 사용자 로그인 ------------------------------------------------------------
+ *
+ * 클라이언트는 IdP 와 직접 이야기하지 않는다. 로그인(브라우저, 기기 코드)은 별도의 도구가
+ * 하고 받은 토큰을 파일에 적는다 (client/my_vpn_login). 클라이언트는 그 파일을 지켜보다가
+ * 바뀌면 읽어서 세션 안으로 보낸다. 토큰을 새로 받는 것(refresh)도 그 도구의 일이라,
+ * 터널을 도는 이 프로세스에는 HTTPS 도 IdP 별 차이도 들어오지 않는다. */
+
+/* 토큰 파일을 읽는다. 앞뒤 공백과 줄바꿈은 뗀다. 길이, 실패하면 -1.
+ *
+ * 토큰은 가진 사람이 곧 그 사용자인 증표라 신원 파일처럼 다른 사람이 읽을 수 있는 파일은
+ * 쓰지 않는다. 주인은 따지지 않는다 — 로그인은 보통 일반 계정으로 하고 터널은 root 로
+ * 돌린다. */
+static int token_read(const char *path, uint8_t *out, size_t cap)
+{
+	struct stat st;
+	ssize_t n;
+	size_t s = 0, e;
+	int fd;
+
+	fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+	if (fd < 0) {
+		return -1;
+	}
+	if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode) || (st.st_mode & 077) != 0) {
+		fprintf(stderr, "[login] %s: must be a regular file with mode 600\n", path);
+		close(fd);
+		return -1;
+	}
+
+	n = read(fd, out, cap);
+	close(fd);
+	if (n <= 0) {
+		return -1;
+	}
+
+	e = (size_t)n;
+	while (s < e && (out[s] == ' ' || out[s] == '\n' || out[s] == '\r' || out[s] == '\t')) s++;
+	while (e > s && (out[e - 1] == ' ' || out[e - 1] == '\n' || out[e - 1] == '\r' || out[e - 1] == '\t')) e--;
+	if (e == s || (size_t)n == cap) {
+		fprintf(stderr, "[login] %s: empty, or longer than %d bytes\n", path, (int)LOGIN_TOKEN_MAX);
+		return -1;
+	}
+	memmove(out, out + s, e - s);
+
+	return (int)(e - s);
+}
+
+/* 1초 틱마다 부른다. 파일이 바뀌었으면 보낼 것으로 표시하고, 보낼 것이 있으면 보낸다.
+ * 답이 오면(login_response) 표시를 지운다. 답이 사라져도 LOGIN_RETRY_MSEC 뒤에 다시 간다. */
+static void login_tick(client_t *c, uint64_t now)
+{
+	uint8_t packet[BUF_SIZE];
+	struct stat st;
+	int n;
+
+	if (c->token_path == NULL || c->denied) {
+		return;
+	}
+
+	if (stat(c->token_path, &st) == 0 &&
+			(st.st_mtim.tv_sec != c->token_seen.st_mtim.tv_sec ||
+			 st.st_mtim.tv_nsec != c->token_seen.st_mtim.tv_nsec ||
+			 st.st_ino != c->token_seen.st_ino || st.st_size != c->token_seen.st_size)) {
+		c->token_seen = st;
+		c->login_due = 1;
+		c->last_login_ms = 0;
+	}
+
+	/* 서버가 받아 준 토큰이 끝났다. 서버도 같은 순간에 사용자를 뗀다. */
+	if (c->user_expires != 0 && (int64_t)time(NULL) >= c->user_expires) {
+		printf("[login] token expired — waiting for a new one in %s\n", c->token_path);
+		c->user_expires = 0;
+	}
+
+	if (!c->login_due || now - c->last_login_ms < LOGIN_RETRY_MSEC) {
+		return;
+	}
+	c->last_login_ms = now;
+
+	n = token_read(c->token_path, packet + PKT_HDR_LEN, LOGIN_TOKEN_MAX + 1);
+	if (n < 0) {
+		/* 파일이 아직 없거나 쓰는 중이다. 바뀌면 다시 본다. */
+		c->login_due = 0;
+		return;
+	}
+	if (session_send(&c->session, MSG_TYPE_LOGIN, packet, sizeof(packet), (size_t)n) < 0) {
+		fprintf(stderr, "[login] send failed\n");
+	}
+	crypt_wipe(packet, sizeof(packet));
+}
+
+/* LOGIN (S -> C): status(1) | expires(8) | 사용자 이름 */
+static void login_response(client_t *c, const uint8_t *body, int n)
+{
+	char name[LOGIN_USER_MAX + 1];
+	uint64_t expires = 0;
+	int i, nl;
+
+	if (n < LOGIN_RES_HEAD_LEN) {
+		return;
+	}
+	for (i = 0; i < 8; i++) {
+		expires = (expires << 8) | body[1 + i];
+	}
+	nl = n - LOGIN_RES_HEAD_LEN;
+	if (nl > LOGIN_USER_MAX) {
+		nl = LOGIN_USER_MAX;
+	}
+	memcpy(name, body + LOGIN_RES_HEAD_LEN, (size_t)nl);
+	name[nl] = '\0';
+
+	c->login_due = 0;
+	/* 거절돼도 서버는 그 전에 로그인한 사용자를 그대로 둔다. 그 만료 시각도 그대로 둔다. */
+	if (body[0] != LOGIN_OK) {
+		printf("[login] rejected: %s\n", session_login_name(body[0]));
+		return;
+	}
+
+	if ((int64_t)expires != c->user_expires) {
+		printf("[login] logged in as %s (token valid for %llds)\n", name,
+				(long long)((int64_t)expires - (int64_t)time(NULL)));
+	}
+	c->user_expires = (int64_t)expires;
+}
+
 /* TUN -> UDP */
 static int pump_tun(client_t *c, int32_t tun_fd, uint8_t *packet, size_t cap)
 {
@@ -264,6 +401,9 @@ static int pump_udp(client_t *c, int32_t tun_fd, uint8_t *packet, size_t cap)
 			}
 			printf("[deny] %s\n", session_deny_name(ip[0]));
 			c->denied = 1;
+			return 0;
+		case MSG_TYPE_LOGIN:
+			login_response(c, ip, n);
 			return 0;
 		case MSG_TYPE_DATA:
 			break;
@@ -370,6 +510,7 @@ static int run(client_t *c, const struct sockaddr_in *server, const char *ifname
 	c->last_rx_ms = get_current_time_ms();
 	c->last_ka_ms = c->last_rx_ms;
 	printf("[%s] connected\n", c->net.ifname);
+	c->login_due = c->token_path != NULL;
 
 	while (running){
 		nev = epoll_wait(epfd, events, MAX_EVENTS, LOOP_TICK_MSEC);
@@ -412,6 +553,10 @@ static int run(client_t *c, const struct sockaddr_in *server, const char *ifname
 					}
 					c->denied = 0;
 					printf("[%s] connected\n", c->net.ifname);
+					/* 새 세션에는 사용자가 없다. 지금 가진 토큰을 다시 보낸다. */
+					c->login_due = c->token_path != NULL;
+					c->last_login_ms = 0;
+					c->user_expires = 0;
 					break;
 				case HS_DENIED:
 					c->denied = 1;
@@ -442,6 +587,8 @@ static int run(client_t *c, const struct sockaddr_in *server, const char *ifname
 			}
 			c->last_ka_ms = now;
 		}
+
+		login_tick(c, now);
 
 		for (i = 0; i < nev; i++){
 			fd = events[i].data.fd;
@@ -560,11 +707,12 @@ static void usage(const char *prog)
 {
 	fprintf(stderr,
 		"usage: %s [-k identity-file] enroll <server-ip> <port> <enrollment-code> [-f]\n"
-		"       %s [-k identity-file] [-i ifname] [-v] run <server-ip> <port>\n"
+		"       %s [-k identity-file] [-i ifname] [-t token-file] [-v] run <server-ip> <port>\n"
 		"       %s posture\n"
 		"       %s selftest\n"
 		"  -k  device identity file (default %s)\n"
 		"  -i  tun device name (default %s)\n"
+		"  -t  log in as the user whose token (JWT) is in this file; sent again when it changes\n"
 		"  -f  replace an existing identity when enrolling\n"
 		"  -v  log every packet\n",
 		prog, prog, prog, prog, IDENTITY_FILE_DEFAULT, TUN_IFNAME_DEFAULT);
@@ -609,10 +757,11 @@ int main(int argc, char *argv[])
 	setvbuf(stdout, NULL, _IOLBF, 0);
 	memset(&client, 0, sizeof(client));
 
-	while ((opt = getopt(argc, argv, "+k:i:vf")) != -1) {
+	while ((opt = getopt(argc, argv, "+k:i:t:vf")) != -1) {
 		switch (opt) {
 			case 'k': ident_path = optarg; break;
 			case 'i': ifname = optarg; break;
+			case 't': client.token_path = optarg; break;
 			case 'v': client.verbose = 1; break;
 			case 'f': force = 1; break;
 			default: usage(argv[0]); return 1;

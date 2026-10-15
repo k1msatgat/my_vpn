@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #include "audit.h"
+#include "idp.h"
 #include "common.h"
 #include "device.h"
 
@@ -128,6 +129,9 @@ static void session_fields(const peer_t *peer)
 	field("\"tunnel_ip\":\"%s\"", ip_str(peer->inner, ib));
 	field("\"session\":\"%08x\"", peer->session_idx);
 	field("\"endpoint\":\"%s:%u\"", ip_str(peer->outer.sin_addr, ib), ntohs(peer->outer.sin_port));
+	if (peer->logged_in) {
+		field("\"user\":\"%s\"", peer->user.name);
+	}
 }
 
 void audit_session_open(const peer_t *peer)
@@ -298,5 +302,42 @@ void audit_enrolled(const uint8_t id[DEVICE_ID_LEN], struct in_addr tun_ip,
 	field("\"endpoint\":\"%s:%u\"", ip_str(src->sin_addr, ib), ntohs(src->sin_port));
 	/* 이름은 enroll.c 가 받는 글자를 정해 둔 값이라 그대로 적어도 JSON 이 깨지지 않는다. */
 	field("\"label\":\"%s\"", label);
+	end();
+}
+
+void audit_login(const peer_t *peer, int status)
+{
+	int g;
+
+	if (out == NULL) {
+		return;
+	}
+
+	/* 실패했을 때 session_fields 의 "user" 는 그 전에 로그인해 있던 사용자다. 실패한 토큰이
+	 * 누구의 것이라고 말했는지는 적지 않는다 — 서명이 맞지 않은 토큰의 이름은 아무나 쓸 수
+	 * 있는 값이다. */
+	begin("login");
+	session_fields(peer);
+	field("\"result\":\"%s\"", idp_status_name(status));
+	if (status == LOGIN_OK) {
+		field("\"expires\":%lld", (long long)peer->user.expires);
+		field("\"groups\":[");
+		for (g = 0; g < peer->user.n_groups; g++) {
+			fprintf(out, "%s\"%s\"", g == 0 ? "" : ",", peer->user.groups[g]);
+		}
+		fputc(']', out);
+	}
+	end();
+}
+
+void audit_logout(const peer_t *peer, const char *reason)
+{
+	if (out == NULL) {
+		return;
+	}
+
+	begin("logout");
+	session_fields(peer);
+	field("\"reason\":\"%s\"", reason);
 	end();
 }

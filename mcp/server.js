@@ -204,6 +204,10 @@ server.registerTool('acl_set', {
 			dport: z.string().optional().describe('"n", "lo-hi" or "any" (tcp/udp only; default "any")'),
 			action: z.enum(['allow', 'deny']),
 			require: requirements.optional().describe('allow rules only: posture a session must currently report to be allowed by this rule, e.g. SSH only from devices with the firewall on. If the rule matches but the posture falls short the packet is denied; later rules are not tried.'),
+			users: z.object({
+				users: z.array(z.string()).optional().describe('user names as the identity provider reports them (the server\'s user-claim)'),
+				groups: z.array(z.string()).optional().describe('group names from the token\'s groups claim'),
+			}).strict().optional().describe('allow rules only: who must be logged in on the session (a user token sent by the client, see README "user login"). Any one listed user or group is enough; at most 4 in total. A session with nobody logged in, or whose token has expired, does not match and the packet is denied; later rules are not tried. Rules without users keep working on the device alone.'),
 		}).strict()).min(1).max(32),
 	},
 	annotations: DISRUPT,

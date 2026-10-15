@@ -26,6 +26,9 @@ typedef struct server_stats {
 	uint64_t spoofed_src;
 	uint64_t acl_denied;
 	uint64_t acl_denied_posture;
+	uint64_t acl_denied_user;		/* user= / group= 규칙에 걸렸는데 그 사용자가 아니다 */
+	uint64_t login_ok;
+	uint64_t login_failed;
 } server_stats_t;
 
 extern server_stats_t stats;

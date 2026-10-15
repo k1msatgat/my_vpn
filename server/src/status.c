@@ -22,7 +22,7 @@ static time_t started_at;
 
 /* 세션 하나가 400바이트 남짓이다. MAX_PEERS 가 커지면 같이 키워야 하는데, 모자라면
  * 잘린 JSON 을 보내지 않고 아무것도 보내지 않는다. */
-static char out[16384];
+static char out[32768];
 static size_t outlen;
 static int overflow;
 
@@ -63,7 +63,7 @@ static void build(int acl_enabled)
 	char ib[INET_ADDRSTRLEN], ob[INET_ADDRSTRLEN];
 	time_t now = mono_now();
 	const peer_t *p;
-	int i, first = 1;
+	int i, g, first = 1;
 
 	outlen = 0;
 	overflow = 0;
@@ -82,7 +82,10 @@ static void build(int acl_enabled)
 	put("\"unknown_session\":%llu,", (unsigned long long)stats.unknown_session);
 	put("\"spoofed_src\":%llu,", (unsigned long long)stats.spoofed_src);
 	put("\"acl_denied\":%llu,", (unsigned long long)stats.acl_denied);
-	put("\"acl_denied_posture\":%llu},", (unsigned long long)stats.acl_denied_posture);
+	put("\"acl_denied_posture\":%llu,", (unsigned long long)stats.acl_denied_posture);
+	put("\"acl_denied_user\":%llu,", (unsigned long long)stats.acl_denied_user);
+	put("\"login_ok\":%llu,", (unsigned long long)stats.login_ok);
+	put("\"login_failed\":%llu},", (unsigned long long)stats.login_failed);
 
 	put("\"sessions\":[");
 	for (i = 0; i < MAX_PEERS; i++) {
@@ -105,7 +108,19 @@ static void build(int acl_enabled)
 				(unsigned long long)p->rx_packets, (unsigned long long)p->rx_bytes);
 		put("\"tx_packets\":%llu,\"tx_bytes\":%llu,",
 				(unsigned long long)p->tx_packets, (unsigned long long)p->tx_bytes);
-		put("\"acl_denied\":%llu}", (unsigned long long)p->acl_denied);
+		put("\"acl_denied\":%llu,", (unsigned long long)p->acl_denied);
+		/* 이름과 그룹은 policy.c 가 정한 글자만 들어 있어 따옴표 없이 그대로 적어도 된다. */
+		if (p->logged_in) {
+			put("\"user\":{\"name\":\"%s\",\"expires\":%lld,\"groups\":[", p->user.name,
+					(long long)p->user.expires);
+			for (g = 0; g < p->user.n_groups; g++) {
+				put("%s\"%s\"", g == 0 ? "" : ",", p->user.groups[g]);
+			}
+			put("]}}");
+		}
+		else {
+			put("\"user\":null}");
+		}
 		first = 0;
 	}
 	put("]}\n");

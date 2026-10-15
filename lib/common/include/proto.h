@@ -14,7 +14,7 @@ extern "C" {
 #define PROTO_STATIC_ASSERT _Static_assert
 #endif
 
-#define PROTOCOL_VERSION 4 /* 서버와 클라이언트가 같은 값을 쓴다. 2: 기기 인증, 3: 세션 암호화, 4: 서버가 터널 설정을 내려 준다 */
+#define PROTOCOL_VERSION 5 /* 서버와 클라이언트가 같은 값을 쓴다. 2: 기기 인증, 3: 세션 암호화, 4: 서버가 터널 설정을 내려 준다, 5: 사용자 로그인 */
 
 #define TUN_MTU		1400
 #define BUF_SIZE	2048
@@ -74,6 +74,8 @@ extern "C" {
  *   KEEPALIVE  C  -> S   암호문 = posture(8)       포스처 재보고
  *              S  -> C   암호문 = net_config      지금의 터널 설정
  *   DENY       S  -> C   암호문 = reason(1)        세션 중의 거절. 헤더의 session_idx 는 그 세션
+ *   LOGIN      C  -> S   암호문 = 사용자의 토큰     아래 "사용자 로그인"
+ *              S  -> C   암호문 = status(1) | expires(8) | 사용자 이름
  *
  * AES-256-GCM 이고, 앞의 16B(헤더와 counter)는 암호화하지 않지만 tag 가 함께 덮는다.
  * 방향마다 키가 다르고 counter 가 그대로 nonce 가 된다. */
@@ -85,7 +87,8 @@ typedef enum MSG_TYPE {
 	MSG_TYPE_CHALLENGE,
 	MSG_TYPE_AUTH,
 	MSG_TYPE_DENY,
-	MSG_TYPE_ENROLL
+	MSG_TYPE_ENROLL,
+	MSG_TYPE_LOGIN
 } msg_type_t;
 
 #define DEVICE_ID_LEN	16
@@ -148,6 +151,43 @@ typedef enum ENROLL_STATUS {
 /* 등록 코드: 0-9 와 헷갈리는 글자(I L O U)를 뺀 대문자, 25자 (125비트).
  * 보여 줄 때는 다섯 자씩 끊는다: 7K2QF-9XWM4-... */
 #define ENROLL_CODE_LEN		25
+
+/* 사용자 로그인.
+ *
+ * 기기 인증은 장비를 확인할 뿐 그 장비를 누가 쓰는지는 모른다. 사용자는 회사의 IdP 에
+ * 로그인해 토큰(JWT)을 받고, 클라이언트는 열린 세션 안에서 그 토큰을 서버에 보낸다.
+ *
+ *   C -> S  LOGIN   세션 패킷. 암호문 = 토큰 (ASCII, header.payload.signature)
+ *   S -> C  LOGIN   세션 패킷. 암호문 = status(1) | expires(8) | 사용자 이름
+ *
+ * 토큰을 핸드셰이크에 싣지 않고 세션이 열린 뒤에 보낸다. 핸드셰이크의 AUTH 는 암호화되지
+ * 않으므로 거기에 실으면 토큰이 그대로 보이고, 토큰은 가진 사람이 곧 그 사용자인
+ * 증표다. 세션 패킷은 서버만 열 수 있고, 수락의 tag 로 상대가 진짜 서버임도 이미 확인했다.
+ *
+ * 로그인하지 않아도 세션은 열린다. 기기만으로 갈 수 있는 곳(사용자 조건이 없는 ACL
+ * 규칙)은 그대로 가고, user= / group= 이 걸린 규칙만 맞지 않는다. 토큰이 만료되면 서버는
+ * 그때부터 그 사용자를 세션에서 떼고, 클라이언트는 새 토큰을 받는 대로 다시 보낸다.
+ * 세션도 터널도 끊지 않는다.
+ *
+ * expires 는 토큰의 exp (Unix time, 빅엔디언)이고 실패하면 0 이다. 이름은 성공했을 때만
+ * 붙는다 (NUL 없이, 패킷 끝까지). 같은 토큰을 다시 보내면 같은 답을 한다 — 답이
+ * 사라졌을 때 클라이언트가 그냥 다시 보내면 된다.
+ *
+ * 토큰은 UDP 패킷 하나에 들어가야 한다. 그룹이 아주 많은 토큰은 IdP 쪽에서 줄인다
+ * (요청하는 scope 나 그룹 매퍼). */
+#define LOGIN_TOKEN_MAX		(BUF_SIZE - PKT_OVERHEAD - 64)
+#define LOGIN_RES_HEAD_LEN	9	/* status(1) | expires(8) */
+#define LOGIN_USER_MAX		63	/* 답에 실리는 사용자 이름의 최대 길이 */
+
+typedef enum LOGIN_STATUS {
+	LOGIN_OK = 0,
+	LOGIN_NO_IDP,		/* 이 서버는 사용자 로그인을 받지 않는다 (-u 를 주지 않았다) */
+	LOGIN_MALFORMED,	/* JWT 의 모양이 아니다, 너무 크다 */
+	LOGIN_UNTRUSTED,	/* 받지 않는 알고리즘, 모르는 키, 서명이 맞지 않는다 */
+	LOGIN_WRONG_TOKEN,	/* 서명은 맞지만 다른 서비스나 다른 IdP 에 준 토큰이다 (iss / aud) */
+	LOGIN_EXPIRED,		/* 만료됐거나 아직 쓸 수 없는 토큰이다 (exp / nbf) */
+	LOGIN_BAD_USER		/* 사용자 이름이 없거나 쓸 수 없는 글자가 있다 */
+} login_status_t;
 
 #define ECDH_PUB_LEN	64	/* P-256 공개키 X(32) | Y(32) */
 #define AEAD_TAG_LEN	16

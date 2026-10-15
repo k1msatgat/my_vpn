@@ -4,6 +4,8 @@
 #            Linux 서버 <-> Linux 클라이언트 전체 경로(netns 두 개)를 돌린다.
 #   docker   이미지를 빌드하고 서버 + 클라이언트 두 컨테이너로 전체 시나리오를 돌린다.
 #   bench    부하 생성기로 서버 데이터 경로의 처리량을 재고 perf 로 어디서 시간을 쓰는지 본다.
+#            실제 클라이언트를 띄워 터널을 지난 TCP / UDP 처리량을 직결과 나란히 잰다 (iperf3).
+#   idp      Keycloak 을 띄워 README 의 설정대로 만들고, 그 IdP 가 준 토큰을 서버가 받는지 본다.
 #   windows  Windows 클라이언트(콘솔 + 서비스 + MFC GUI)를 MSVC 로 빌드한다.
 #
 # 서버는 Linux 장비에서, 클라이언트는 Windows PC 에서 개발한다. 한쪽에서 고친 것이
@@ -52,6 +54,29 @@ jobs:
           node --check ctl.cjs
 
   # Dockerfile 과 docker-compose.yml 이 실제로 도는지. 개발 장비에는 docker 가 없다.
+  # 다른 시험의 토큰은 시험용 도구(tools/idp/mint.py)가 만든다. 실제 IdP 의 토큰이 그 모양과
+  # 같은지(aud 배열, 서명용이 아닌 키가 섞인 JWKS, 그룹 클레임)는 실제 IdP 로만 확인된다.
+  idp:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build server
+        run: make CFLAGS="-Wall -Wextra -Werror -g -O0" server
+
+      - name: Start Keycloak
+        run: |
+          docker run -d --name kc -p 8080:8080 \
+            -e KC_BOOTSTRAP_ADMIN_USERNAME=admin -e KC_BOOTSTRAP_ADMIN_PASSWORD=admin \
+            quay.io/keycloak/keycloak:26.0.7 start-dev
+
+      - name: Tokens from a real IdP (test/keycloak_check.sh)
+        run: test/keycloak_check.sh
+
+      - name: Keycloak log
+        if: failure()
+        run: docker logs kc 2>&1 | tail -n 80
+
   docker:
     runs-on: ubuntu-24.04
     steps:

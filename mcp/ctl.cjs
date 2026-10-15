@@ -430,6 +430,54 @@ function freeTunnelIp(devices, pending) {
 	fail('no free address left in the tunnel subnet');
 }
 
+/* ACL 규칙의 사용자 조건: user=alice / group=dev (server/include/policy.h). 이름에 쓸 수 있는
+ * 글자와 규칙 하나에 적을 수 있는 수도 서버와 같다. */
+const USER_NAME = /^[A-Za-z0-9._@+\/-]{1,63}$/;
+const USER_REQ_MAX = 4;
+
+function isUserToken(t) {
+	return t.startsWith('user=') || t.startsWith('group=');
+}
+
+function parseUsers(tokens) {
+	const u = { users: [], groups: [] };
+
+	for (const t of tokens) {
+		if (t.startsWith('user=')) {
+			u.users.push(t.slice(5));
+		} else {
+			u.groups.push(t.slice(6));
+		}
+	}
+
+	return u;
+}
+
+function wantUsers(v, i) {
+	const u = { users: [], groups: [] };
+
+	if (v === undefined || v === null) {
+		return u;
+	}
+	if (typeof v !== 'object' || Array.isArray(v)) {
+		fail(`rule ${i}: users must be an object { users: [...], groups: [...] }`);
+	}
+	for (const k of Object.keys(v)) {
+		if (k !== 'users' && k !== 'groups') {
+			fail(`rule ${i}: unknown key '${k}' in users (users, groups)`);
+		}
+		if (!Array.isArray(v[k]) || !v[k].every((n) => typeof n === 'string' && USER_NAME.test(n))) {
+			fail(`rule ${i}: users.${k} must be names of letters, digits and . _ @ + - / (at most 63)`);
+		}
+		u[k] = v[k];
+	}
+	if (u.users.length + u.groups.length > USER_REQ_MAX) {
+		fail(`rule ${i}: at most ${USER_REQ_MAX} users and groups per rule`);
+	}
+
+	return u;
+}
+
 function readAcl() {
 	let text;
 
@@ -449,10 +497,17 @@ function readAcl() {
 
 		if (tok.length >= 5) {
 			const rule = { src: tok[0], dst: tok[1], proto: tok[2], dport: tok[3], action: tok[4] };
-			const require = parseReq(tok.slice(5));
+			const conds = tok.slice(5);
+			const require = parseReq(conds.filter((t) => !isUserToken(t)));
+			const users = parseUsers(conds.filter(isUserToken));
 
 			if (require !== null && !reqEmpty(require)) {
 				rule.require = require;
+			}
+			/* 사용자 조건은 반드시 돌려준다. 빠뜨리면 acl_get 으로 읽어 고친 뒤 acl_set 으로
+			 * 쓰는 순간 "alice 만"이던 규칙이 모두에게 열린다. */
+			if (users.users.length + users.groups.length > 0) {
+				rule.users = users;
 			}
 			rules.push(rule);
 		}
@@ -985,7 +1040,7 @@ const COMMANDS = {
 			enabled: rules !== null,
 			rules: rules || [],
 			restart_required: aclPending(running),
-			note: 'first matching rule wins; no match means deny. An allow rule with a require denies the packet when the last reported posture of the session falls short (later rules are not tried). Applies to client -> server packets only. Rule changes apply without a restart; turning the ACL on or off needs server_restart.',
+			note: 'first matching rule wins; no match means deny. An allow rule with a require denies the packet when the last reported posture of the session falls short (later rules are not tried); likewise an allow rule with users only admits sessions where one of those users (or a member of one of those groups) is logged in with an unexpired token. Applies to client -> server packets only. Rule changes apply without a restart; turning the ACL on or off needs server_restart.',
 		};
 	},
 
@@ -1014,8 +1069,13 @@ const COMMANDS = {
 			if (r.action === 'deny' && !reqEmpty(require)) {
 				fail(`rule ${i}: require is only for allow rules`);
 			}
+			const users = wantUsers(r.users, i);
+			if (r.action === 'deny' && users.users.length + users.groups.length > 0) {
+				fail(`rule ${i}: users is only for allow rules`);
+			}
 
-			lines.push([r.src, r.dst, r.proto, dport, r.action, ...reqTokens(require)].join(' '));
+			lines.push([r.src, r.dst, r.proto, dport, r.action, ...reqTokens(require),
+				...users.users.map((n) => `user=${n}`), ...users.groups.map((n) => `group=${n}`)].join(' '));
 		});
 
 		writeAtomic(ACL_FILE, lines.join('\n') + '\n');

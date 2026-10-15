@@ -52,3 +52,86 @@ int posture_req_empty(const posture_req_t *req)
 {
 	return !req->need_firewall && !req->need_antivirus && req->min_build == 0;
 }
+
+int user_name_valid(const char *name)
+{
+	size_t i, n = strlen(name);
+	char c;
+
+	if (n == 0 || n >= USER_NAME_MAX) {
+		return 0;
+	}
+	for (i = 0; i < n; i++) {
+		c = name[i];
+		if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+				c == '.' || c == '_' || c == '@' || c == '+' || c == '-' || c == '/')) {
+			return 0;
+		}
+	}
+
+	return 1;
+}
+
+int user_req_parse(const char *tok, user_req_t *req)
+{
+	const char *name;
+	int is_group;
+
+	if (strncmp(tok, "user=", 5) == 0) {
+		name = tok + 5;
+		is_group = 0;
+	}
+	else if (strncmp(tok, "group=", 6) == 0) {
+		name = tok + 6;
+		is_group = 1;
+	}
+	else {
+		return 1;
+	}
+
+	if (!user_name_valid(name) || req->n >= USER_REQ_MAX) {
+		return -1;
+	}
+
+	req->is_group[req->n] = (uint8_t)is_group;
+	strcpy(req->who[req->n], name);
+	req->n++;
+
+	return 0;
+}
+
+/* 만료는 패킷마다 여기서 본다. keepalive(10초)에서만 보면 토큰이 끝난 뒤에도 최대 10초
+ * 동안 그 사용자의 권한으로 패킷이 지나간다. 벽시계를 읽는 것(vDSO)은 조건이 걸린 규칙에
+ * 닿았을 때만 하므로 조건 없는 정책의 데이터 경로에는 비용이 없다. */
+int user_req_ok(const user_req_t *req, const user_identity_t *who, int64_t now)
+{
+	int i, g;
+
+	if (req->n == 0) {
+		return 1;
+	}
+	if (who == NULL || who->expires <= now) {
+		return 0;
+	}
+
+	for (i = 0; i < req->n; i++) {
+		if (!req->is_group[i]) {
+			if (strcmp(req->who[i], who->name) == 0) {
+				return 1;
+			}
+			continue;
+		}
+		for (g = 0; g < who->n_groups; g++) {
+			if (strcmp(req->who[i], who->groups[g]) == 0) {
+				return 1;
+			}
+		}
+	}
+
+	return 0;
+}
+
+int user_req_empty(const user_req_t *req)
+{
+	return req->n == 0;
+}

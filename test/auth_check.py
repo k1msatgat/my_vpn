@@ -18,6 +18,7 @@ ctypes 로 직접 부른다. 패키지를 따로 설치하지 않아도 되고, 
 어디서나 돈다.
 """
 
+import base64
 import ctypes
 import ctypes.util
 import hashlib
@@ -35,13 +36,13 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SERVER = os.path.join(ROOT, "server", "bin", "vpn_server")
 PORT = int(next((a for a in sys.argv[1:] if a.isdigit()), 19000))
-VERSION = 4
+VERSION = 5
 
-REQ_HANDSHAKE, RES_HANDSHAKE, DATA, KEEPALIVE, CHALLENGE, AUTH, DENY, ENROLL = range(1, 9)
+REQ_HANDSHAKE, RES_HANDSHAKE, DATA, KEEPALIVE, CHALLENGE, AUTH, DENY, ENROLL, LOGIN = range(1, 10)
 DENY_UNKNOWN_DEVICE, DENY_BAD_AUTH, DENY_TUN_IP, DENY_POSTURE = range(1, 5)
 STATE_UNKNOWN, STATE_OFF, STATE_ON = range(3)
 TYPE_NAME = {RES_HANDSHAKE: "RES_HANDSHAKE", DATA: "DATA", KEEPALIVE: "KEEPALIVE",
-             CHALLENGE: "CHALLENGE", DENY: "DENY", ENROLL: "ENROLL"}
+             CHALLENGE: "CHALLENGE", DENY: "DENY", ENROLL: "ENROLL", LOGIN: "LOGIN"}
 
 HDR_LEN, PUB_LEN, TAG_LEN, MAC_LEN = 8, 64, 16, 32
 
@@ -274,7 +275,7 @@ class Client:
         except socket.timeout:
             return None
         version, msg_type, _, idx = struct.unpack("!BBHI", self.raw[:HDR_LEN])
-        if idx != 0 and msg_type in (DATA, KEEPALIVE, DENY, ENROLL):
+        if idx != 0 and msg_type in (DATA, KEEPALIVE, DENY, ENROLL, LOGIN):
             return msg_type, idx, unseal(self.raw)
         return msg_type, idx, self.raw[HDR_LEN:]
 
@@ -338,7 +339,7 @@ def describe(r):
     name = TYPE_NAME.get(msg_type, "type %d" % msg_type)
     if body is None:
         return name + "(bad tag)"
-    if msg_type in (DENY, ENROLL):
+    if msg_type in (DENY, ENROLL, LOGIN):
         return "%s(%d)" % (name, body[0])
     if msg_type == DENY:
         return "DENY(%d)" % body[0]
@@ -711,13 +712,13 @@ def loader_tests():
 class Server:
     """vpn_server 한 개. 로그는 임시 파일로 받아 두고, 테스트가 그 안에서 서버의 판정을 읽는다."""
 
-    def __init__(self, *args):
+    def __init__(self, *args, opts=()):
         self.log = tempfile.TemporaryFile()
         self.status_path = tempfile.mktemp(prefix="vpn_status.", suffix=".sock")
         self.audit_path = tempfile.mktemp(prefix="vpn_audit.", suffix=".log")
         self.enroll_path = tempfile.mktemp(prefix="vpn_enroll.", suffix=".conf")
         self.proc = subprocess.Popen(["stdbuf", "-oL", SERVER, "-s", self.status_path, "-a", self.audit_path,
-                                      "-e", self.enroll_path,
+                                      "-e", self.enroll_path] + list(opts) + [
                                       str(PORT)] + list(args),
                                      stdout=self.log, stderr=subprocess.STDOUT)
         time.sleep(0.7)
@@ -1214,6 +1215,181 @@ def acl_loader_tests(dev_path):
         failed += not ok
 
 
+# ---- 사용자 로그인 ----------------------------------------------------------------
+
+sys.path.insert(0, os.path.join(ROOT, "tools", "idp"))
+import mint     # noqa: E402  시험용 IdP: 서명 키, JWKS, 토큰
+
+LOGIN_OK, LOGIN_NO_IDP, LOGIN_MALFORMED, LOGIN_UNTRUSTED, LOGIN_WRONG_TOKEN, LOGIN_EXPIRED, \
+    LOGIN_BAD_USER = range(7)
+
+
+def login(c, idx, token):
+    """LOGIN 을 보내고 (status, expires, 이름) 을 돌려준다. 답이 없으면 None."""
+    c.send(seal(LOGIN, idx, token.encode() if isinstance(token, str) else token))
+    r = c.recv()
+    if r is None or r[0] != LOGIN or r[2] is None or len(r[2]) < 9:
+        return None
+    return r[2][0], struct.unpack("!Q", r[2][1:9])[0], r[2][9:].decode()
+
+
+def login_no_idp_tests():
+    """-u 없이 뜬 서버는 로그인을 받지 않는다고 답한다."""
+    c = Client()
+    idx = session(c)
+    r = login(c, idx, "a.b.c")
+    expect("login: server without -u says so", r and r[0], LOGIN_NO_IDP)
+
+
+def b64(data):
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def login_tests(srv, acl_path, idp_dir):
+    """사용자 토큰으로 로그인하고, user= / group= 규칙이 그 사용자에게만 열리는지."""
+    c = Client()
+    server_ip = socket.inet_aton("10.0.0.1")
+    seq = [500]
+
+    def verdict(dport, idx):
+        seq[0] += 1
+        before = len(srv.text())
+        c.send(data(idx, None, udp_packet(TUN_IP, server_ip, dport, seq[0])))
+        time.sleep(0.3)
+        c.drain()
+        new = srv.text()[before:]
+        return "denied" if "[deny]" in new else "passed" if "[udp->tun]" in new else "no trace"
+
+    with open(acl_path, "w") as f:
+        f.write("10.0.0.0/24 10.0.0.1 udp 53 allow user=alice\n"
+                "10.0.0.0/24 10.0.0.1 udp 54 allow group=ops group=sre\n"
+                "10.0.0.0/24 10.0.0.1 udp 55 allow\n"
+                "any any any any deny\n")
+    srv.reload()
+
+    tok = lambda user, **kw: mint.token(idp_dir, user, **kw)
+    status = lambda r: r[0] if r else "no response"
+
+    idx = session(c)
+    expect("login: user rule, nobody logged in", verdict(53, idx), "denied")
+    ok = "rule is for other users (logged in: nobody)" in srv.text()
+    expect("login: the denial says nobody is logged in", "logged" if ok else "silent", "logged")
+    expect("login: rule without users still passes", verdict(55, idx), "passed")
+
+    t = tok("alice", groups=["dev"], ttl=600)
+    want_exp = int(time.time()) + 600
+    r = login(c, idx, t)
+    expect("login: alice (RS256)", status(r), LOGIN_OK)
+    expect("login: the answer names the user", r and r[2], "alice")
+    expect("login: the answer carries the token's exp", r and abs(r[1] - want_exp) <= 2, True)
+    expect("login: alice reaches the user=alice rule", verdict(53, idx), "passed")
+    expect("login: alice is not in group ops", verdict(54, idx), "denied")
+    expect("login: same token again (lost answer)", status(login(c, idx, t)), LOGIN_OK)
+    logins = [e for e in srv.events() if e["event"] == "login" and e.get("result") == "ok"]
+    expect("login: a resent token is audited once", len(logins), 1)
+
+    sess = [s for s in srv.status()["sessions"] if s["session_idx"] == "%08x" % idx]
+    expect("login: status socket shows the user",
+           sess and sess[0]["user"] and (sess[0]["user"]["name"], sess[0]["user"]["groups"]), ("alice", ["dev"]))
+
+    r = login(c, idx, tok("bob", groups=["ops"], alg="ES256"))
+    expect("login: another user on the same device (ES256)", status(r), LOGIN_OK)
+    expect("login: bob does not get alice's rule", verdict(53, idx), "denied")
+    expect("login: bob reaches group=ops", verdict(54, idx), "passed")
+
+    # 받지 않는 토큰들. 실패해도 이미 로그인한 bob 은 그대로여야 한다.
+    now = int(time.time())
+    good = tok("mallory", groups=["ops"])
+    head, body, sig = good.split(".")
+    jwks = json.load(open(os.path.join(idp_dir, "jwks.json")))
+    rsa_n = base64.urlsafe_b64decode(jwks["keys"][0]["n"] + "==")
+    hs_head = b64(json.dumps({"alg": "HS256", "kid": "rs-1"}).encode())
+    hs_sig = b64(hmac.new(rsa_n, (hs_head + "." + body).encode(), hashlib.sha256).digest())
+    payload = json.loads(base64.urlsafe_b64decode(body + "=="))
+    payload["preferred_username"] = "admin"
+    evil_body = b64(json.dumps(payload, separators=(",", ":")).encode())
+    cases = [
+        ("alg none, empty signature", b64(b'{"alg":"none","kid":"rs-1"}') + "." + body + ".", LOGIN_MALFORMED),
+        ("alg none, with a signature", b64(b'{"alg":"none","kid":"rs-1"}') + "." + body + "." + sig, LOGIN_UNTRUSTED),
+        ("HS256 keyed with the RSA public key", hs_head + "." + body + "." + hs_sig, LOGIN_UNTRUSTED),
+        ("unknown kid", tok("mallory", kid="nope"), LOGIN_UNTRUSTED),
+        ("ES256 claimed for the RSA key's kid", tok("mallory", alg="ES256", kid="rs-1"), LOGIN_UNTRUSTED),
+        ("kid of a key that is not for signing", tok("mallory", kid="enc-1"), LOGIN_UNTRUSTED),
+        ("payload changed after signing", head + "." + evil_body + "." + sig, LOGIN_UNTRUSTED),
+        ("signature from another key", head + "." + body + "." + tok("x", alg="RS256").split(".")[2],
+         LOGIN_UNTRUSTED),
+        ("crit header", b64(b'{"alg":"RS256","kid":"rs-1","crit":["x"]}') + "." + body + "." + sig, LOGIN_UNTRUSTED),
+        ("issued by another issuer", tok("mallory", iss="https://evil.test"), LOGIN_WRONG_TOKEN),
+        ("issued for another service", tok("mallory", aud="mail"), LOGIN_WRONG_TOKEN),
+        ("expired", tok("mallory", exp=now - 120), LOGIN_EXPIRED),
+        ("not valid yet (nbf)", tok("mallory", nbf=now + 600), LOGIN_EXPIRED),
+        ("no exp", tok("mallory", claims={"exp": None}), LOGIN_MALFORMED),
+        ("user name with a quote", tok('mal"lory'), LOGIN_BAD_USER),
+        ("no user claim", tok("mallory", claims={"preferred_username": None}), LOGIN_BAD_USER),
+        ("not a JWT", "hello", LOGIN_MALFORMED),
+        ("four parts", good + ".x", LOGIN_MALFORMED),
+        ("base64 with padding", good + "=", LOGIN_MALFORMED),
+        # 서명은 맞는데 같은 키가 두 번 나온다. 구현마다 앞 / 뒤 중 다른 것을 쓰므로 받지 않는다.
+        ("duplicate claim (signed)", mint.raw_token(idp_dir, json.dumps(payload)[:-1] +
+                                                     ',"preferred_username":"admin"}'), LOGIN_MALFORMED),
+    ]
+    for name, token, want in cases:
+        expect("login rejects: " + name, status(login(c, idx, token)), want)
+    expect("login: bob is still logged in after the rejects", verdict(54, idx), "passed")
+
+    # 토큰은 UDP 한 통에 들어가야 하고 서버는 LOGIN_TOKEN_MAX 를 넘는 것을 읽지 않는다.
+    expect("login rejects: longer than LOGIN_TOKEN_MAX", status(login(c, idx, "a" * 1960)), LOGIN_MALFORMED)
+
+    # aud 는 배열일 수 있다. 그룹 이름에 쓸 수 없는 글자가 있으면 그 그룹만 빠진다.
+    r = login(c, idx, tok("carol", aud=["account", "my_vpn"], groups=["ops", 'bad"group']))
+    expect("login: aud as a list containing my_vpn", status(r), LOGIN_OK)
+    sess = [s for s in srv.status()["sessions"] if s["session_idx"] == "%08x" % idx]
+    expect("login: an unusable group name is dropped", sess and sess[0]["user"]["groups"], ["ops"])
+
+    # 세션 중에 토큰이 끝난다. 그 순간부터 사용자 규칙은 맞지 않고, 세션은 그대로다.
+    r = login(c, idx, tok("dave", groups=["sre"], ttl=3))
+    expect("login: dave with a 3-second token", status(r), LOGIN_OK)
+    expect("login: dave reaches group=sre", verdict(54, idx), "passed")
+    time.sleep(3.5)
+    expect("login: after exp the user rule is closed", verdict(54, idx), "denied")
+    expect("login: ...but the rest of the session works", verdict(55, idx), "passed")
+    check("login: keepalive after exp", (c.send(keepalive(idx)), c.recv())[1], "KEEPALIVE")
+    ev = srv.events()
+    out = [e for e in ev if e["event"] == "logout"]
+    expect("login: the expiry is audited as logout", out and (out[-1]["user"], out[-1]["reason"]), ("dave", "expired"))
+    deny = [e for e in ev if e["event"] == "access" and e.get("why") == "user"]
+    expect("login: a user-rule denial is audited with why=user", len(deny) > 0, True)
+    named = [e for e in ev if e["event"] == "access" and e.get("user") == "bob"]
+    expect("login: access events name the user", len(named) > 0, True)
+    bad = [e for e in ev if e["event"] == "login" and e["result"] == "untrusted"]
+    expect("login: rejected tokens are audited", len(bad) > 0, True)
+
+    # 키를 바꿔 끼우다 깨진 JWKS 를 읽으면 이전 키로 계속 받는다.
+    jwks_path = os.path.join(idp_dir, "jwks.json")
+    saved = open(jwks_path).read()
+    with open(jwks_path, "w") as f:
+        f.write('{"keys": [')
+    srv.reload()
+    expect("login: broken jwks on reload is reported", "idp: reload failed" in srv.text(), True)
+    expect("login: ...and the previous keys still work", status(login(c, idx, tok("erin"))), LOGIN_OK)
+    with open(jwks_path, "w") as f:
+        f.write(saved)
+
+    # ACL 파일의 사용자 조건도 틀리면 받지 않는다.
+    for name, text, want in [
+        ("acl: user condition on a deny rule", "any any any any deny user=alice", "only for allow rules"),
+        ("acl: user name with a quote", 'any any any any allow user=al"ice', "bad user condition"),
+        ("acl: five users on one rule", "any any any any allow " + " ".join("user=u%d" % i for i in range(5)),
+         "bad user condition"),
+    ]:
+        with open(acl_path, "w") as f:
+            f.write(text + "\n")
+        before = len(srv.text())
+        srv.reload()
+        new = srv.text()[before:]
+        expect(name, "refused" if want in new and "acl: reload failed" in new else "accepted", "refused")
+
+
 def main():
     if os.geteuid() != 0:
         sys.exit("run as root: sudo python3 test/auth_check.py")
@@ -1239,6 +1415,7 @@ def main():
             keepalive_tests()
             data_tests()
             tunnel_only_tests(srv)
+            login_no_idp_tests()
             reload_tests(srv.proc, path)
         finally:
             srv.stop()
@@ -1257,6 +1434,18 @@ def main():
         finally:
             srv.stop()
             logs.append(srv.text())
+        # 사용자 로그인을 받는 서버 (-u). 시험용 IdP 의 키로 토큰을 만든다.
+        idp_dir = tempfile.mkdtemp(prefix="idp.")
+        mint.make_keys(idp_dir)
+        write_devices(path, LINE1, LINE2)
+        srv_idp = Server(path, acl_path, opts=["-u", os.path.join(idp_dir, "idp.conf")])
+        try:
+            login_tests(srv_idp, acl_path, idp_dir)
+        finally:
+            srv_idp.stop()
+            logs.append(srv_idp.text())
+            subprocess.run(["rm", "-rf", idp_dir])
+
         global failed
         print("%-4s %-52s %s" % ("FAIL" if srv.socket_left else "ok", "status: socket file removed on exit",
                                  "left behind" if srv.socket_left else "removed"))

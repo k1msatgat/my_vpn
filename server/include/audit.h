@@ -18,9 +18,15 @@
  *   access          세션이 어떤 목적지에 닿았다 / 막혔다 (목적지마다 한 번씩)
  *   reload          기기 목록이나 ACL 을 다시 읽었다
  *   enrolled        등록 코드로 기기가 목록에 올랐다
+ *   login           세션에 사용자가 로그인했다 / 토큰이 거절됐다
+ *   logout          로그인했던 사용자의 토큰이 만료돼 세션에서 떨어졌다
  *
  * 값은 전부 주소, 숫자, 16진수, 우리가 정한 단어라 따옴표를 이스케이프할 일이 없다.
- * 바깥에서 온 문자열은 적지 않는다.
+ * 바깥에서 온 문자열은 적지 않는다. 사용자와 그룹 이름은 IdP 가 서명한 토큰에서 오지만,
+ * 쓸 수 있는 글자를 정해 두고(policy.h) 그 밖의 글자가 있으면 토큰을 받지 않는다.
+ *
+ * 사용자가 로그인한 세션의 사건에는 "user" 가 붙는다 — "이 기기가"가 아니라 "이 사람이
+ * 이 기기로" 어디에 닿았는지가 남는다.
  *
  * 파일을 주지 않으면(-a) 아무것도 하지 않는다. */
 
@@ -50,7 +56,7 @@ void audit_auth_denied(const uint8_t id[DEVICE_ID_LEN], const struct sockaddr_in
 
 /* 패킷 하나의 판정. 같은 세션의 같은 목적지(주소, 프로토콜, 포트)와 같은 판정은 한동안
  * 다시 적지 않는다 — 패킷마다 적으면 stdout 로그와 다를 것이 없다. why 는 막힌 이유
- * ("acl", "posture", "no_acl_file") 이고 통과했으면 NULL. */
+ * ("acl", "posture", "user", "no_acl_file") 이고 통과했으면 NULL. */
 void audit_access(peer_t *peer, const uint8_t *ip, int len, int allowed, const char *why);
 
 void audit_reload(const char *what, int ok, int count);
@@ -58,5 +64,11 @@ void audit_reload(const char *what, int ok, int count);
 /* 등록 코드로 기기가 목록에 올랐다. label 은 관리자가 코드를 만들 때 붙인 이름이다. */
 void audit_enrolled(const uint8_t id[DEVICE_ID_LEN], struct in_addr tun_ip,
 		const struct sockaddr_in *src, const char *label);
+
+/* LOGIN 의 결과. status 는 login_status_t. 성공이면 peer->user 를 적는다. */
+void audit_login(const peer_t *peer, int status);
+
+/* 로그인했던 사용자를 세션에서 뗐다. reason: "expired" */
+void audit_logout(const peer_t *peer, const char *reason);
 
 #endif

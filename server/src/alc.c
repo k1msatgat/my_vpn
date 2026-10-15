@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <arpa/inet.h>
 
 #include "acl.h"
@@ -118,7 +119,7 @@ int acl_load(const char *path)
 	char  s_src[64], s_dst[64], s_proto[16], s_port[32], s_act[16];
 	char *tok;
 	int   lineno = 0;
-	int   nf, used;
+	int   nf, used, ur;
 
 	fp = fopen(path, "r");
 	if (fp == NULL) {
@@ -181,8 +182,19 @@ int acl_load(const char *path)
 			return -1;
 		}
 
-		/* action 뒤에 남은 단어들이 포스처 조건이다. 기기 목록과 같은 문법이다. */
+		/* action 뒤에 남은 단어들이 조건이다. 포스처 조건은 기기 목록과 같은 문법이고,
+		 * user= / group= 은 그 규칙을 쓸 수 있는 사용자다. */
 		for (tok = strtok(line + used, " \t\r\n"); tok != NULL; tok = strtok(NULL, " \t\r\n")) {
+			ur = user_req_parse(tok, &r->users);
+			if (ur == 0) {
+				continue;
+			}
+			if (ur < 0) {
+				fprintf(stderr, "acl: line %d: bad user condition '%s' (letters, digits, . _ @ + - /; at most %d per rule)\n",
+						lineno, tok, USER_REQ_MAX);
+				fclose(fp);
+				return -1;
+			}
 			if (posture_req_parse(tok, &r->require) < 0) {
 				fprintf(stderr, "acl: line %d: unknown requirement '%s'\n", lineno, tok);
 				fclose(fp);
@@ -192,7 +204,7 @@ int acl_load(const char *path)
 
 		/* 조건은 "허용받으려면 이래야 한다"는 뜻이다. deny 에 붙으면 "방화벽이 켜져
 		 * 있을 때만 막는다"가 되는데, 그렇게 읽히길 바라고 쓴 사람은 없을 것이다. */
-		if (r->action == ACL_DENY && !posture_req_empty(&r->require)) {
+		if (r->action == ACL_DENY && (!posture_req_empty(&r->require) || !user_req_empty(&r->users))) {
 			fprintf(stderr, "acl: line %d: requirements are only for allow rules\n", lineno);
 			fclose(fp);
 			return -1;
@@ -209,7 +221,8 @@ int acl_load(const char *path)
 	return nrules;
 }
 
-int acl_check(const unsigned char *pkt, int len, const posture_report_t *posture)
+int acl_check(const unsigned char *pkt, int len, const posture_report_t *posture,
+		const user_identity_t *who)
 {
 	struct in_addr src, dst;
 	unsigned char  proto;
@@ -263,6 +276,10 @@ int acl_check(const unsigned char *pkt, int len, const posture_report_t *posture
 		if (r->action == ACL_ALLOW && !posture_req_ok(&r->require, posture)) {
 			return ACL_DENY_POSTURE;
 		}
+		if (r->action == ACL_ALLOW && !user_req_empty(&r->users) &&
+				!user_req_ok(&r->users, who, (int64_t)time(NULL))) {
+			return ACL_DENY_USER;
+		}
 
 		return r->action;
 	}
@@ -289,7 +306,7 @@ int acl_count(void)
 void acl_dump(void)
 {
 	char a[INET_ADDRSTRLEN], b[INET_ADDRSTRLEN];
-	int  i;
+	int  i, k;
 
 	printf("--- acl (%d rules) ---\n", nrules);
 	for (i = 0; i < nrules; i++) {
@@ -308,6 +325,10 @@ void acl_dump(void)
 					r->require.need_firewall ? "on" : "-",
 					r->require.need_antivirus ? "on" : "-",
 					r->require.min_build);
+		}
+		for (k = 0; k < r->users.n; k++) {
+			printf("%s%s=%s", k == 0 ? "  users: " : " ",
+					r->users.is_group[k] ? "group" : "user", r->users.who[k]);
 		}
 		printf("\n");
 	}

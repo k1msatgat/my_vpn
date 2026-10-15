@@ -7,6 +7,7 @@
 
 #include "proto.h"
 #include "secure.h"
+#include "policy.h"
 
 #define MAX_PEERS 8
 #define IDX_SLOT_BIT 8
@@ -62,6 +63,11 @@ typedef struct peer {
     int32_t enroll;
     int32_t enrolled;			/* 이 세션으로 등록이 끝났다 */
     uint8_t enrolled_id[DEVICE_ID_LEN];	/* 그때 올린 기기. 같은 요청이 다시 오면 같은 답을 한다 */
+
+    /* 이 세션에 로그인한 사용자 (LOGIN). logged_in 이 0 이면 아무도 로그인하지 않았다.
+     * user.expires 가 지나면 ACL 은 이 사용자를 없는 것으로 본다 (policy.c). */
+    int32_t logged_in;
+    user_identity_t user;
 
     audit_flow_t flows[AUDIT_FLOWS];
     int32_t flow_next;

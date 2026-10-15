@@ -1,7 +1,7 @@
 #ifndef SESSION_H
 #define SESSION_H
 
-/* 클라이언트 쪽 프로토콜 (버전 4): 핸드셰이크, 등록, 열린 세션의 패킷.
+/* 클라이언트 쪽 프로토콜 (버전 5): 핸드셰이크, 등록, 열린 세션의 패킷.
  *
  * Linux 클라이언트(client.c)와 부하 생성기(tools/loadgen)가 함께 쓴다. 터널(TUN)과 경로는
  * 다루지 않는다 — UDP 소켓 하나와 세션 키만 다룬다. 동작은 Windows 클라이언트의
@@ -60,5 +60,8 @@ int session_send(vpn_session_t *s, uint8_t type, uint8_t *pkt, size_t cap, size_
 void session_close(vpn_session_t *s);
 
 const char *session_deny_name(uint8_t reason);
+
+/* LOGIN 답의 status (login_status_t) 를 사람이 읽을 말로. */
+const char *session_login_name(uint8_t status);
 
 #endif

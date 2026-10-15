@@ -16,6 +16,10 @@
 #   3. ACL -> 허용하지 않은 목적지 / 포트는 서버가 버린다
 #   4. 포스처 -> 기기 정책에 firewall=on 을 걸고 SIGHUP. 다음 keepalive 에서 거절된다.
 #      클라이언트 ns 에 nft 로 인바운드 기본 거부를 걸면 스스로 다시 붙는다.
+#   5. 사용자 로그인 -> group=ops 규칙은 로그인 전에는 닫혀 있다.
+#      로그인 도구(my_vpn_login)가 시험용 OIDC 서버에서 토큰을 받아 파일에 쓰면 클라이언트가
+#      보내고, 그때부터 열린다. 도구가 토큰을 갈아 끼우면 이어지고, 다른 IdP 의 토큰은 거절되며,
+#      아무도 갈아 끼우지 않으면 만료되는 순간 다시 닫힌다. 터널은 그동안 그대로다.
 #
 # 사용자 네임스페이스 안에서는 nft 규칙셋이 그 네임스페이스의 것이라 방화벽 포스처를
 # 마음대로 켜고 끌 수 있다. 실제 장비에서는 그 장비의 nftables / firewalld 를 읽는다.
@@ -52,17 +56,23 @@ DEVICES=$WORK/devices.conf
 ENROLL=$WORK/enroll.conf
 ACL=$WORK/acl.conf
 IDENT=$WORK/device
+TOKEN=$WORK/token
+IDP=$WORK/idp
 SLOG=$WORK/server.log
 CLOG=$WORK/client.log
 SRV_PID=
 CLI_PID=
 NS_PID=
+IDP_PID=
+LOGIN_PID=
 failed=0
 
 cleanup() {
 	[ -n "$CLI_PID" ] && kill "$CLI_PID" 2>/dev/null
 	[ -n "$SRV_PID" ] && kill "$SRV_PID" 2>/dev/null
 	[ -n "$NS_PID" ] && kill "$NS_PID" 2>/dev/null
+	[ -n "$LOGIN_PID" ] && kill "$LOGIN_PID" 2>/dev/null
+	[ -n "$IDP_PID" ] && kill "$IDP_PID" 2>/dev/null
 	wait 2>/dev/null
 	if [ "$failed" -ne 0 ]; then
 		echo
@@ -130,12 +140,15 @@ printf '%s %s %s %d  # e2e\n' "$EID" "$EKEY" "$CLI_TUN" $(( $(date +%s) + 600 ))
 cat > "$ACL" <<EOF
 10.0.0.0/24  $SRV_TUN       icmp  any  allow
 10.0.0.0/24  $ROUTED_NET    icmp  any  allow
+10.0.0.0/24  $SRV_TUN       udp   5353 allow  group=ops
 any          any            any   any  deny
 EOF
 chmod 600 "$DEVICES" "$ENROLL" "$ACL"
 
 before=$(ip -o link show type tun | awk -F': ' '{print $2}')
-stdbuf -oL "$SERVER" -e "$ENROLL" "$PORT" "$DEVICES" "$ACL" > "$SLOG" 2>&1 &
+# 사용자 로그인: 시험용 IdP (tools/idp/mint.py) 의 키를 서버가 믿게 한다.
+python3 "$ROOT_DIR/tools/idp/mint.py" keys "$IDP" > /dev/null || { echo "mint.py keys failed"; exit 1; }
+stdbuf -oL "$SERVER" -e "$ENROLL" -u "$IDP/idp.conf" "$PORT" "$DEVICES" "$ACL" > "$SLOG" 2>&1 &
 SRV_PID=$!
 wait_for 5 sh -c "ip -o link show type tun | grep -q ." || { echo "server did not start"; cat "$SLOG"; exit 1; }
 SRV_IF=$(ip -o link show type tun | awk -F': ' '{print $2}' | grep -vxF "$before" | head -n 1)
@@ -151,7 +164,7 @@ check "enroll: the code cannot be used twice" sh -c "! nsenter -t $NS_PID -n --p
 	'$CLIENT' -f -k '$WORK/other' enroll '$SRV_VETH' '$PORT' '$CODE'"
 
 echo "== 2. connect"
-in_cli "$CLIENT" -k "$IDENT" -i "$CLI_IF" run "$SRV_VETH" "$PORT" > "$CLOG" 2>&1 &
+in_cli "$CLIENT" -k "$IDENT" -i "$CLI_IF" -t "$TOKEN" run "$SRV_VETH" "$PORT" > "$CLOG" 2>&1 &
 CLI_PID=$!
 check "connect: session established" wait_for 10 log_has "$CLOG" "] connected"
 check "connect: tun has the address the server assigned" \
@@ -199,6 +212,61 @@ check "posture: firewall on -> client re-handshakes by itself" \
 	wait_for 10 sh -c "[ \$(grep -c '] connected' '$CLOG') -ge 2 ]"
 echo "     (reconnected after $(( $(date +%s) - t0 ))s)"
 check "posture: traffic flows again" ping_ok "$SRV_TUN"
+
+echo "== 5. user login"
+udp_probe() { in_cli bash -c "echo probe > /dev/udp/$SRV_TUN/5353" 2>/dev/null; }
+probe_passes() {
+	local before; before=$(grep -c '^\[udp->tun\]' "$SLOG")
+	udp_probe
+	wait_for 3 sh -c "[ \$(grep -c '^\[udp->tun\]' '$SLOG') -gt $before ]"
+}
+probe_denied() {
+	local before; before=$(grep -c '^\[deny\]' "$SLOG")
+	udp_probe
+	wait_for 3 sh -c "[ \$(grep -c '^\[deny\]' '$SLOG') -gt $before ]"
+}
+
+check "login: group=ops rule is closed before anyone logs in" probe_denied
+check "login: the server says nobody is logged in" log_has "$SLOG" "(logged in: nobody)"
+
+# 로그인 도구(client/my_vpn_login)가 기기 인가로 토큰을 받아 파일에 쓰고, 끝나기 전에 갈아
+# 끼운다. IdP 자리에는 시험용 OIDC 서버(tools/idp/mock_oidc.py)를 둔다. 토큰 수명을 12초로
+# 짧게 줘서 갱신과 만료를 이 시험 안에서 본다.
+TOKEN_TTL=12
+python3 "$ROOT_DIR/tools/idp/mock_oidc.py" "$IDP" 18080 alice --groups ops,dev --ttl $TOKEN_TTL \
+	> "$WORK/idp.log" 2>&1 &
+IDP_PID=$!
+wait_for 3 sh -c "python3 -c 'import socket; socket.create_connection((\"127.0.0.1\", 18080))'"
+python3 "$ROOT_DIR/client/my_vpn_login" --issuer http://127.0.0.1:18080 --client-id my_vpn \
+	--token-file "$TOKEN" --keep > "$WORK/login.log" 2>&1 &
+LOGIN_PID=$!
+
+check "login: the login tool finishes the device grant" wait_for 10 log_has "$WORK/login.log" "signed in."
+check "login: the token file is mode 600" test "$(stat -c %a "$TOKEN" 2>/dev/null)" = 600
+check "login: the client sends the token and the server accepts it" \
+	wait_for 5 log_has "$CLOG" "[login] logged in as alice"
+check "login: the server attached alice to the session" log_has "$SLOG" "user alice (2 groups)"
+check "login: group=ops rule is open for alice" probe_passes
+
+check "login: the tool refreshes the token before it expires" \
+	wait_for 15 log_has "$WORK/login.log" "token refreshed"
+check "login: the client sends the new token" \
+	wait_for 5 sh -c "[ \$(grep -c 'user alice (2 groups)' '$SLOG') -ge 2 ]"
+check "login: still open after the first token's exp" probe_passes
+
+# 도구를 멈추고 다른 IdP 의 토큰을 파일에 넣는다. 거절되고, 받아 둔 토큰은 그대로 쓴다.
+kill "$LOGIN_PID" 2>/dev/null; wait "$LOGIN_PID" 2>/dev/null; LOGIN_PID=
+python3 "$ROOT_DIR/tools/idp/mint.py" token "$IDP" alice --iss https://evil.test > "$TOKEN.tmp"
+chmod 600 "$TOKEN.tmp" && mv "$TOKEN.tmp" "$TOKEN"
+check "login: a token from another issuer is rejected" \
+	wait_for 5 log_has "$CLOG" "[login] rejected: token is for another issuer or audience"
+check "login: ...and alice stays logged in" probe_passes
+
+# 아무도 갈아 끼우지 않으면 토큰이 끝나고, 그 순간부터 사용자 규칙은 닫힌다. 세션은 그대로다.
+check "login: the client notices the token expired" \
+	wait_for $((TOKEN_TTL + 3)) log_has "$CLOG" "[login] token expired"
+check "login: group=ops rule is closed again" probe_denied
+check "login: the tunnel itself still works" ping_ok "$SRV_TUN"
 
 echo
 if [ "$failed" -eq 0 ]; then

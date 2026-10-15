@@ -20,6 +20,7 @@
 #include "status.h"
 #include "audit.h"
 #include "enroll.h"
+#include "idp.h"
 
 #define MAX_EVENTS 8
 
@@ -493,6 +494,16 @@ static void handle_keepalive(int32_t sock, peer_t *peer, const uint8_t *body, in
 	 * 요구하는 ACL 규칙이 있으면 다음 패킷부터 이 값으로 판정한다. */
 	peer->posture = posture;
 
+	/* 토큰이 끝난 사용자를 세션에서 뗀다. ACL 은 패킷마다 만료를 따로 보므로 권한은 이미
+	 * 그 순간에 끝났다. 여기서는 기록하고 상태에서 지운다. 세션은 그대로다 — 기기는 여전히
+	 * 등록된 기기이고, 사용자가 새 토큰을 받으면 클라이언트가 다시 보낸다. */
+	if (peer->logged_in && peer->user.expires <= (int64_t)time(NULL)) {
+		printf("[login] device %s: user %s logged out (token expired)\n", ids, peer->user.name);
+		audit_logout(peer, "expired");
+		peer->logged_in = 0;
+		memset(&peer->user, 0, sizeof(peer->user));
+	}
+
 	peer_touch(peer, src, srclen);
 	send_keepalive(sock, peer, dev);
 }
@@ -571,6 +582,99 @@ static void handle_enroll(int32_t sock, peer_t *peer, const uint8_t *body, int32
 	}
 }
 
+/* LOGIN (C -> S): 사용자의 토큰. 기기의 세션에서만 온다.
+ *
+ * 토큰이 맞으면 그 사용자를 세션에 붙인다. 이미 다른 사용자가 붙어 있었으면 바꾼다 —
+ * 같은 기기에서 다른 사람이 로그인한 것이다. 틀린 토큰은 있던 사용자를 떼지 않는다.
+ * 새 토큰을 받다가 실패했다고 아직 유효한 로그인까지 잃을 이유는 없다.
+ *
+ * 답에는 결과와 토큰의 만료 시각과 서버가 읽은 사용자 이름을 싣는다. 클라이언트는
+ * 그것을 보고 언제 새 토큰이 필요한지, IdP 의 어느 클레임이 이름으로 쓰였는지 안다. */
+static void handle_login(int32_t sock, peer_t *peer, const uint8_t *body, int32_t n,
+		const struct sockaddr_in *src, socklen_t srclen)
+{
+	uint8_t res[PKT_OVERHEAD + LOGIN_RES_HEAD_LEN + USER_NAME_MAX];
+	char ids[DEVICE_ID_STRLEN];
+	user_identity_t who;
+	uint64_t expires = 0;
+	size_t name_len = 0;
+	int status, same, i;
+
+	device_id_str(peer->device_id, ids);
+	status = idp_verify((const char *)body, (size_t)n, (int64_t)time(NULL), &who);
+
+	if (status == LOGIN_OK) {
+		/* 답이 사라져 같은 토큰이 다시 온 것이면 다시 기록하지 않는다. */
+		same = peer->logged_in && strcmp(peer->user.name, who.name) == 0 &&
+			peer->user.expires == who.expires;
+		peer->user = who;
+		peer->logged_in = 1;
+		if (!same) {
+			stats.login_ok++;
+			printf("[login] device %s: user %s (%u groups) until %lld\n",
+					ids, who.name, who.n_groups, (long long)who.expires);
+			audit_login(peer, status);
+		}
+		expires = (uint64_t)who.expires;
+		name_len = strlen(who.name);
+	}
+	else {
+		stats.login_failed++;
+		printf("[login] device %s: token rejected (%s)\n", ids, idp_status_name(status));
+		audit_login(peer, status);
+	}
+
+	res[PKT_HDR_LEN] = (uint8_t)status;
+	for (i = 0; i < 8; i++) {
+		res[PKT_HDR_LEN + 1 + i] = (uint8_t)(expires >> (56 - 8 * i));
+	}
+	memcpy(res + PKT_HDR_LEN + LOGIN_RES_HEAD_LEN, who.name, name_len);
+
+	n = secure_seal(&peer->secure, MSG_TYPE_LOGIN, peer->session_idx, res, sizeof(res),
+			LOGIN_RES_HEAD_LEN + name_len);
+	if (n < 0) {
+		return;
+	}
+
+	peer_touch(peer, src, srclen);
+	if (sendto(sock, res, n, 0, (const struct sockaddr *)src, srclen) < 0) {
+		perror("sendto login");
+	}
+}
+
+/* vpn_server verify-token <idp-file> < token
+ * 받으면 "ok user=... groups=... expires_in=...s" 와 0, 아니면 "rejected: <사유>" 와 1. */
+static int verify_token(const char *idp_file)
+{
+	static char token[LOGIN_TOKEN_MAX + 2];
+	user_identity_t who;
+	size_t n;
+	int status, g;
+
+	if (idp_load(idp_file) < 0) {
+		return 2;
+	}
+
+	n = fread(token, 1, sizeof(token) - 1, stdin);
+	while (n > 0 && (token[n - 1] == '\n' || token[n - 1] == '\r' || token[n - 1] == ' ')) {
+		n--;
+	}
+
+	status = idp_verify(token, n, (int64_t)time(NULL), &who);
+	if (status != LOGIN_OK) {
+		printf("rejected: %s\n", idp_status_name(status));
+		return 1;
+	}
+
+	printf("ok user=%s groups=", who.name);
+	for (g = 0; g < who.n_groups; g++) {
+		printf("%s%s", g == 0 ? "" : ",", who.groups[g]);
+	}
+	printf(" expires_in=%llds\n", (long long)(who.expires - (int64_t)time(NULL)));
+
+	return 0;
+}
+
 int main(int argc, char *argv[])
 {
 	char ifname[IFNAMSIZ];
@@ -582,6 +686,7 @@ int main(int argc, char *argv[])
 	int status_fd = -1;
 	const char *status_path = NULL;
 	const char *enroll_path = NULL;
+	const char *idp_path = NULL;
 	int nd;
 	struct epoll_event ev, events[MAX_EVENTS];
 	struct sockaddr_in local_addr;
@@ -605,12 +710,21 @@ int main(int argc, char *argv[])
 		return crypt_selftest();
 	}
 
-	while ((opt = getopt(argc, argv, "s:n:m:a:e:")) != -1) {
+	/* 서버를 띄우지 않고 토큰 하나를 IdP 설정에 대 본다. IdP 를 새로 붙일 때 "이 IdP 가
+	 * 주는 토큰을 서버가 받는가"(aud 매퍼, 그룹 클레임, 서명 알고리즘)를 먼저 확인한다. */
+	if (argc == 3 && strcmp(argv[1], "verify-token") == 0) {
+		return verify_token(argv[2]);
+	}
+
+	while ((opt = getopt(argc, argv, "s:n:m:a:e:u:")) != -1) {
 		if (opt == 's') {
 			status_path = optarg;
 		}
 		else if (opt == 'e') {
 			enroll_path = optarg;
+		}
+		else if (opt == 'u') {
+			idp_path = optarg;
 		}
 		else if (opt == 'a') {
 			if (audit_open(optarg) < 0) {
@@ -646,8 +760,9 @@ int main(int argc, char *argv[])
 	}
 
 	if (argc != 3 && argc != 4) {
-		fprintf(stderr, "usage: %s [-s status-socket] [-a audit-log] [-e enroll-file] [-n tunnel-prefix-len] [-m tunnel-mtu] <port> <device-file> [acl-file]\n", argv[0]);
+		fprintf(stderr, "usage: %s [-s status-socket] [-a audit-log] [-e enroll-file] [-u idp-file] [-n tunnel-prefix-len] [-m tunnel-mtu] <port> <device-file> [acl-file]\n", argv[0]);
 		fprintf(stderr, "       -e: pending enrollments; with it the server adds devices to <device-file> itself\n");
+		fprintf(stderr, "       -u: accept user logins (JWT) from the identity provider this file describes\n");
 		fprintf(stderr, "       -n, -m: what the tun device is configured with (default /24, mtu %d);\n", TUN_MTU);
 		fprintf(stderr, "               they are pushed to every client\n");
 		fprintf(stderr, "       %s selftest\n", argv[0]);
@@ -697,6 +812,18 @@ int main(int argc, char *argv[])
 		acl_enabled = 1;
 	} else {
 		printf("acl: no rule file, only the tunnel subnet is reachable\n");
+	}
+
+	/* 사용자 로그인도 파일을 줬을 때만 받는다. 주지 않으면 user= / group= 이 걸린 규칙은
+	 * 누구에게도 맞지 않는다 (기본 거부 쪽으로 틀린다). */
+	if (idp_path != NULL) {
+		int nk = idp_load(idp_path);
+		if (nk < 0) {
+			fprintf(stderr, "idp_load failed: %s\n", idp_path);
+			return 1;
+		}
+		printf("idp: %d signing keys loaded from %s\n", nk, idp_path);
+		idp_dump();
 	}
 
 	signal(SIGINT, on_signal);
@@ -797,6 +924,20 @@ int main(int argc, char *argv[])
 					printf("acl: reloaded, %d rules\n", nr);
 					audit_reload("acl", 1, nr);
 					acl_dump();
+				}
+			}
+
+			/* IdP 가 키를 바꾸면 새 JWKS 를 받아 두고 SIGHUP 을 보낸다. 이미 로그인한
+			 * 사용자는 그 토큰이 끝날 때까지 그대로다. */
+			if (idp_path != NULL) {
+				int nk = idp_load(idp_path);
+				if (nk < 0) {
+					printf("idp: reload failed, keeping the previous keys\n");
+					audit_reload("idp", 0, 0);
+				}
+				else {
+					printf("idp: reloaded, %d signing keys\n", nk);
+					audit_reload("idp", 1, nk);
 				}
 			}
 
@@ -904,6 +1045,9 @@ int main(int argc, char *argv[])
 					case MSG_TYPE_KEEPALIVE:
 						handle_keepalive(sock, peer, ip, n, counter, &src, srclen);
 						continue;
+					case MSG_TYPE_LOGIN:
+						handle_login(sock, peer, ip, n, &src, srclen);
+						continue;
 					default:
 						printf("[drop] unknown type %u\n", msg_header.type);
 						continue;
@@ -928,7 +1072,7 @@ int main(int argc, char *argv[])
 				 * 터널 밖으로 내보낼 곳은 규칙으로 적어서 연다. */
 				memcpy(&inner_dst, ip + IP_DST_OFF, IP_ADDR_LEN);
 				if (acl_enabled) {
-					verdict = acl_check(ip, n, &peer->posture);
+					verdict = acl_check(ip, n, &peer->posture, peer->logged_in ? &peer->user : NULL);
 				}
 				else {
 					verdict = tun_subnet_of(inner_dst).s_addr == tun_subnet_of(peer->inner).s_addr
@@ -950,9 +1094,15 @@ int main(int argc, char *argv[])
 								peer->posture.os_build, peer->posture.firewall,
 								peer->posture.antivirus);
 					}
+					if (verdict == ACL_DENY_USER) {
+						stats.acl_denied_user++;
+						printf(" rule is for other users (logged in: %s)",
+								peer->logged_in ? peer->user.name : "nobody");
+					}
 					printf("\n");
 					audit_access(peer, ip, n, 0, !acl_enabled ? "no_acl_file" :
-							verdict == ACL_DENY_POSTURE ? "posture" : "acl");
+							verdict == ACL_DENY_POSTURE ? "posture" :
+							verdict == ACL_DENY_USER ? "user" : "acl");
 					continue;
 				}
 
