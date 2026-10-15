@@ -265,7 +265,11 @@ function readDevices() {
 		d.tunnel_ip = tok[2];
 		d.label = /^[A-Za-z0-9 _.-]{1,32}$/.test(label) ? label : '';
 
-		d.requirements = parseReq(tok.slice(3));
+		/* 커넥터의 대역은 반드시 들고 다닌다. 빠뜨리면 기기 목록을 다시 쓰는 순간 커넥터가
+		 * 평범한 기기가 되고, 그 대역으로 가는 길이 사라진다. */
+		const conds = splitConnector(tok.slice(3));
+		d.connector = conds.connector;
+		d.requirements = parseReq(conds.rest);
 		if (d.requirements === null) {
 			fail(`${DEVICE_FILE}: line ${i + 1}: unknown requirement; fix it by hand first`);
 		}
@@ -285,7 +289,8 @@ function writeDevices(devices) {
 	];
 
 	for (const d of devices) {
-		let line = [d.id, d.key, d.tunnel_ip, ...reqTokens(d.requirements)].join(' ');
+		let line = [d.id, d.key, d.tunnel_ip, ...reqTokens(d.requirements),
+			...(d.connector || []).map((c) => `connector=${c}`)].join(' ');
 
 		if (d.label) {
 			line += `  # ${d.label}`;
@@ -301,7 +306,12 @@ function writeDevices(devices) {
 
 /* 키는 어떤 응답에도 넣지 않는다. */
 function publicDevice(d) {
-	return { id: d.id, label: d.label, tunnel_ip: d.tunnel_ip, requirements: d.requirements };
+	const p = { id: d.id, label: d.label, tunnel_ip: d.tunnel_ip, requirements: d.requirements };
+
+	if (d.connector && d.connector.length > 0) {
+		p.connector = d.connector;
+	}
+	return p;
 }
 
 /* ---- 등록 코드 -------------------------------------------------------------
@@ -365,7 +375,8 @@ function readEnroll() {
 			key: tok[1],
 			tunnel_ip: tok[2],
 			expires: Number(tok[3]),
-			requirements: parseReq(tok.slice(4)) || { firewall: false, antivirus: false, min_build: 0 },
+			requirements: parseReq(splitConnector(tok.slice(4)).rest) || { firewall: false, antivirus: false, min_build: 0 },
+			connector: splitConnector(tok.slice(4)).connector,
 			label: /^[A-Za-z0-9 _.-]{1,32}$/.test(label) ? label : '',
 		});
 	}
@@ -380,7 +391,8 @@ function writeEnroll(list) {
 	];
 
 	for (const e of list) {
-		let line = [e.id, e.key, e.tunnel_ip, e.expires, ...reqTokens(e.requirements)].join(' ');
+		let line = [e.id, e.key, e.tunnel_ip, e.expires, ...reqTokens(e.requirements),
+			...(e.connector || []).map((c) => `connector=${c}`)].join(' ');
 
 		if (e.label) {
 			line += `  # ${e.label}`;
@@ -399,6 +411,7 @@ function publicEnroll(e) {
 		label: e.label,
 		tunnel_ip: e.tunnel_ip,
 		requirements: e.requirements,
+		...(e.connector && e.connector.length > 0 ? { connector: e.connector } : {}),
 		expires_in_sec: e.expires - Math.floor(Date.now() / 1000),
 	};
 }
@@ -428,6 +441,42 @@ function freeTunnelIp(devices, pending) {
 	}
 
 	fail('no free address left in the tunnel subnet');
+}
+
+/* 커넥터가 맡은 대역: 기기 줄의 connector=10.101.0.0/16 (server/include/device.h). 조건이 아니라
+ * 기기의 역할이라 requirements 와 따로 둔다. 서버와 같은 규칙으로 본다 — /0 은 안 되고, 주소의
+ * 호스트 부분은 0 이어야 한다. */
+const CONNECTOR_MAX_NETS = 4;
+
+function isConnectorNet(s) {
+	if (typeof s !== 'string' || !/^\d+\.\d+\.\d+\.\d+\/\d+$/.test(s)) {
+		return false;
+	}
+	const [ip, bits] = s.split('/');
+	const n = Number(bits);
+	if (!isIPv4(ip) || n < 1 || n > 32) {
+		return false;
+	}
+	const host = n === 32 ? 0 : (2 ** (32 - n)) - 1;
+	return (ipToInt(ip) % (host + 1)) === 0;
+}
+
+/* 줄의 조건 단어들을 connector= 와 나머지로 나눈다. */
+function splitConnector(tokens) {
+	return {
+		connector: tokens.filter((t) => t.startsWith('connector=')).map((t) => t.slice(10)),
+		rest: tokens.filter((t) => !t.startsWith('connector=')),
+	};
+}
+
+function wantConnector(v) {
+	if (v === undefined || v === null) {
+		return [];
+	}
+	if (!Array.isArray(v) || v.length > CONNECTOR_MAX_NETS || !v.every(isConnectorNet)) {
+		fail(`connector must be a list of at most ${CONNECTOR_MAX_NETS} networks like "10.101.0.0/16" (no /0, host bits zero)`);
+	}
+	return v;
 }
 
 /* ACL 규칙의 사용자 조건: user=alice / group=dev (server/include/policy.h). 이름에 쓸 수 있는
@@ -956,6 +1005,7 @@ const COMMANDS = {
 		const pending = readEnroll();
 		const ttl = a.ttl_minutes === undefined ? 15 : wantInt(a.ttl_minutes, 'ttl_minutes', 1, 1440);
 		const requirements = wantRequirements(a.requirements);
+		const connector = wantConnector(a.connector);
 		const label = wantLabel(a.label);
 		const code = newEnrollCode();
 		let tunnelIp = a.tunnel_ip;
@@ -986,6 +1036,7 @@ const COMMANDS = {
 			tunnel_ip: tunnelIp,
 			expires: Math.floor(Date.now() / 1000) + ttl * 60,
 			requirements,
+			connector,
 			label,
 		};
 

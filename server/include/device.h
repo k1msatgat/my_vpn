@@ -23,6 +23,7 @@
 #include "policy.h"
 
 #define MAX_DEVICES 16
+#define CONNECTOR_MAX_NETS 4
 
 /* 서버가 준 nonce 에 클라이언트가 답해야 하는 시간. 같은 PC 에서 서명 한 번이면
  * 되는 일이라 길 이유가 없고, 짧을수록 엿들은 값을 써먹을 틈이 줄어든다. */
@@ -35,6 +36,11 @@ typedef struct device {
 
 	/* 이 기기에 요구하는 포스처. 못 미치면 터널에 들이지 않는다. */
 	posture_req_t require;
+
+	/* 커넥터라면 그것이 맡은 내부망 (connector=10.101.0.0/16). 비어 있으면 일반 기기다.
+	 * server.c 의 "커넥터" 주석. */
+	net_route_t connector[CONNECTOR_MAX_NETS];
+	uint8_t n_connector;
 
 	/* 진행 중인 핸드셰이크. CHALLENGE 로 내준 nonce 를 서명이 맞는 AUTH 가 오거나
 	 * 수명이 다할 때까지 기억한다. 그동안 다시 온 REQ 에는 같은 nonce 를 내준다.
@@ -56,6 +62,16 @@ device_t *device_find_ip(struct in_addr tun_ip);
 
 /* 보고된 포스처가 이 기기의 정책을 채우면 1. */
 int device_posture_ok(const device_t *dev, const posture_report_t *posture);
+
+/* 기기 줄의 터널 IP 뒤에 오는 단어 하나 — 포스처 조건 또는 connector=<대역>. 등록 대기
+ * 목록(enroll.c)도 같은 단어를 받는다. 모르는 단어거나 대역이 틀리면 -1. */
+int device_token_parse(const char *tok, device_t *d);
+
+/* dst 를 맡은 커넥터 기기. 없으면 NULL. 대역이 겹치면 더 좁은 쪽이 맡는다. */
+const device_t *device_connector_for(struct in_addr dst);
+
+/* dst 가 이 커넥터가 맡은 대역 안이면 1. */
+int device_connector_has(const device_t *dev, struct in_addr dst);
 
 /* 로그에 쓸 ID 문자열. dst 는 DEVICE_ID_STRLEN 이상이어야 한다. */
 #define DEVICE_ID_STRLEN (DEVICE_ID_LEN * 2 + 1)

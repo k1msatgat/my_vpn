@@ -152,6 +152,7 @@ server.registerTool('enroll_create', {
 		label: label.optional(),
 		tunnel_ip: tunnelIp.optional().describe('tunnel IPv4 address for the device; omit to take the lowest free address in the tunnel subnet'),
 		requirements: requirements.optional(),
+		connector: z.array(z.string()).max(4).optional().describe('make this device an app connector for these networks, e.g. ["10.101.0.0/16"]: a machine inside that network that runs "vpn_client connector <server-ip> <port> <lan-ifname>". The server then relays packets for those networks (after the ACL) into the connector\'s session instead of its own tun, so the protected network needs no inbound port. Clients keep getting the routes from the ACL; the connector gets none.'),
 		ttl_minutes: z.number().int().min(1).max(1440).optional().describe('how long the code stays valid (default 15)'),
 	},
 	annotations: WRITE,

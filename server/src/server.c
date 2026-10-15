@@ -72,10 +72,111 @@ static void net_config_for(const device_t *dev, net_config_t *cfg)
 	cfg->prefix_len = (uint8_t)tun_prefix;
 	cfg->mtu = (uint16_t)tun_mtu;
 
-	if (acl_enabled) {
+	/* 커넥터에는 경로를 내려 주지 않는다. 그 대역은 커넥터 쪽에서 바로 붙어 있는
+	 * 네트워크이고, 같은 대역을 터널로 보내라고 하면 자기 네트워크로 가는 길을 잃는다. */
+	if (acl_enabled && dev->n_connector == 0) {
 		cfg->n_routes = (uint8_t)acl_routes(dev->tun_ip, tun_subnet_of(dev->tun_ip),
 				tun_prefix, cfg->routes, NET_MAX_ROUTES);
 	}
+}
+
+/* ---- 커넥터 ------------------------------------------------------------------
+ *
+ * 서버 뒤의 네트워크로 가는 길은 지금까지 하나였다: 서버의 tun 에 쓰고 커널이 서버의 NIC
+ * 로 내보낸다 (FORWARD_OUT). 그러려면 서버가 그 네트워크 안에 있어야 하고, 서버는 인터넷에
+ * UDP 포트를 열어 둔 장비다. 보호하려는 네트워크 안에 바깥에서 들어오는 포트를 여는 셈이다.
+ *
+ * 커넥터는 그 네트워크 안에 두는 작은 클라이언트다. 다른 기기처럼 등록되고 서버로 "나가는"
+ * 세션을 연다. 기기 목록에서 connector=10.101.0.0/16 으로 맡은 대역을 적으면, 서버는 그
+ * 대역으로 가는 패킷을 tun 이 아니라 그 커넥터의 세션으로 보낸다. 서버는 인터넷에 두고,
+ * 내부망에는 들어오는 포트가 하나도 없다.
+ *
+ *   클라이언트 --DATA--> 서버 (ACL, 포스처, 사용자) --DATA--> 커넥터 -> tun -> 내부망
+ *   클라이언트 <--DATA-- 서버 (출발지 / 목적지 확인) <--DATA-- 커넥터 <- tun <- 답
+ *
+ * 판정은 지금처럼 서버가 한다. 커넥터로 보내기 전에 ACL 과 포스처와 사용자 조건을 모두
+ * 지난다. 커넥터는 정책을 모르고, 받은 것을 내부망에 넣고 답을 돌려줄 뿐이다.
+ *
+ * 커넥터에서 오는 패킷은 다르게 본다. 그 출발지는 커넥터의 터널 주소가 아니라 내부망의
+ * 자원이므로 출발지 검사를 "커넥터가 맡은 대역 안인가"로 바꾸고, 목적지는 붙어 있는
+ * 클라이언트여야 한다. 내부망 쪽에서 연결을 시작하지 못하게 하는 것(답만 들이는 것)은
+ * 커넥터 장비의 nftables 가 한다 — 서버는 연결 상태를 추적하지 않는다.
+ *
+ * 커넥터가 맡은 대역인데 커넥터가 붙어 있지 않으면 버린다. 서버의 tun 으로 대신 보내지
+ * 않는다 — 같은 목적지가 커넥터의 상태에 따라 다른 길로 가면 정책을 읽을 수 없다. */
+
+/* 클라이언트가 보낸 패킷(ACL 을 지났다)을 그 대역을 맡은 커넥터의 세션으로. 평문은
+ * packet + PKT_HDR_LEN 에 n 바이트 있다. */
+static void relay_to_connector(int32_t sock, const device_t *conn_dev, uint8_t *packet,
+		size_t cap, int n)
+{
+	char ids[DEVICE_ID_STRLEN];
+	peer_t *conn = peer_find_device(conn_dev->id);
+	int len;
+
+	if (conn == NULL || conn->enroll) {
+		printf("[drop] connector %s is not connected\n", device_id_str(conn_dev->id, ids));
+		stats.connector_offline++;
+		return;
+	}
+
+	len = secure_seal(&conn->secure, MSG_TYPE_DATA, conn->session_idx, packet, cap, (size_t)n);
+	if (len < 0) {
+		return;
+	}
+	conn->tx_packets++;
+	conn->tx_bytes += (uint64_t)n;
+
+	if (sendto(sock, packet, len, 0, (const struct sockaddr *)&conn->outer, conn->outer_len) < 0) {
+		perror("sendto connector");
+	}
+}
+
+/* 커넥터가 보낸 패킷(내부망의 답)을 그 목적지의 클라이언트에게. 0 이면 보냈고 -1 이면
+ * 버렸다. */
+static int relay_from_connector(int32_t sock, peer_t *conn, const device_t *conn_dev,
+		uint8_t *packet, size_t cap, int n)
+{
+	char sb[INET_ADDRSTRLEN], db[INET_ADDRSTRLEN];
+	const uint8_t *ip = packet + PKT_HDR_LEN;
+	struct in_addr src, dst;
+	const device_t *to_dev;
+	peer_t *to;
+	int len;
+
+	memcpy(&src, ip + IP_SRC_OFF, IP_ADDR_LEN);
+	memcpy(&dst, ip + IP_DST_OFF, IP_ADDR_LEN);
+
+	if (!device_connector_has(conn_dev, src)) {
+		printf("[drop] connector sent %s -> %s, source outside its networks\n",
+				ip_str(src, sb), ip_str(dst, db));
+		stats.spoofed_src++;
+		return -1;
+	}
+
+	to = peer_lookup(dst);
+	to_dev = to != NULL ? device_find(to->device_id) : NULL;
+	if (to == NULL || to->enroll || to_dev == NULL || to_dev->n_connector != 0) {
+		printf("[drop] connector sent %s -> %s, no client session there\n",
+				ip_str(src, sb), ip_str(dst, db));
+		stats.connector_dropped++;
+		return -1;
+	}
+
+	conn->rx_packets++;
+	conn->rx_bytes += (uint64_t)n;
+	to->tx_packets++;
+	to->tx_bytes += (uint64_t)n;
+
+	len = secure_seal(&to->secure, MSG_TYPE_DATA, to->session_idx, packet, cap, (size_t)n);
+	if (len < 0) {
+		return -1;
+	}
+	if (sendto(sock, packet, len, 0, (const struct sockaddr *)&to->outer, to->outer_len) < 0) {
+		perror("sendto client");
+	}
+
+	return 0;
 }
 
 /* 핸드셰이크를 거절하고 이유를 알려 준다. 응답이 없는 것과 거절된 것을 클라이언트가
@@ -695,6 +796,7 @@ int main(int argc, char *argv[])
 	struct in_addr inner;
 	peer_t *peer;
 	struct in_addr inner_dst;
+	const device_t *conn_dev;
 	uint8_t packet[BUF_SIZE];
 	uint8_t *ip;
 	msg_header_t msg_header;
@@ -1057,6 +1159,15 @@ int main(int argc, char *argv[])
 					continue;
 				}
 
+				/* 커넥터가 보낸 내부망의 답. 출발지는 커넥터의 터널 주소가 아니다. */
+				conn_dev = device_find(peer->device_id);
+				if (conn_dev != NULL && conn_dev->n_connector != 0) {
+					if (relay_from_connector(sock, peer, conn_dev, packet, sizeof(packet), n) == 0) {
+						peer_touch(peer, &src, srclen);
+					}
+					continue;
+				}
+
 				memcpy(&inner, ip + IP_SRC_OFF, IP_ADDR_LEN);
 
 				if (inner.s_addr != peer->inner.s_addr) {
@@ -1110,6 +1221,14 @@ int main(int argc, char *argv[])
 				peer_touch(peer, &src, srclen);
 				peer->rx_packets++;
 				peer->rx_bytes += (uint64_t)n;
+
+				conn_dev = device_connector_for(inner_dst);
+				if (conn_dev != NULL) {
+					printf("[udp->connector] %d bytes %s -> %s\n", n, ip_str(inner, ib),
+							ip_str(inner_dst, ob));
+					relay_to_connector(sock, conn_dev, packet, sizeof(packet), n);
+					continue;
+				}
 
 				printf("[udp->tun] %d bytes from %s:%d (inner src %s), icmp type=%d\n",
 						n, ip_str(src.sin_addr, ob), ntohs(src.sin_port),

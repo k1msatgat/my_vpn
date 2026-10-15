@@ -209,7 +209,7 @@ int enroll_load(const char *path)
 		 * 옮겨 적히고, 그때는 서버가 그 목록을 통째로 거부한다. */
 		strcpy(reqs_copy, p->reqs);
 		for (tok = strtok(reqs_copy, " \t"); tok != NULL; tok = strtok(NULL, " \t")) {
-			if (posture_req_parse(tok, &p->dev.require) < 0) {
+			if (device_token_parse(tok, &p->dev) < 0) {
 				fprintf(stderr, "enroll: line %d: unknown requirement '%s'\n", lineno, tok);
 				goto fail;
 			}

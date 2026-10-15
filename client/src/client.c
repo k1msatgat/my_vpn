@@ -19,6 +19,7 @@
 #include "netcfg.h"
 #include "posture.h"
 #include "session.h"
+#include "connector.h"
 
 /* Linux 클라이언트 (프로토콜 버전 5).
  *
@@ -62,6 +63,7 @@ typedef struct client {
 	uint64_t last_login_ms;
 	int64_t user_expires;		/* 서버가 받아 준 토큰의 exp. 0 이면 로그인하지 않은 상태 */
 	int verbose;
+	const char *lan_if;		/* 커넥터로 돌 때 내부망 쪽 장치 (connector.h) */
 } client_t;
 
 static volatile sig_atomic_t running = 1;
@@ -487,6 +489,18 @@ static int run(client_t *c, const struct sockaddr_in *server, const char *ifname
 		goto out;
 	}
 
+	/* 커넥터: 서버가 보내 준 내부망 행 패킷을 lan 으로 내보낼 준비. 터널 대역은 서버가 준
+	 * 주소에서 안다. */
+	if (c->lan_if != NULL) {
+		struct in_addr net;
+		uint8_t p = c->net.applied.prefix_len;
+
+		net.s_addr = c->net.applied.tun_ip & htonl(0xFFFFFFFFu << (32 - p));
+		if (connector_up(c->net.ifname, c->lan_if, net, p) < 0) {
+			goto out;
+		}
+	}
+
 	epfd = epoll_create1(EPOLL_CLOEXEC);
 	if (epfd < 0) {
 		perror("epoll_create1");
@@ -617,6 +631,7 @@ static int run(client_t *c, const struct sockaddr_in *server, const char *ifname
 	ret = 0;
 
 out:
+	connector_down();
 	session_close(&c->session);
 	if (epfd >= 0) {
 		close(epfd);
@@ -708,14 +723,17 @@ static void usage(const char *prog)
 	fprintf(stderr,
 		"usage: %s [-k identity-file] enroll <server-ip> <port> <enrollment-code> [-f]\n"
 		"       %s [-k identity-file] [-i ifname] [-t token-file] [-v] run <server-ip> <port>\n"
+		"       %s [-k identity-file] [-i ifname] [-v] connector <server-ip> <port> <lan-ifname>\n"
 		"       %s posture\n"
 		"       %s selftest\n"
 		"  -k  device identity file (default %s)\n"
 		"  -i  tun device name (default %s)\n"
 		"  -t  log in as the user whose token (JWT) is in this file; sent again when it changes\n"
 		"  -f  replace an existing identity when enrolling\n"
-		"  -v  log every packet\n",
-		prog, prog, prog, prog, IDENTITY_FILE_DEFAULT, TUN_IFNAME_DEFAULT);
+		"  -v  log every packet\n"
+		"  connector: forward what the server relays to this device onto <lan-ifname> (NAT,\n"
+		"             replies only back); the device must be listed with connector=<net>\n",
+		prog, prog, prog, prog, prog, IDENTITY_FILE_DEFAULT, TUN_IFNAME_DEFAULT);
 }
 
 static int parse_server(const char *ip, const char *port, struct sockaddr_in *out)
@@ -802,6 +820,16 @@ int main(int argc, char *argv[])
 			return 1;
 		}
 		return enroll(&client, &server, argv[optind + 3], ident_path, force);
+	}
+
+	/* connector 는 run 에 내부망 쪽 장치 하나가 더해진 것이다. */
+	if (strcmp(cmd, "connector") == 0 && argc - optind >= 4) {
+		if (!connector_ifname_ok(argv[optind + 3])) {
+			fprintf(stderr, "invalid interface name : %s\n", argv[optind + 3]);
+			return 1;
+		}
+		client.lan_if = argv[optind + 3];
+		cmd = "run";
 	}
 
 	if (strcmp(cmd, "run") == 0 && argc - optind >= 3) {

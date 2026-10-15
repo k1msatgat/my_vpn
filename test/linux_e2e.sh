@@ -20,6 +20,9 @@
 #      로그인 도구(my_vpn_login)가 시험용 OIDC 서버에서 토큰을 받아 파일에 쓰면 클라이언트가
 #      보내고, 그때부터 열린다. 도구가 토큰을 갈아 끼우면 이어지고, 다른 IdP 의 토큰은 거절되며,
 #      아무도 갈아 끼우지 않으면 만료되는 순간 다시 닫힌다. 터널은 그동안 그대로다.
+#   6. 커넥터 -> 내부망(198.51.100.0/24) 안의 커넥터가 서버로 나가는 세션을 열면, 클라이언트의
+#      ping 이 서버의 tun 이 아니라 커넥터를 지나 자원에 닿는다. 내부망 쪽에서 시작한 연결은
+#      막히고, ACL 은 그대로 걸리며, 커넥터가 내려가면 다시 닿지 않는다.
 #
 # 사용자 네임스페이스 안에서는 nft 규칙셋이 그 네임스페이스의 것이라 방화벽 포스처를
 # 마음대로 켜고 끌 수 있다. 실제 장비에서는 그 장비의 nftables / firewalld 를 읽는다.
@@ -65,6 +68,9 @@ CLI_PID=
 NS_PID=
 IDP_PID=
 LOGIN_PID=
+CON_PID=
+NS2_PID=
+NS3_PID=
 failed=0
 
 cleanup() {
@@ -73,6 +79,9 @@ cleanup() {
 	[ -n "$NS_PID" ] && kill "$NS_PID" 2>/dev/null
 	[ -n "$LOGIN_PID" ] && kill "$LOGIN_PID" 2>/dev/null
 	[ -n "$IDP_PID" ] && kill "$IDP_PID" 2>/dev/null
+	[ -n "$CON_PID" ] && kill "$CON_PID" 2>/dev/null
+	[ -n "$NS2_PID" ] && kill "$NS2_PID" 2>/dev/null
+	[ -n "$NS3_PID" ] && kill "$NS3_PID" 2>/dev/null
 	wait 2>/dev/null
 	if [ "$failed" -ne 0 ]; then
 		echo
@@ -164,7 +173,10 @@ check "enroll: the code cannot be used twice" sh -c "! nsenter -t $NS_PID -n --p
 	'$CLIENT' -f -k '$WORK/other' enroll '$SRV_VETH' '$PORT' '$CODE'"
 
 echo "== 2. connect"
-in_cli "$CLIENT" -k "$IDENT" -i "$CLI_IF" -t "$TOKEN" run "$SRV_VETH" "$PORT" > "$CLOG" 2>&1 &
+# 함수(in_cli)로 띄우면 $! 가 서브셸이라 끝날 때 클라이언트를 멈추지 못하고 남는다 (tun 과
+# 네임스페이스를 붙든 채로). nsenter 를 바로 불러 $! 가 클라이언트 자신이 되게 한다.
+nsenter -t "$NS_PID" -n --preserve-credentials "$CLIENT" -k "$IDENT" -i "$CLI_IF" -t "$TOKEN" \
+	run "$SRV_VETH" "$PORT" > "$CLOG" 2>&1 &
 CLI_PID=$!
 check "connect: session established" wait_for 10 log_has "$CLOG" "] connected"
 check "connect: tun has the address the server assigned" \
@@ -267,6 +279,77 @@ check "login: the client notices the token expired" \
 	wait_for $((TOKEN_TTL + 3)) log_has "$CLOG" "[login] token expired"
 check "login: group=ops rule is closed again" probe_denied
 check "login: the tunnel itself still works" ping_ok "$SRV_TUN"
+
+echo "== 6. connector"
+# 커넥터 장비(ns2)와 그 뒤의 내부망 자원(ns3). 서버와 커넥터는 다른 veth 로 잇는다. 자원에는
+# 터널 대역으로 가는 경로가 없다 — 답이 돌아온다면 커넥터의 NAT 를 지난 것이다.
+#
+#   [서버 ns] 192.0.3.1 --veth-- 192.0.3.2 [ns2: vpn_client connector] 198.51.100.1 --veth-- 198.51.100.10 [ns3]
+RESOURCE=198.51.100.10
+CON_ID=c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0
+CON_KEY=0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f
+in_con() { nsenter -t "$NS2_PID" -n --preserve-credentials "$@"; }
+in_res() { nsenter -t "$NS3_PID" -n --preserve-credentials "$@"; }
+unshare -n sleep infinity &
+NS2_PID=$!
+unshare -n sleep infinity &
+NS3_PID=$!
+sleep 0.2
+ip link add v-srv2 type veth peer name v-con
+ip link set v-con netns "$NS2_PID"
+ip addr add 192.0.3.1/24 dev v-srv2
+ip link set v-srv2 up
+in_con ip link set lo up
+in_con ip addr add 192.0.3.2/24 dev v-con
+in_con ip link set v-con up
+in_con ip link add v-lan type veth peer name v-res
+in_con ip link set v-res netns "$NS3_PID"
+in_con ip addr add 198.51.100.1/24 dev v-lan
+in_con ip link set v-lan up
+in_res ip link set lo up
+in_res ip addr add "$RESOURCE/24" dev v-res
+in_res ip link set v-res up
+
+# 커넥터를 기기 목록에 올린다 (등록 코드로 올려도 같다 — 코드의 조건에 connector= 를 적는다).
+printf '%s %s 10.0.0.9 connector=198.51.100.0/24\n' "$CON_ID" "$CON_KEY" >> "$DEVICES"
+printf '%s %s\n' "$CON_ID" "$CON_KEY" > "$WORK/connector"
+chmod 600 "$WORK/connector"
+kill -HUP "$SRV_PID"
+check "connector: the server reads connector=198.51.100.0/24" \
+	wait_for 3 log_has "$SLOG" "connector: 198.51.100.0/24"
+
+check "connector: before it connects, its network is unreachable" ping_fails "$RESOURCE"
+check "connector: the server says the connector is not connected" \
+	log_has "$SLOG" "[drop] connector $CON_ID is not connected"
+
+# 클라이언트처럼 nsenter 를 바로 불러야 $! 로 멈출 수 있다.
+nsenter -t "$NS2_PID" -n --preserve-credentials "$CLIENT" -k "$WORK/connector" -i myvpn1 connector 192.0.3.1 "$PORT" v-lan \
+	> "$WORK/connector.log" 2>&1 &
+CON_PID=$!
+check "connector: session established" wait_for 10 log_has "$WORK/connector.log" "] connected"
+check "connector: forwarding and NAT are set up" log_has "$WORK/connector.log" "[connector] forwarding 10.0.0.0/24"
+check "connector: no route to its own network is pushed into the tunnel" \
+	sh -c "! nsenter -t $NS2_PID -n --preserve-credentials ip route show 198.51.100.0/24 | grep -q myvpn1"
+check "connector: the client reaches $RESOURCE through the connector" ping_ok "$RESOURCE"
+check "connector: the server relayed it instead of using its own tun" log_has "$SLOG" "[udp->connector]"
+
+# 내부망 쪽에서 터널로 연결을 시작하는 것은 막힌다. 자원이 커넥터를 거쳐 클라이언트에
+# 닿을 길을 일부러 만들어 주고 시도한다.
+in_res ip route add 10.0.0.0/24 via 198.51.100.1
+check "connector: the LAN cannot open connections into the tunnel" \
+	sh -c "! nsenter -t $NS3_PID -n --preserve-credentials ping -c 1 -W 1 $CLI_TUN"
+in_res ip route del 10.0.0.0/24 via 198.51.100.1
+
+# ACL 은 커넥터로 가기 전에 서버에서 걸린다.
+denied_before=$(grep -c '^\[deny\]' "$SLOG")
+in_cli bash -c "echo probe > /dev/udp/$RESOURCE/53" 2>/dev/null
+check "connector: the ACL still applies (udp/53 to $RESOURCE is not allowed)" \
+	wait_for 3 sh -c "[ \$(grep -c '^\[deny\]' '$SLOG') -gt $denied_before ]"
+
+kill "$CON_PID"; wait "$CON_PID" 2>/dev/null; CON_PID=
+check "connector: its nft table is removed when it stops" \
+	sh -c "! nsenter -t $NS2_PID -n --preserve-credentials nft list table ip my_vpn_connector"
+check "connector: with the connector gone, its network is unreachable again" ping_fails "$RESOURCE"
 
 echo
 if [ "$failed" -eq 0 ]; then

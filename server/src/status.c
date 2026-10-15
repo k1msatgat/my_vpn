@@ -63,6 +63,7 @@ static void build(int acl_enabled)
 	char ib[INET_ADDRSTRLEN], ob[INET_ADDRSTRLEN];
 	time_t now = mono_now();
 	const peer_t *p;
+	const device_t *dev;
 	int i, g, first = 1;
 
 	outlen = 0;
@@ -85,7 +86,9 @@ static void build(int acl_enabled)
 	put("\"acl_denied_posture\":%llu,", (unsigned long long)stats.acl_denied_posture);
 	put("\"acl_denied_user\":%llu,", (unsigned long long)stats.acl_denied_user);
 	put("\"login_ok\":%llu,", (unsigned long long)stats.login_ok);
-	put("\"login_failed\":%llu},", (unsigned long long)stats.login_failed);
+	put("\"login_failed\":%llu,", (unsigned long long)stats.login_failed);
+	put("\"connector_offline\":%llu,", (unsigned long long)stats.connector_offline);
+	put("\"connector_dropped\":%llu},", (unsigned long long)stats.connector_dropped);
 
 	put("\"sessions\":[");
 	for (i = 0; i < MAX_PEERS; i++) {
@@ -109,6 +112,14 @@ static void build(int acl_enabled)
 		put("\"tx_packets\":%llu,\"tx_bytes\":%llu,",
 				(unsigned long long)p->tx_packets, (unsigned long long)p->tx_bytes);
 		put("\"acl_denied\":%llu,", (unsigned long long)p->acl_denied);
+		/* 커넥터면 맡은 대역. 일반 기기는 빈 목록이다. */
+		put("\"connector\":[");
+		dev = device_find(p->device_id);
+		for (g = 0; dev != NULL && g < dev->n_connector; g++) {
+			struct in_addr a = { .s_addr = dev->connector[g].addr };
+			put("%s\"%s/%u\"", g == 0 ? "" : ",", ip_str(a, ib), dev->connector[g].prefix_len);
+		}
+		put("],");
 		/* 이름과 그룹은 policy.c 가 정한 글자만 들어 있어 따옴표 없이 그대로 적어도 된다. */
 		if (p->logged_in) {
 			put("\"user\":{\"name\":\"%s\",\"expires\":%lld,\"groups\":[", p->user.name,

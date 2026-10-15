@@ -29,6 +29,8 @@ typedef struct server_stats {
 	uint64_t acl_denied_user;		/* user= / group= 규칙에 걸렸는데 그 사용자가 아니다 */
 	uint64_t login_ok;
 	uint64_t login_failed;
+	uint64_t connector_offline;		/* 커넥터가 맡은 대역으로 가는데 커넥터가 붙어 있지 않다 */
+	uint64_t connector_dropped;		/* 커넥터가 보낸 답의 목적지에 클라이언트가 없다 */
 } server_stats_t;
 
 extern server_stats_t stats;

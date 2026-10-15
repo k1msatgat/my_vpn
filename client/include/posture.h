@@ -29,4 +29,8 @@
 
 void posture_collect(posture_report_t *out);
 
+/* nft 의 절대 경로. 없으면 NULL. 셸이나 PATH 를 거치지 않으려고 정해 둔 곳만 본다
+ * (커넥터도 쓴다). */
+const char *nft_path(void);
+
 #endif

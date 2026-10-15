@@ -67,6 +67,88 @@ const char *device_id_str(const uint8_t id[DEVICE_ID_LEN], char *dst)
 	return dst;
 }
 
+static uint32_t prefix_mask(uint8_t len)
+{
+	return len == 0 ? 0 : htonl(0xFFFFFFFFu << (32 - len));
+}
+
+/* connector=a.b.c.d/n. /0 은 받지 않는다 — 모든 목적지를 한 커넥터로 보내라는 뜻이 되고,
+ * 그건 인터넷으로 나가는 길을 커넥터에 맡기는 일이다. 주소의 호스트 부분이 0 이 아니면
+ * 받지 않는다. 10.101.0.7/16 처럼 적은 사람이 무엇을 뜻했는지 짐작하지 않는다. */
+static int parse_connector(const char *s, device_t *d)
+{
+	char buf[32];
+	char *slash, *end;
+	struct in_addr addr;
+	long bits;
+
+	if (strlen(s) >= sizeof(buf) || d->n_connector >= CONNECTOR_MAX_NETS) {
+		return -1;
+	}
+	strcpy(buf, s);
+
+	slash = strchr(buf, '/');
+	if (slash == NULL) {
+		return -1;
+	}
+	*slash = '\0';
+	bits = strtol(slash + 1, &end, 10);
+	if (*end != '\0' || bits < 1 || bits > 32 || inet_pton(AF_INET, buf, &addr) != 1) {
+		return -1;
+	}
+	if ((addr.s_addr & ~prefix_mask((uint8_t)bits)) != 0) {
+		return -1;
+	}
+
+	d->connector[d->n_connector].addr = addr.s_addr;
+	d->connector[d->n_connector].prefix_len = (uint8_t)bits;
+	d->n_connector++;
+
+	return 0;
+}
+
+int device_token_parse(const char *tok, device_t *d)
+{
+	if (strncmp(tok, "connector=", 10) == 0) {
+		return parse_connector(tok + 10, d);
+	}
+
+	return posture_req_parse(tok, &d->require);
+}
+
+int device_connector_has(const device_t *dev, struct in_addr dst)
+{
+	int k;
+
+	for (k = 0; k < dev->n_connector; k++) {
+		if ((dst.s_addr & prefix_mask(dev->connector[k].prefix_len)) == dev->connector[k].addr) {
+			return 1;
+		}
+	}
+
+	return 0;
+}
+
+const device_t *device_connector_for(struct in_addr dst)
+{
+	const device_t *best = NULL;
+	int best_len = -1;
+	int i, k;
+
+	for (i = 0; i < ndevices; i++) {
+		for (k = 0; k < devices[i].n_connector; k++) {
+			const net_route_t *r = &devices[i].connector[k];
+
+			if ((dst.s_addr & prefix_mask(r->prefix_len)) == r->addr && r->prefix_len > best_len) {
+				best = &devices[i];
+				best_len = r->prefix_len;
+			}
+		}
+	}
+
+	return best;
+}
+
 int device_load(const char *path)
 {
 	FILE *fp;
@@ -131,9 +213,9 @@ int device_load(const char *path)
 		d = &staged[nstaged];
 		memset(d, 0, sizeof(*d));
 
-		/* 터널 IP 뒤에 남은 단어들이 포스처 조건이다. */
+		/* 터널 IP 뒤에 남은 단어들이 포스처 조건과 커넥터의 대역이다. */
 		for (tok = strtok(line + used, " \t\r\n"); tok != NULL; tok = strtok(NULL, " \t\r\n")) {
-			if (posture_req_parse(tok, &d->require) < 0) {
+			if (device_token_parse(tok, d) < 0) {
 				fprintf(stderr, "device: line %d: unknown requirement '%s'\n", lineno, tok);
 				goto fail;
 			}
@@ -203,15 +285,21 @@ void device_dump(void)
 {
 	char ids[DEVICE_ID_STRLEN];
 	char ib[INET_ADDRSTRLEN];
-	int i;
+	int i, k;
 
 	printf("--- devices (%d) ---\n", ndevices);
 	for (i = 0; i < ndevices; i++) {
-		printf("[%d] %s -> %s  require: firewall=%s antivirus=%s min-build=%u\n", i,
+		printf("[%d] %s -> %s  require: firewall=%s antivirus=%s min-build=%u", i,
 				device_id_str(devices[i].id, ids), ip_str(devices[i].tun_ip, ib),
 				devices[i].require.need_firewall ? "on" : "-",
 				devices[i].require.need_antivirus ? "on" : "-",
 				devices[i].require.min_build);
+		for (k = 0; k < devices[i].n_connector; k++) {
+			struct in_addr a = { .s_addr = devices[i].connector[k].addr };
+			printf("%s%s/%u", k == 0 ? "  connector: " : " ", ip_str(a, ib),
+					devices[i].connector[k].prefix_len);
+		}
+		printf("\n");
 	}
 }
 

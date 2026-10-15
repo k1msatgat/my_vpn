@@ -135,13 +135,13 @@ SRV_IF=$(ip -o link show type tun | awk -F': ' '{print $2}' | grep -vxF "$before
 ip addr add "$SRV_TUN/24" dev "$SRV_IF"
 ip link set "$SRV_IF" mtu 1400 up
 
-in_cli "${PIN_CLIENT[@]}" "$CLIENT" -k "$WORK/device" -i "$CLI_IF" run "$SRV_VETH" "$PORT" \
-	> "$WORK/client.log" 2>&1 &
+# 함수(in_cli)를 거치지 않는다. 거치면 $! 가 서브셸이라 끝날 때 클라이언트가 남고, CPU 도
+# 클라이언트가 아니라 서브셸의 것을 잰다. nsenter 와 taskset 은 exec 하므로 $! 가 클라이언트다.
+nsenter -t "$NS_PID" -n --preserve-credentials "${PIN_CLIENT[@]}" "$CLIENT" -k "$WORK/device" \
+	-i "$CLI_IF" run "$SRV_VETH" "$PORT" > "$WORK/client.log" 2>&1 &
 CLI_PID=$!
 wait_for 10 grep -qF "] connected" "$WORK/client.log" \
 	|| { cat "$WORK/server.log" "$WORK/client.log"; die "client did not connect"; }
-# nsenter 를 거쳐 띄웠으므로 $! 는 nsenter 다. CPU 를 재려면 그 아래의 vpn_client 가 필요하다.
-CLI_REAL=$(pgrep -P "$CLI_PID" -x vpn_client || echo "$CLI_PID")
 
 "${PIN_IPERF_S[@]}" iperf3 -s -B 0.0.0.0 > "$WORK/iperf-server.log" 2>&1 &
 IPERF_PID=$!
@@ -159,10 +159,10 @@ TABLE="$OUT/iperf.md"
 run() {
 	local name=$1 dst=$2 proto=$3; shift 3
 	local json="$OUT/iperf-$name-$proto.json" s0 c0 t0 s1 c1 t1 summary
-	s0=$(cpu_ticks "$SRV_PID"); c0=$(cpu_ticks "$CLI_REAL"); t0=$(date +%s%N)
+	s0=$(cpu_ticks "$SRV_PID"); c0=$(cpu_ticks "$CLI_PID"); t0=$(date +%s%N)
 	in_cli "${PIN_IPERF[@]}" iperf3 -c "$dst" -t "$DUR" -J "$@" > "$json" 2> "$json.err" \
 		|| { cat "$json" "$json.err"; die "iperf3 to $dst ($proto) failed"; }
-	s1=$(cpu_ticks "$SRV_PID"); c1=$(cpu_ticks "$CLI_REAL"); t1=$(date +%s%N)
+	s1=$(cpu_ticks "$SRV_PID"); c1=$(cpu_ticks "$CLI_PID"); t1=$(date +%s%N)
 
 	summary=$(python3 - "$json" "$proto" <<'EOF'
 import json, sys

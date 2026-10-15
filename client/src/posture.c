@@ -32,7 +32,7 @@ static uint32_t kernel_version(void)
 	return (uint32_t)(major << 16 | minor << 8 | patch);
 }
 
-static const char *nft_path(void)
+const char *nft_path(void)
 {
 	size_t i;
 

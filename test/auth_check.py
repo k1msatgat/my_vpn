@@ -1215,6 +1215,60 @@ def acl_loader_tests(dev_path):
         failed += not ok
 
 
+# ---- 커넥터 ----------------------------------------------------------------------
+
+CON_ID = bytes(range(0x90, 0xa0))
+CON_KEY = bytes(range(0xa0, 0xc0))
+CON_LINE = "%s %s 10.0.0.9 connector=198.51.100.0/24  # connector" % (CON_ID.hex(), CON_KEY.hex())
+RESOURCE = socket.inet_aton("198.51.100.10")
+
+
+def connector_tests(srv, acl_path, dev_path):
+    """서버가 커넥터의 대역으로 가는 패킷을 그 커넥터의 세션으로 보내고, 커넥터가 보낸 답을
+    클라이언트에게 돌려주는지. 커넥터가 맡은 대역 밖을 출발지로 대거나 클라이언트가 아닌
+    곳으로 보내는 패킷은 버려야 한다."""
+    write_devices(dev_path, LINE1, LINE2, CON_LINE)
+    with open(acl_path, "w") as f:
+        f.write("10.0.0.0/24 198.51.100.0/24 icmp any allow\nany any any any deny\n")
+    srv.reload()
+
+    cl, con = Client(), Client()
+    idx = session(cl)
+    expect("connector: clients get the connector's network as a route", cl.config,
+           "10.0.0.3/24 mtu 1400 routes 198.51.100.0/24")
+    r = con.request(dev_id=CON_ID)
+    r = con.auth(r[2], key=CON_KEY, dev_id=CON_ID)
+    expect("connector: handshake", describe(r), "RES_HANDSHAKE")
+    cidx = r[1]
+    expect("connector: the connector itself gets no routes", con.config, "10.0.0.9/24 mtu 1400 routes -")
+
+    ping = echo_request(TUN_IP, RESOURCE, 900)
+    cl.send(data(idx, None, ping))
+    r = con.recv()
+    expect("connector: client -> its network arrives in the connector's session",
+           r and (r[0], r[1], r[2] == ping), (DATA, cidx, True))
+
+    reply = echo_request(RESOURCE, TUN_IP, 901)
+    con.send(data(cidx, None, reply))
+    r = cl.recv()
+    expect("connector: the network's reply reaches the client", r and (r[0], r[2] == reply), (DATA, True))
+
+    before = len(srv.text())
+    con.send(data(cidx, None, echo_request(socket.inet_aton("10.101.0.5"), TUN_IP, 902)))
+    expect("connector: a source outside its network is dropped", describe(cl.recv()), "no response")
+    expect("connector: ...and the server says why",
+           "source outside its networks" in srv.text()[before:], True)
+
+    before = len(srv.text())
+    con.send(data(cidx, None, echo_request(RESOURCE, socket.inet_aton("10.0.0.1"), 903)))
+    time.sleep(0.3)
+    expect("connector: it cannot send to the server's own address",
+           "no client session there" in srv.text()[before:], True)
+
+    write_devices(dev_path, LINE1, LINE2)
+    srv.reload()
+
+
 # ---- 사용자 로그인 ----------------------------------------------------------------
 
 sys.path.insert(0, os.path.join(ROOT, "tools", "idp"))
@@ -1431,6 +1485,7 @@ def main():
             status_tests(srv)
             audit_tests(srv)
             enroll_tests(srv, path)
+            connector_tests(srv, acl_path, path)
         finally:
             srv.stop()
             logs.append(srv.text())
