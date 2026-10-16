@@ -13,7 +13,7 @@
  * 세션 키
  *   secret = ECDH(이번 핸드셰이크의 일회용 키 쌍)
  *   prk    = HKDF-Extract(salt = 기기 키, ikm = secret)
- *   keys   = HKDF-Expand(prk, "my_vpn v4 session" | SHA-256(AUTH 패킷 | RES 의 앞부분), 96B)
+ *   keys   = HKDF-Expand(prk, "ztgate v6 session" | SHA-256(AUTH 패킷 | RES 의 앞부분), 96B)
  *            = C->S 키 | S->C 키 | RES_HANDSHAKE 키
  *
  *   - 기기 키가 들어간다: 기기 키를 모르는 쪽은 사이에 끼어 자기 일회용 키를 내밀어도
@@ -63,8 +63,8 @@ int secure_deny_mac(const uint8_t device_key[AUTH_KEY_LEN], uint8_t reason,
 
 /* 등록 코드에서 등록용 임시 신원을 뽑는다 (proto.h 의 "기기 등록").
  *
- *   id  = HMAC-SHA256("my_vpn enroll id",  코드) 의 앞 16B
- *   key = HMAC-SHA256("my_vpn enroll key", 코드)
+ *   id  = HMAC-SHA256("ztgate enroll id",  코드) 의 앞 16B
+ *   key = HMAC-SHA256("ztgate enroll key", 코드)
  *
  * 코드는 줄표와 공백을 빼고 대문자로 바꾼 25자다. O 는 0 으로, I 와 L 은 1 로 읽는다.
  * 글자 수가 맞지 않거나 쓰지 않는 글자가 있으면 -1. */

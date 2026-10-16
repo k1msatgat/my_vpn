@@ -3,8 +3,8 @@
 
 #include "secure.h"
 
-static const char SESSION_LABEL[] = "my_vpn v4 session";
-static const char DENY_LABEL[] = "my_vpn deny";
+static const char SESSION_LABEL[] = "ztgate v6 session";
+static const char DENY_LABEL[] = "ztgate deny";
 
 /* ---- HKDF (RFC 5869) --------------------------------------------------------
  * 합의한 값은 그대로 키로 쓰기에는 고르지 않고, 키는 여러 개가 필요하다. HMAC 을
@@ -155,8 +155,8 @@ int secure_deny_mac(const uint8_t device_key[AUTH_KEY_LEN], uint8_t reason,
  * 사람이 옮겨 적는 값이라 너그럽게 읽는다. 소문자, 끊는 줄표와 공백, 0 과 O / 1 과 I, L
  * 을 섞어 적어도 같은 코드다. */
 static const char ENROLL_ALPHABET[] = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-static const char ENROLL_ID_LABEL[] = "my_vpn enroll id";
-static const char ENROLL_KEY_LABEL[] = "my_vpn enroll key";
+static const char ENROLL_ID_LABEL[] = "ztgate enroll id";
+static const char ENROLL_KEY_LABEL[] = "ztgate enroll key";
 
 int secure_enroll_identity(const char *code, uint8_t id[DEVICE_ID_LEN], uint8_t key[AUTH_KEY_LEN])
 {
@@ -628,9 +628,9 @@ static int test_enroll_code(void)
 	int failed = 0;
 	int ok;
 
-	/* HMAC-SHA256("my_vpn enroll id", "0123456789ABCDEFGHJKMNPQR") 의 앞 16B.
+	/* HMAC-SHA256("ztgate enroll id", "0123456789ABCDEFGHJKMNPQR") 의 앞 16B.
 	 * 서버의 관리 도구(mcp/ctl.cjs)와 검사 스크립트가 같은 값을 내야 한다. */
-	unhex("5c950b408adfa8c651fcfa3dbf27b614", want, sizeof(want));
+	unhex("1fff58721da8863917ba05e6d47ce662", want, sizeof(want));
 
 	ok = secure_enroll_identity("0123456789ABCDEFGHJKMNPQR", id, key) == 0 &&
 		crypt_equal(id, want, sizeof(want));

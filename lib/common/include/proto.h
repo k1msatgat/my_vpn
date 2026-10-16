@@ -14,7 +14,7 @@ extern "C" {
 #define PROTO_STATIC_ASSERT _Static_assert
 #endif
 
-#define PROTOCOL_VERSION 5 /* 서버와 클라이언트가 같은 값을 쓴다. 2: 기기 인증, 3: 세션 암호화, 4: 서버가 터널 설정을 내려 준다, 5: 사용자 로그인 */
+#define PROTOCOL_VERSION 6 /* 서버와 클라이언트가 같은 값을 쓴다. 2: 기기 인증, 3: 세션 암호화, 4: 서버가 터널 설정을 내려 준다, 5: 사용자 로그인, 6: 이름을 ztgate 로 바꾸며 키 유도 / 거절 / 등록 코드의 라벨을 바꿈 */
 
 #define TUN_MTU		1400
 #define BUF_SIZE	2048
@@ -61,7 +61,7 @@ extern "C" {
  * 이 기기의 키를 아는 서버"라는 증명이다. 그래서 클라이언트는 tag 가 맞지 않는 수락을
  * 받지 않는다.
  *
- * DENY 의 mac 은 HMAC-SHA256(기기 키, "my_vpn deny" | reason | AUTH 의 mac) 이다.
+ * DENY 의 mac 은 HMAC-SHA256(기기 키, "ztgate deny" | reason | AUTH 의 mac) 이다.
  * 서명이 맞는 AUTH 를 받은 뒤의 거절(터널 IP, 포스처)에만 채워지고, 그 전의 거절은
  * 서버가 상대의 키를 확인하지 못한 상태라 0 으로 둔다. 클라이언트는 mac 이 맞는 거절만
  * 서버의 답으로 믿는다.

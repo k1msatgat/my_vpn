@@ -36,7 +36,7 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SERVER = os.path.join(ROOT, "server", "bin", "vpn_server")
 PORT = int(next((a for a in sys.argv[1:] if a.isdigit()), 19000))
-VERSION = 5
+VERSION = 6
 
 REQ_HANDSHAKE, RES_HANDSHAKE, DATA, KEEPALIVE, CHALLENGE, AUTH, DENY, ENROLL, LOGIN = range(1, 10)
 DENY_UNKNOWN_DEVICE, DENY_BAD_AUTH, DENY_TUN_IP, DENY_POSTURE = range(1, 5)
@@ -199,7 +199,7 @@ def mac(key, data):
 
 def session_keys(dev_key, secret, auth_pkt, res_head):
     """(C->S 키, S->C 키, RES_HANDSHAKE 키). secure.h 의 "세션 키"."""
-    info = b"my_vpn v4 session" + hashlib.sha256(auth_pkt + res_head).digest()
+    info = b"ztgate v6 session" + hashlib.sha256(auth_pkt + res_head).digest()
     prk = mac(dev_key, secret)                  # HKDF-Extract(salt = 기기 키, ikm = secret)
     okm, block = b"", b""
     for i in (1, 2, 3):                         # HKDF-Expand, 96 바이트
@@ -328,7 +328,7 @@ class Client:
 
     def deny_mac_ok(self, r, key=DEV_KEY):
         """핸드셰이크 중의 DENY 에 붙은 mac 이 이 기기의 키로 확인되는가."""
-        want = mac(key, b"my_vpn deny" + r[2][:1] + self.auth_tag)
+        want = mac(key, b"ztgate deny" + r[2][:1] + self.auth_tag)
         return hmac.compare_digest(r[2][1:1 + MAC_LEN], want)
 
 
@@ -1076,7 +1076,7 @@ def audit_tests(srv):
 def enroll_identity(code):
     """등록 코드에서 뽑는 임시 신원 (ID, 키). secure.h 의 secure_enroll_identity."""
     norm = code.upper().replace("-", "").replace(" ", "").replace("O", "0").replace("I", "1").replace("L", "1")
-    return mac(b"my_vpn enroll id", norm.encode())[:16], mac(b"my_vpn enroll key", norm.encode())
+    return mac(b"ztgate enroll id", norm.encode())[:16], mac(b"ztgate enroll key", norm.encode())
 
 
 def enroll_tests(srv, dev_path):
@@ -1110,7 +1110,7 @@ def enroll_tests(srv, dev_path):
 
     # 관리 도구(node)와 서버 / 클라이언트(C)와 이 스크립트가 같은 코드에서 같은 신원을 뽑아야 한다.
     expect("enroll: the identity derived from a code",
-           enroll_identity("0123456789ABCDEFGHJKMNPQR")[0].hex(), "5c950b408adfa8c651fcfa3dbf27b614")
+           enroll_identity("0123456789ABCDEFGHJKMNPQR")[0].hex(), "1fff58721da8863917ba05e6d47ce662")
 
     expect("enroll: a code nobody issued", open_with(code), "DENY(1)")
 

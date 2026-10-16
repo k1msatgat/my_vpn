@@ -325,8 +325,8 @@ function enrollIdentity(code) {
 	const hmac = (label) => crypto.createHmac('sha256', label).update(code, 'ascii').digest();
 
 	return {
-		id: hmac('my_vpn enroll id').subarray(0, 16).toString('hex'),
-		key: hmac('my_vpn enroll key').toString('hex'),
+		id: hmac('ztgate enroll id').subarray(0, 16).toString('hex'),
+		key: hmac('ztgate enroll key').toString('hex'),
 	};
 }
 

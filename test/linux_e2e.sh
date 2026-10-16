@@ -141,7 +141,7 @@ read -r EID EKEY < <(python3 - "$CODE" <<'EOF'
 import hashlib, hmac, sys
 code = sys.argv[1].replace("-", "").upper()
 mac = lambda label: hmac.new(label, code.encode(), hashlib.sha256).digest()
-print(mac(b"my_vpn enroll id")[:16].hex(), mac(b"my_vpn enroll key").hex())
+print(mac(b"ztgate enroll id")[:16].hex(), mac(b"ztgate enroll key").hex())
 EOF
 )
 : > "$DEVICES"

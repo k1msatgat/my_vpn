@@ -10,8 +10,8 @@
 # Node 를 넣지 않으려는 것이다. 코드에서 임시 신원을 뽑는 방법은 secure.h 의
 # secure_enroll_identity 와 같아야 한다:
 #
-#   id  = HMAC-SHA256(key = "my_vpn enroll id",  msg = 코드) 의 앞 16B
-#   key = HMAC-SHA256(key = "my_vpn enroll key", msg = 코드)
+#   id  = HMAC-SHA256(key = "ztgate enroll id",  msg = 코드) 의 앞 16B
+#   key = HMAC-SHA256(key = "ztgate enroll key", msg = 코드)
 #
 # 대기 목록의 한 줄: id  key  tunnel-ip  expires(unix)  [requirement ...]  # label
 
@@ -49,8 +49,8 @@ hmac() {	# hmac <key> -> 코드에 대한 HMAC-SHA256 (hex)
 	printf '%s' "$CODE" | openssl dgst -sha256 -mac HMAC -macopt "key:$1" | awk '{ print $NF }'
 }
 
-ID=$(hmac "my_vpn enroll id" | cut -c1-32)
-KEY=$(hmac "my_vpn enroll key")
+ID=$(hmac "ztgate enroll id" | cut -c1-32)
+KEY=$(hmac "ztgate enroll key")
 EXPIRES=$(( $(date +%s) + TTL_MIN * 60 ))
 
 # 서버도 이 파일을 고친다 (쓰인 줄을 지운다). 서버처럼 옆에 새 파일을 쓰고 이름을 바꿔
