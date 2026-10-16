@@ -10,7 +10,7 @@
 #include "posture.h"
 
 #define IP_FORWARD	"/proc/sys/net/ipv4/ip_forward"
-#define TABLE		"my_vpn_connector"
+#define TABLE		"ztgate_connector"
 
 static int active;
 static char saved_forward = '0';

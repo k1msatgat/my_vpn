@@ -25,8 +25,8 @@ import subprocess
 import sys
 import time
 
-ISSUER = "https://idp.example.test/realms/my_vpn"
-AUDIENCE = "my_vpn"
+ISSUER = "https://idp.example.test/realms/ztgate"
+AUDIENCE = "ztgate"
 
 
 def b64url(data):

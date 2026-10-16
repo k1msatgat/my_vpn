@@ -12,7 +12,7 @@
  * 설정 파일 (-u)
  *
  *   issuer        https://idp.example.com/realms/corp    토큰의 iss 와 정확히 같아야 한다
- *   audience      my_vpn                                 토큰의 aud 에 들어 있어야 한다
+ *   audience      ztgate                                 토큰의 aud 에 들어 있어야 한다
  *   jwks          jwks.json                              IdP 의 공개키. 상대 경로는 이 파일 기준
  *   user-claim    preferred_username                     사용자 이름을 읽을 클레임 (기본 sub)
  *   groups-claim  groups                                 그룹 목록을 읽을 클레임 (기본 groups)

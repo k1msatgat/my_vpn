@@ -54,7 +54,7 @@ srv() { "${DC[@]}" exec -T server "$@"; }
 echo "== server"
 "${DC[@]}" up -d server > /dev/null || exit 1
 # ACL 을 쓸지는 서버가 뜰 때 정해진다. 규칙을 넣고 다시 띄운다.
-srv sh -c 'cat > /etc/my_vpn/acl.conf' <<EOF
+srv sh -c 'cat > /etc/ztgate/acl.conf' <<EOF
 10.0.0.0/24  $SRV_TUN  icmp  any  allow
 any          any       any   any  deny
 EOF
@@ -69,7 +69,7 @@ echo "     code $CODE"
 ENROLL_CODE=$CODE "${DC[@]}" up -d client > /dev/null
 check "client: enrolled with the code" wait_for 10 logs_have client "enrolled. identity saved"
 check "client: connected" wait_for 10 logs_have client "] connected"
-check "client: tun has $CLI_TUN from the server" sh -c "${DC[*]} exec -T client ip -o -4 addr show myvpn0 | grep -q $CLI_TUN/24"
+check "client: tun has $CLI_TUN from the server" sh -c "${DC[*]} exec -T client ip -o -4 addr show ztgate0 | grep -q $CLI_TUN/24"
 check "client: ping $SRV_TUN through the tunnel" cli ping -c 1 -W 2 "$SRV_TUN"
 
 echo "== acl"
@@ -78,7 +78,7 @@ check "acl: $CLI_TUN -> $OTHER denied by the server" wait_for 3 logs_have server
 
 echo "== posture"
 check "posture: client container has no inbound filter" sh -c "${DC[*]} exec -T client vpn_client posture | grep -q 'firewall  off'"
-srv sh -c "sed -i -E 's/^([0-9a-f]{32}[[:space:]]+[0-9a-f]{64}[[:space:]]+$CLI_TUN)/\1 firewall=on/' /etc/my_vpn/devices.conf && pkill -HUP -x vpn_server"
+srv sh -c "sed -i -E 's/^([0-9a-f]{32}[[:space:]]+[0-9a-f]{64}[[:space:]]+$CLI_TUN)/\1 firewall=on/' /etc/ztgate/devices.conf && pkill -HUP -x vpn_server"
 check "posture: policy tightened -> denied at the next keepalive" \
 	wait_for "$KEEPALIVE_WAIT" logs_have client "[deny] posture does not meet policy"
 check "posture: no traffic while denied" sh -c "! ${DC[*]} exec -T client ping -c 1 -W 1 $SRV_TUN"
@@ -88,7 +88,7 @@ table inet demo {
 		type filter hook input priority 0; policy drop;
 		iif lo accept
 		udp sport 9000 accept
-		iifname "myvpn0" accept
+		iifname "ztgate0" accept
 	}
 }
 EOF

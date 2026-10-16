@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """IdP 에 로그인해 받은 토큰을 vpn_client -t 가 읽는 파일에 적는다.
 
-    my_vpn_login --issuer https://idp.example.com/realms/corp --client-id my_vpn [--keep]
+    ztgate_login --issuer https://idp.example.com/realms/corp --client-id ztgate [--keep]
 
 OAuth 2.0 기기 인가(RFC 8628)를 쓴다. 이 도구가 화면에 코드와 주소를 보여 주면, 사용자는
 아무 브라우저(휴대폰이어도 된다)에서 그 주소를 열고 회사 계정으로 로그인한다. 비밀번호도
@@ -31,11 +31,11 @@ import urllib.parse
 import urllib.request
 
 DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
-DEFAULT_TOKEN_FILE = os.path.expanduser("~/.config/my_vpn/token")
+DEFAULT_TOKEN_FILE = os.path.expanduser("~/.config/ztgate/token")
 
 
 def die(msg):
-    print("my_vpn_login: " + msg, file=sys.stderr)
+    print("ztgate_login: " + msg, file=sys.stderr)
     sys.exit(1)
 
 

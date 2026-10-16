@@ -16,7 +16,7 @@
 
 #include "proto.h"
 
-#define IDENTITY_FILE_DEFAULT	"/var/lib/my_vpn/device"
+#define IDENTITY_FILE_DEFAULT	"/var/lib/ztgate/device"
 
 #define IDENTITY_OK		0
 #define IDENTITY_NOT_ENROLLED	1	/* 파일이 없다 */

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# my_vpn.service 가 부른다. PORT / TUN_IP / PREFIX / MTU 는 유닛의 EnvironmentFile
-# (/etc/my_vpn/server.env) 에서 온다.
+# ztgate.service 가 부른다. PORT / TUN_IP / PREFIX / MTU 는 유닛의 EnvironmentFile
+# (/etc/ztgate/server.env) 에서 온다.
 #
 #   service.sh run            vpn_server 로 exec (ExecStart)
 #   service.sh tun-up <pid>   서버가 만든 tun 에 주소를 붙이고 올린다 (ExecStartPost)
@@ -10,8 +10,8 @@
 
 set -eu
 
-ETC=/etc/my_vpn
-SERVER=/opt/my_vpn/server/bin/vpn_server
+ETC=/etc/ztgate
+SERVER=/opt/ztgate/server/bin/vpn_server
 
 # 터널로 들어온 패킷을 이 장비 뒤의 네트워크로 내보낸다 (FORWARD_OUT=<나가는 인터페이스>).
 #
@@ -27,7 +27,7 @@ SERVER=/opt/my_vpn/server/bin/vpn_server
 #   그 밖      터널에서 들어와 다른 인터페이스로 나가는 것은 막는다. FORWARD_OUT 하나만
 #             연다.
 #
-# 규칙은 우리 표(table ip my_vpn) 하나에 모은다. 장비에 이미 있는 방화벽 규칙을 고치지
+# 규칙은 우리 표(table ip ztgate) 하나에 모은다. 장비에 이미 있는 방화벽 규칙을 고치지
 # 않고, 지울 때도 그 표만 지우면 된다. firewalld 같은 다른 방화벽이 전달을 막고 있으면
 # 그쪽에서도 열어야 한다 (README).
 forward_up() {
@@ -46,9 +46,9 @@ forward_up() {
 	# 표를 선언한 뒤 지우고 다시 만든다. 한 번에 적용되므로 규칙이 반쯤 들어간 순간이 없고,
 	# 이전 실행이 남긴 표가 있어도 겹치지 않는다.
 	nft -f - <<EOF
-table ip my_vpn
-delete table ip my_vpn
-table ip my_vpn {
+table ip ztgate
+delete table ip ztgate
+table ip ztgate {
 	chain forward {
 		type filter hook forward priority filter; policy accept;
 		iifname "$dev" oifname "$dev" accept
@@ -68,11 +68,11 @@ EOF
 
 case "${1:-}" in
 run)
-	# 상태 소켓은 RuntimeDirectory(/run/my_vpn, root 전용) 안에 둔다. my_vpn_ctl 이 읽는다.
+	# 상태 소켓은 RuntimeDirectory(/run/ztgate, root 전용) 안에 둔다. ztgate_ctl 이 읽는다.
 	# -n / -m 은 아래 tun-up 이 tun 에 붙이는 값과 같아야 한다. 서버가 그대로 클라이언트에
 	# 내려 준다.
 	# -e: 등록 코드의 대기 목록. 서버가 그 코드로 온 기기를 devices.conf 에 직접 올린다.
-	args=(-s /run/my_vpn/status.sock -a /var/log/my_vpn/audit.log -e "$ETC/enroll.conf" -n "$PREFIX" -m "$MTU")
+	args=(-s /run/ztgate/status.sock -a /var/log/ztgate/audit.log -e "$ETC/enroll.conf" -n "$PREFIX" -m "$MTU")
 
 	# 사용자 로그인은 IdP 설정이 있을 때만 받는다 (README 의 "사용자 로그인").
 	if [ -f "$ETC/idp.conf" ]; then
@@ -81,12 +81,12 @@ run)
 	args+=("$PORT" "$ETC/devices.conf")
 
 	# ACL 은 파일이 있으면 켜진 것이다. 켜고 끄는 것은 시작할 때만 정해지므로, 어떤
-	# 내용으로 떴는지 적어 둔다 — my_vpn_ctl 이 지금 파일과 비교해 재시작이 필요한지 안다.
+	# 내용으로 떴는지 적어 둔다 — ztgate_ctl 이 지금 파일과 비교해 재시작이 필요한지 안다.
 	if [ -f "$ETC/acl.conf" ]; then
 		args+=("$ETC/acl.conf")
-		sha256sum < "$ETC/acl.conf" | cut -d' ' -f1 > /run/my_vpn/acl.applied
+		sha256sum < "$ETC/acl.conf" | cut -d' ' -f1 > /run/ztgate/acl.applied
 	else
-		echo none > /run/my_vpn/acl.applied
+		echo none > /run/ztgate/acl.applied
 	fi
 
 	# stdout 이 journal 로 가면 printf 가 블록 버퍼링된다. 줄 단위로 바꾼다.
@@ -119,7 +119,7 @@ tun-up)
 forward-down)
 	# 서비스가 내려가면 우리가 넣은 규칙도 뺀다. 남겨 두면 다음에 같은 이름으로 뜬 다른
 	# 인터페이스에 걸린다. 표 하나에 모아 뒀으므로 그 표만 지우면 된다.
-	nft delete table ip my_vpn 2>/dev/null || true
+	nft delete table ip ztgate 2>/dev/null || true
 	;;
 
 *)

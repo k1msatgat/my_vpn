@@ -1,5 +1,5 @@
 #!/usr/bin/node
-/* my_vpn_ctl — MCP 서버가 sudo 로 부르는 유일한 프로그램.
+/* ztgate_ctl — MCP 서버가 sudo 로 부르는 유일한 프로그램.
  *
  * MCP 서버(server.js)는 일반 계정으로 돌고 권한이 필요한 일은 전부 여기로 넘긴다.
  * sudoers 는 이 파일 하나만, 인자 없이 부르는 것만 허용한다. 그래서 MCP 쪽이 뚫려도
@@ -17,17 +17,17 @@ const crypto = require('node:crypto');
 const net = require('node:net');
 const { spawnSync } = require('node:child_process');
 
-const UNIT = 'my_vpn.service';
-const ETC = '/etc/my_vpn';
+const UNIT = 'ztgate.service';
+const ETC = '/etc/ztgate';
 const DEVICE_FILE = `${ETC}/devices.conf`;
 const ACL_FILE = `${ETC}/acl.conf`;
 const ENROLL_FILE = `${ETC}/enroll.conf`;
 const ENV_FILE = `${ETC}/server.env`;
-const ACL_APPLIED = '/run/my_vpn/acl.applied';
-const STATUS_SOCK = '/run/my_vpn/status.sock';
-const SERVER_BIN = '/opt/my_vpn/server/bin/vpn_server';
-const AUTH_CHECK = '/opt/my_vpn/test/auth_check.py';
-const AUDIT_FILE = '/var/log/my_vpn/audit.log';
+const ACL_APPLIED = '/run/ztgate/acl.applied';
+const STATUS_SOCK = '/run/ztgate/status.sock';
+const SERVER_BIN = '/opt/ztgate/server/bin/vpn_server';
+const AUTH_CHECK = '/opt/ztgate/test/auth_check.py';
+const AUDIT_FILE = '/var/log/ztgate/audit.log';
 const AUDIT_EVENTS = ['session_open', 'session_close', 'auth_denied', 'access', 'reload', 'enrolled'];
 
 /* 감사 로그는 계속 자란다. 통째로 읽지 않고 끝에서 이만큼만 본다. */
@@ -282,7 +282,7 @@ function readDevices() {
 
 function writeDevices(devices) {
 	const lines = [
-		'# my_vpn 기기 목록. MCP(my_vpn_ctl)가 관리한다 — 손으로 고쳐도 되지만 주석은 줄 끝의',
+		'# ztgate 기기 목록. MCP(ztgate_ctl)가 관리한다 — 손으로 고쳐도 되지만 주석은 줄 끝의',
 		'# 이름표만 남는다. 형식은 README 의 "설정 파일".',
 		'#',
 		'# id (32 hex)  key (64 hex)  tunnel-ip  requirements  # label',
@@ -386,7 +386,7 @@ function readEnroll() {
 
 function writeEnroll(list) {
 	const lines = [
-		'# my_vpn 등록 대기 목록. 관리 도구가 줄을 더하고 서버가 쓰인 줄을 지운다.',
+		'# ztgate 등록 대기 목록. 관리 도구가 줄을 더하고 서버가 쓰인 줄을 지운다.',
 		'# id (32 hex)  key (64 hex)  tunnel-ip  expires (unix)  requirements  # label',
 	];
 
@@ -1096,7 +1096,7 @@ const COMMANDS = {
 	},
 
 	acl_set(a) {
-		const lines = ['# my_vpn ACL. MCP(my_vpn_ctl)가 관리한다. 형식은 README 의 "설정 파일".',
+		const lines = ['# ztgate ACL. MCP(ztgate_ctl)가 관리한다. 형식은 README 의 "설정 파일".',
 			'# src  dst  proto  dport  action'];
 
 		if (!Array.isArray(a.rules) || a.rules.length === 0) {
@@ -1168,11 +1168,11 @@ async function main() {
 	let req, out;
 
 	if (process.getuid() !== 0) {
-		process.stderr.write('my_vpn_ctl: must run as root (sudo -n my_vpn_ctl)\n');
+		process.stderr.write('ztgate_ctl: must run as root (sudo -n ztgate_ctl)\n');
 		return 2;
 	}
 	if (process.argv.length > 2) {
-		process.stderr.write('my_vpn_ctl: takes no arguments; send {"cmd": ...} on stdin\n');
+		process.stderr.write('ztgate_ctl: takes no arguments; send {"cmd": ...} on stdin\n');
 		return 2;
 	}
 

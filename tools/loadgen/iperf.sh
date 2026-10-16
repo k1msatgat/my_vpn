@@ -11,7 +11,7 @@
 # 를 돌린다. 같은 veth 위를 터널 없이 지난 값을 함께 재야 "터널이 얼마를 깎았는가"가 된다.
 #
 #   [서버 ns] vpn_server, iperf3 -s   192.0.2.1 --veth-- 192.0.2.2   vpn_client, iperf3 -c [클라이언트 ns]
-#             tun 10.0.0.1                                          myvpn0 10.0.0.2
+#             tun 10.0.0.1                                          ztgate0 10.0.0.2
 #
 #   direct   iperf3 -c 192.0.2.1   veth 만 지난다 (MTU 1500)
 #   tunnel   iperf3 -c 10.0.0.1    클라이언트 tun -> 암호화 -> UDP -> 서버 -> tun (MTU 1400)
@@ -41,7 +41,7 @@ SRV_VETH=192.0.2.1
 CLI_VETH=192.0.2.2
 SRV_TUN=10.0.0.1
 CLI_TUN=10.0.0.2
-CLI_IF=myvpn0
+CLI_IF=ztgate0
 
 # 측정 전용 기기. 키를 공개해도 된다.
 DEV_ID=c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1
@@ -49,12 +49,12 @@ DEV_KEY=5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a
 
 die() { echo "iperf: $*" >&2; exit 1; }
 
-if [ -z "${MY_VPN_IPERF_NS:-}" ]; then
+if [ -z "${ZTGATE_IPERF_NS:-}" ]; then
 	[ -x "$SERVER" ] && [ -x "$CLIENT" ] || die "build first: make server client"
 	command -v iperf3 >/dev/null || die "iperf3 not found"
 	mkdir -p "$OUT"
 	OUT=$(cd "$OUT" && pwd)
-	export MY_VPN_IPERF_NS=1
+	export ZTGATE_IPERF_NS=1
 	if [ "$(id -u)" -eq 0 ]; then
 		exec unshare -n "$0" "$OUT"
 	fi

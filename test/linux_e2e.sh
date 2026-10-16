@@ -8,7 +8,7 @@
 # 네트워크 네임스페이스 두 개를 veth 로 잇는다. 장비의 네트워크는 건드리지 않는다.
 #
 #   [서버 ns] vpn_server  192.0.2.1 --veth-- 192.0.2.2  vpn_client [클라이언트 ns]
-#             tun 10.0.0.1/24                              myvpn0 (서버가 주는 주소)
+#             tun 10.0.0.1/24                              ztgate0 (서버가 주는 주소)
 #
 # 시나리오
 #   1. 등록 코드로 기기 등록 -> 신원 파일(0600)과 서버 기기 목록에 한 줄
@@ -17,7 +17,7 @@
 #   4. 포스처 -> 기기 정책에 firewall=on 을 걸고 SIGHUP. 다음 keepalive 에서 거절된다.
 #      클라이언트 ns 에 nft 로 인바운드 기본 거부를 걸면 스스로 다시 붙는다.
 #   5. 사용자 로그인 -> group=ops 규칙은 로그인 전에는 닫혀 있다.
-#      로그인 도구(my_vpn_login)가 시험용 OIDC 서버에서 토큰을 받아 파일에 쓰면 클라이언트가
+#      로그인 도구(ztgate_login)가 시험용 OIDC 서버에서 토큰을 받아 파일에 쓰면 클라이언트가
 #      보내고, 그때부터 열린다. 도구가 토큰을 갈아 끼우면 이어지고, 다른 IdP 의 토큰은 거절되며,
 #      아무도 갈아 끼우지 않으면 만료되는 순간 다시 닫힌다. 터널은 그동안 그대로다.
 #   6. 커넥터 -> 내부망(198.51.100.0/24) 안의 커넥터가 서버로 나가는 세션을 열면, 클라이언트의
@@ -40,14 +40,14 @@ CLI_VETH=192.0.2.2
 SRV_TUN=10.0.0.1
 CLI_TUN=10.0.0.2
 ROUTED_NET=198.51.100.0/24	# ACL 의 allow 목적지 -> 서버가 경로로 내려 준다
-CLI_IF=myvpn0
+CLI_IF=ztgate0
 # 0-9 와 I L O U 를 뺀 대문자 25자 (proto.h 의 ENROLL_CODE_LEN). 테스트용 고정 값.
 CODE=7K2QF-9XWM4-ABCDE-FGHJK-MNPQR
 KEEPALIVE_WAIT=15		# keepalive 주기(10초) + 여유
 
-if [ -z "${MY_VPN_E2E_NS:-}" ]; then
+if [ -z "${ZTGATE_E2E_NS:-}" ]; then
 	[ -x "$SERVER" ] && [ -x "$CLIENT" ] || { echo "build first: make server client" >&2; exit 1; }
-	export MY_VPN_E2E_NS=1
+	export ZTGATE_E2E_NS=1
 	if [ "$(id -u)" -eq 0 ]; then
 		exec unshare -n "$0" "$@"
 	fi
@@ -241,7 +241,7 @@ probe_denied() {
 check "login: group=ops rule is closed before anyone logs in" probe_denied
 check "login: the server says nobody is logged in" log_has "$SLOG" "(logged in: nobody)"
 
-# 로그인 도구(client/my_vpn_login)가 기기 인가로 토큰을 받아 파일에 쓰고, 끝나기 전에 갈아
+# 로그인 도구(client/ztgate_login)가 기기 인가로 토큰을 받아 파일에 쓰고, 끝나기 전에 갈아
 # 끼운다. IdP 자리에는 시험용 OIDC 서버(tools/idp/mock_oidc.py)를 둔다. 토큰 수명을 12초로
 # 짧게 줘서 갱신과 만료를 이 시험 안에서 본다.
 TOKEN_TTL=12
@@ -249,7 +249,7 @@ python3 "$ROOT_DIR/tools/idp/mock_oidc.py" "$IDP" 18080 alice --groups ops,dev -
 	> "$WORK/idp.log" 2>&1 &
 IDP_PID=$!
 wait_for 3 sh -c "python3 -c 'import socket; socket.create_connection((\"127.0.0.1\", 18080))'"
-python3 "$ROOT_DIR/client/my_vpn_login" --issuer http://127.0.0.1:18080 --client-id my_vpn \
+python3 "$ROOT_DIR/client/ztgate_login" --issuer http://127.0.0.1:18080 --client-id ztgate \
 	--token-file "$TOKEN" --keep > "$WORK/login.log" 2>&1 &
 LOGIN_PID=$!
 
@@ -323,13 +323,13 @@ check "connector: the server says the connector is not connected" \
 	log_has "$SLOG" "[drop] connector $CON_ID is not connected"
 
 # 클라이언트처럼 nsenter 를 바로 불러야 $! 로 멈출 수 있다.
-nsenter -t "$NS2_PID" -n --preserve-credentials "$CLIENT" -k "$WORK/connector" -i myvpn1 connector 192.0.3.1 "$PORT" v-lan \
+nsenter -t "$NS2_PID" -n --preserve-credentials "$CLIENT" -k "$WORK/connector" -i ztgate1 connector 192.0.3.1 "$PORT" v-lan \
 	> "$WORK/connector.log" 2>&1 &
 CON_PID=$!
 check "connector: session established" wait_for 10 log_has "$WORK/connector.log" "] connected"
 check "connector: forwarding and NAT are set up" log_has "$WORK/connector.log" "[connector] forwarding 10.0.0.0/24"
 check "connector: no route to its own network is pushed into the tunnel" \
-	sh -c "! nsenter -t $NS2_PID -n --preserve-credentials ip route show 198.51.100.0/24 | grep -q myvpn1"
+	sh -c "! nsenter -t $NS2_PID -n --preserve-credentials ip route show 198.51.100.0/24 | grep -q ztgate1"
 check "connector: the client reaches $RESOURCE through the connector" ping_ok "$RESOURCE"
 check "connector: the server relayed it instead of using its own tun" log_has "$SLOG" "[udp->connector]"
 
@@ -348,7 +348,7 @@ check "connector: the ACL still applies (udp/53 to $RESOURCE is not allowed)" \
 
 kill "$CON_PID"; wait "$CON_PID" 2>/dev/null; CON_PID=
 check "connector: its nft table is removed when it stops" \
-	sh -c "! nsenter -t $NS2_PID -n --preserve-credentials nft list table ip my_vpn_connector"
+	sh -c "! nsenter -t $NS2_PID -n --preserve-credentials nft list table ip ztgate_connector"
 check "connector: with the connector gone, its network is unreachable again" ping_fails "$RESOURCE"
 
 echo

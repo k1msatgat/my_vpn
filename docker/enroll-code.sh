@@ -17,7 +17,7 @@
 
 set -eu
 
-ENROLL=${ENROLL_FILE:-/etc/my_vpn/enroll.conf}
+ENROLL=${ENROLL_FILE:-/etc/ztgate/enroll.conf}
 # 0-9 와 헷갈리는 글자(I L O U)를 뺀 대문자 32개 (proto.h 의 ENROLL_CODE_LEN 과 함께)
 ALPHABET=0123456789ABCDEFGHJKMNPQRSTVWXYZ
 CODE_LEN=25

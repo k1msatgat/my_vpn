@@ -135,7 +135,7 @@ int identity_save(const char *path, const identity_t *dev)
 	}
 	dir = dirname(dir_buf);
 
-	/* 기본 경로(/var/lib/my_vpn)는 처음에 없다. 한 단계만 만든다. */
+	/* 기본 경로(/var/lib/ztgate)는 처음에 없다. 한 단계만 만든다. */
 	if (mkdir(dir, IDENTITY_DIR_MODE) < 0 && errno != EEXIST) {
 		perror(dir);
 		return IDENTITY_ERROR;

@@ -86,7 +86,7 @@ jobs:
         run: docker/demo.sh
 
       - name: Image size
-        run: docker image ls my_vpn --format '{{.Repository}} {{.Size}}'
+        run: docker image ls ztgate --format '{{.Repository}} {{.Size}}'
 
   # 서버 데이터 경로의 처리량. 개발 장비는 CPU 가 하나라 서버와 부하 생성기를 같이
   # 띄우면 서로 CPU 를 뺏는다 — 러너(4 vCPU)에서 둘을 다른 CPU 에 묶어 잰다.

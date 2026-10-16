@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""시험용 OIDC 서버. client/my_vpn_login 의 흐름을 IdP 없이 끝까지 돌려 보려고 만든다.
+"""시험용 OIDC 서버. client/ztgate_login 의 흐름을 IdP 없이 끝까지 돌려 보려고 만든다.
 
     tools/idp/mock_oidc.py <keys-dir> <port> <user> [--groups ops] [--ttl 600]
 
@@ -7,7 +7,7 @@ mint.py keys 로 만든 키로 토큰을 발급한다. 기기 인가는 첫 번�
 (authorization_pending)을 한 번 돌려준 뒤 승인된 것으로 친다 — 사람이 브라우저에서 로그인한
 것처럼. refresh token 으로 새 토큰도 준다. 127.0.0.1 에서만 듣는다.
 
-실제 IdP 와의 호환은 이것으로 확인되지 않는다. 확인되는 것은 my_vpn_login 이 RFC 8628 의
+실제 IdP 와의 호환은 이것으로 확인되지 않는다. 확인되는 것은 ztgate_login 이 RFC 8628 의
 순서(발견 -> 기기 코드 -> 폴링 -> 토큰 -> 갱신)대로 움직이는지다.
 """
 

@@ -1,10 +1,10 @@
-# my_vpn 서버와 Linux 클라이언트를 한 이미지에 담는다. 첫 인자로 고른다.
+# ztgate 서버와 Linux 클라이언트를 한 이미지에 담는다. 첫 인자로 고른다.
 #
-#   docker build -t my_vpn .
+#   docker build -t ztgate .
 #   docker run --cap-add NET_ADMIN --device /dev/net/tun -p 9000:9000/udp \
-#       -v my_vpn_etc:/etc/my_vpn my_vpn server
+#       -v ztgate_etc:/etc/ztgate ztgate server
 #   docker run --cap-add NET_ADMIN --device /dev/net/tun -e SERVER=<ip> -e ENROLL_CODE=<code> \
-#       -v my_vpn_id:/var/lib/my_vpn my_vpn client
+#       -v ztgate_id:/var/lib/ztgate ztgate client
 #
 # --privileged 는 쓰지 않는다. tun 을 만들고 주소 / 경로 / nft 를 다루는 데 필요한 것은
 # CAP_NET_ADMIN 과 /dev/net/tun 뿐이다. compose 로 서버 + 클라이언트를 돌리려면 docker/demo.sh.
@@ -41,7 +41,7 @@ COPY docker/entrypoint.sh docker/enroll-code.sh /usr/local/bin/
 
 # 서버의 기기 목록 / ACL / 등록 대기 목록 / 감사 로그, 클라이언트의 신원. 컨테이너를 다시
 # 만들어도 남아야 하는 것들이다.
-VOLUME ["/etc/my_vpn", "/var/lib/my_vpn"]
+VOLUME ["/etc/ztgate", "/var/lib/ztgate"]
 EXPOSE 9000/udp
 
 ENTRYPOINT ["entrypoint.sh"]

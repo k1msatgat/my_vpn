@@ -363,7 +363,7 @@ static int enroll_file_rewrite(void)
 		return -1;
 	}
 
-	fputs("# my_vpn 등록 대기 목록. 관리 도구가 줄을 더하고 서버가 쓰인 줄을 지운다.\n"
+	fputs("# ztgate 등록 대기 목록. 관리 도구가 줄을 더하고 서버가 쓰인 줄을 지운다.\n"
 	      "# id (32 hex)  key (64 hex)  tunnel-ip  expires (unix)  requirements  # label\n", out);
 
 	for (i = 0; i < count; i++) {

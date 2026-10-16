@@ -8,20 +8,20 @@
 #
 # 두 컨테이너 모두 CAP_NET_ADMIN 과 /dev/net/tun 만 받는다 (--privileged 아님).
 
-name: my_vpn
+name: ztgate
 
 services:
   server:
     build: .
-    image: my_vpn
+    image: ztgate
     command: server
     cap_add: [NET_ADMIN]
     devices: ["/dev/net/tun:/dev/net/tun"]
-    volumes: ["server-etc:/etc/my_vpn"]
+    volumes: ["server-etc:/etc/ztgate"]
     ports: ["9000:9000/udp"]
 
   client:
-    image: my_vpn
+    image: ztgate
     command: client
     depends_on: [server]
     environment:
@@ -29,7 +29,7 @@ services:
       ENROLL_CODE: ${ENROLL_CODE:-}
     cap_add: [NET_ADMIN]
     devices: ["/dev/net/tun:/dev/net/tun"]
-    volumes: ["client-id:/var/lib/my_vpn"]
+    volumes: ["client-id:/var/lib/ztgate"]
 
 volumes:
   server-etc:

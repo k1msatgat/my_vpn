@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-/* my_vpn MCP 서버 (stdio).
+/* ztgate MCP 서버 (stdio).
  *
  * AI 클라이언트가 ssh 로 이 프로그램을 띄우고 stdin/stdout 으로 MCP 를 말한다.
  * 여기에는 권한도 로직도 없다. 도구의 입력 형식을 선언하고, 요청을 그대로
- * my_vpn_ctl(root 헬퍼)에 넘기고, 답을 돌려줄 뿐이다. 검증과 실제 동작은 ctl.cjs 에 있다.
+ * ztgate_ctl(root 헬퍼)에 넘기고, 답을 돌려줄 뿐이다. 검증과 실제 동작은 ctl.cjs 에 있다.
  *
  * stdout 은 프로토콜 전용이다. 사람이 볼 메시지는 stderr 로만 보낸다. */
 
@@ -12,7 +12,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 
-const CTL = '/usr/local/sbin/my_vpn_ctl';
+const CTL = '/usr/local/sbin/ztgate_ctl';
 const CTL_TIMEOUT_MS = 200000;	/* auth_check 가 가장 길다 */
 
 function ctl(request) {
@@ -28,12 +28,12 @@ function ctl(request) {
 
 		child.stdout.on('data', (d) => { out += d; });
 		child.stderr.on('data', (d) => { err += d; });
-		child.on('error', (e) => resolve({ ok: false, error: `cannot run my_vpn_ctl: ${e.message}` }));
+		child.on('error', (e) => resolve({ ok: false, error: `cannot run ztgate_ctl: ${e.message}` }));
 		child.on('close', () => {
 			try {
 				resolve(JSON.parse(out));
 			} catch (e) {
-				resolve({ ok: false, error: `my_vpn_ctl gave no answer: ${err.trim() || 'no output'}` });
+				resolve({ ok: false, error: `ztgate_ctl gave no answer: ${err.trim() || 'no output'}` });
 			}
 		});
 		child.stdin.end(JSON.stringify(request));
@@ -64,9 +64,9 @@ const READ = { readOnlyHint: true, openWorldHint: false };
 const WRITE = { readOnlyHint: false, destructiveHint: false, openWorldHint: false };
 const DISRUPT = { readOnlyHint: false, destructiveHint: true, openWorldHint: false };
 
-const server = new McpServer({ name: 'my_vpn', version: '0.1.0' }, {
+const server = new McpServer({ name: 'ztgate', version: '0.1.0' }, {
 	instructions: [
-		'Controls the my_vpn server (a UDP/TUN VPN with device authentication and posture checks) on this Linux host.',
+		'Controls the ztgate server (a UDP/TUN VPN with device authentication and posture checks) on this Linux host.',
 		'Clients are separate Windows machines and are not controlled from here; a client is cut off or admitted by changing its entry in the device list.',
 		'Device changes (device_add / device_update / device_remove) and ACL rule changes apply to the running server immediately without dropping sessions. Only turning the ACL on for the first time or off (acl_clear) needs server_restart; restart_required tells you when.',
 		'Call server_status first: it shows whether the server is up, who is connected and why a device was recently rejected.',

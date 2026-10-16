@@ -1,8 +1,8 @@
 {
-  "name": "my-vpn-mcp",
+  "name": "ztgate-mcp",
   "version": "0.1.0",
   "private": true,
-  "description": "MCP server that controls the my_vpn Linux server",
+  "description": "MCP server that controls the ztgate Linux server",
   "type": "module",
   "main": "server.js",
   "engines": {

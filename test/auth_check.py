@@ -538,7 +538,7 @@ def checksum(data):
 
 def echo_request(src, dst, seq):
     """IPv4 + ICMP echo request 한 개."""
-    icmp = struct.pack("!BBHHH", 8, 0, 0, 0x4d56, seq) + b"my_vpn auth_check"
+    icmp = struct.pack("!BBHHH", 8, 0, 0, 0x4d56, seq) + b"ztgate auth_check"
     icmp = icmp[:2] + struct.pack("!H", checksum(icmp)) + icmp[4:]
     ip = struct.pack("!BBHHHBBH4s4s", 0x45, 0, 20 + len(icmp), seq, 0, 64, 1, 0, src, dst)
     ip = ip[:10] + struct.pack("!H", checksum(ip)) + ip[12:]
@@ -583,7 +583,7 @@ def data_tests():
                send(data(idx, 0, ping(1))), "echo reply")
 
     # 터널 안의 내용이 와이어에 그대로 보이지 않는지. 보낸 것도, 돌아온 것도.
-    marker = b"my_vpn auth_check"
+    marker = b"ztgate auth_check"
     sent = data(idx, 1, ping(2))
     r = send(sent)
     expect("the payload is not readable on the wire",
@@ -1395,8 +1395,8 @@ def login_tests(srv, acl_path, idp_dir):
     expect("login rejects: longer than LOGIN_TOKEN_MAX", status(login(c, idx, "a" * 1960)), LOGIN_MALFORMED)
 
     # aud 는 배열일 수 있다. 그룹 이름에 쓸 수 없는 글자가 있으면 그 그룹만 빠진다.
-    r = login(c, idx, tok("carol", aud=["account", "my_vpn"], groups=["ops", 'bad"group']))
-    expect("login: aud as a list containing my_vpn", status(r), LOGIN_OK)
+    r = login(c, idx, tok("carol", aud=["account", "ztgate"], groups=["ops", 'bad"group']))
+    expect("login: aud as a list containing ztgate", status(r), LOGIN_OK)
     sess = [s for s in srv.status()["sessions"] if s["session_idx"] == "%08x" % idx]
     expect("login: an unusable group name is dropped", sess and sess[0]["user"]["groups"], ["ops"])
 

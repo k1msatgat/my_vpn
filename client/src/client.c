@@ -37,7 +37,7 @@
 #define POSTURE_POLL_MSEC	2000
 #define SERVER_TIMEOUT_MSEC	(SERVER_TIMEOUT_SEC * 1000)
 
-#define TUN_IFNAME_DEFAULT	"myvpn0"
+#define TUN_IFNAME_DEFAULT	"ztgate0"
 
 #define EXIT_DENIED	2	/* 서버가 거절했다 — 스크립트가 "닿지 못함"과 구분할 수 있게 */
 
@@ -189,7 +189,7 @@ static void netcfg_refresh(client_t *c, const uint8_t *body, int len)
 /* ---- 사용자 로그인 ------------------------------------------------------------
  *
  * 클라이언트는 IdP 와 직접 이야기하지 않는다. 로그인(브라우저, 기기 코드)은 별도의 도구가
- * 하고 받은 토큰을 파일에 적는다 (client/my_vpn_login). 클라이언트는 그 파일을 지켜보다가
+ * 하고 받은 토큰을 파일에 적는다 (client/ztgate_login). 클라이언트는 그 파일을 지켜보다가
  * 바뀌면 읽어서 세션 안으로 보낸다. 토큰을 새로 받는 것(refresh)도 그 도구의 일이라,
  * 터널을 도는 이 프로세스에는 HTTPS 도 IdP 별 차이도 들어오지 않는다. */
 

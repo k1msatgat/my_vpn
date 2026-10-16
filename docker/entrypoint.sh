@@ -1,7 +1,7 @@
 #!/bin/sh
 # 컨테이너의 시작점.
 #
-#   server          /etc/my_vpn 의 설정으로 vpn_server 를 띄우고, 생긴 tun 에 서버의 터널
+#   server          /etc/ztgate 의 설정으로 vpn_server 를 띄우고, 생긴 tun 에 서버의 터널
 #                   주소를 붙인다. 호스트에서 하던 `ip addr add 10.0.0.1/24 dev tun0` 이다.
 #   client          SERVER 로 접속한다. 신원 파일이 없고 ENROLL_CODE 가 있으면 먼저 등록한다.
 #   enroll-code ... 등록 코드를 만든다 (enroll-code.sh). 서버 컨테이너에서 docker exec 로.
@@ -9,12 +9,12 @@
 #
 # 환경 변수
 #   PORT=9000  TUN_ADDR=10.0.0.1/24  MTU=1400        (서버)
-#   SERVER=<ip 또는 이름>  ENROLL_CODE=<code>  IFNAME=myvpn0   (클라이언트)
+#   SERVER=<ip 또는 이름>  ENROLL_CODE=<code>  IFNAME=ztgate0   (클라이언트)
 
 set -eu
 
-ETC=/etc/my_vpn
-IDENT=/var/lib/my_vpn/device
+ETC=/etc/ztgate
+IDENT=/var/lib/ztgate/device
 PORT=${PORT:-9000}
 
 # stdout 이 docker 로그(파이프)라 그냥 두면 블록 단위로 모였다가 나온다. 줄 단위로.
@@ -63,7 +63,7 @@ server() {
 
 client() {
 	: "${SERVER:?set SERVER to the server address}"
-	IFNAME=${IFNAME:-myvpn0}
+	IFNAME=${IFNAME:-ztgate0}
 
 	# vpn_client 는 IPv4 주소만 받는다. compose 의 서비스 이름 같은 것은 여기서 푼다.
 	addr=$(getent ahostsv4 "$SERVER" | awk 'NR == 1 { print $1 }')

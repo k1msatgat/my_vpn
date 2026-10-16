@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 서버 장비에서 실행. vpn_server 를 systemd 서비스로, MCP 서버를 /opt/my_vpn 에 설치한다.
+# 서버 장비에서 실행. vpn_server 를 systemd 서비스로, MCP 서버를 /opt/ztgate 에 설치한다.
 # 소스를 고친 뒤 다시 실행하면 갱신된다 (설정과 기기 목록은 건드리지 않는다).
 #
 #   mcp/install.sh [mcp-user]     mcp-user: MCP 서버를 돌릴 계정 (기본: 지금 계정).
@@ -15,9 +15,9 @@ MCP_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ROOT_DIR=$(dirname "$MCP_DIR")
 MCP_USER=${1:-$(id -un)}
 
-OPT=/opt/my_vpn
-ETC=/etc/my_vpn
-CTL=/usr/local/sbin/my_vpn_ctl
+OPT=/opt/ztgate
+ETC=/etc/ztgate
+CTL=/usr/local/sbin/ztgate_ctl
 
 say() { printf '[install] %s\n' "$*"; }
 die() { printf '[install] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -45,7 +45,7 @@ sudo install -m 644 "$MCP_DIR/package.json" "$MCP_DIR/server.js" "$OPT/mcp/"
 sudo chown -R root:root "$OPT"
 
 # ssh 로 부를 이름. 비대화형 ssh 의 PATH 에도 /usr/local/bin 은 들어 있다.
-printf '#!/bin/sh\nexec /usr/bin/node %s/mcp/server.js\n' "$OPT" | sudo install -m 755 /dev/stdin /usr/local/bin/my_vpn_mcp
+printf '#!/bin/sh\nexec /usr/bin/node %s/mcp/server.js\n' "$OPT" | sudo install -m 755 /dev/stdin /usr/local/bin/ztgate_mcp
 
 # 설정은 처음 한 번만 만든다. 기기 목록에는 키가 있어 서버가 600 이 아니면 읽지 않는다.
 sudo install -d -m 700 "$ETC"
@@ -57,7 +57,7 @@ if ! sudo test -e "$ETC/devices.conf"; then
 	printf '# id (32 hex)  key (64 hex)  tunnel-ip  requirements  # label\n' | sudo install -m 600 /dev/stdin "$ETC/devices.conf"
 fi
 
-sudo install -m 644 "$MCP_DIR/my_vpn.service" /etc/systemd/system/my_vpn.service
+sudo install -m 644 "$MCP_DIR/ztgate.service" /etc/systemd/system/ztgate.service
 sudo systemctl daemon-reload
 
 # 헬퍼 하나만, 인자 없이 부르는 것만 허용한다. 잘못된 sudoers 는 sudo 전체를 막으므로
@@ -66,9 +66,9 @@ TMP=$(mktemp)
 trap 'rm -f "$TMP"' EXIT
 printf '%s ALL=(root) NOPASSWD: %s ""\n' "$MCP_USER" "$CTL" > "$TMP"
 sudo visudo -cf "$TMP" > /dev/null || die "generated sudoers file is invalid"
-sudo install -m 440 "$TMP" /etc/sudoers.d/my_vpn_mcp
+sudo install -m 440 "$TMP" /etc/sudoers.d/ztgate_mcp
 
-say "installed. MCP command for $MCP_USER: my_vpn_mcp"
-if systemctl is-active --quiet my_vpn.service; then
-	say "my_vpn.service is running the old binary until it is restarted"
+say "installed. MCP command for $MCP_USER: ztgate_mcp"
+if systemctl is-active --quiet ztgate.service; then
+	say "ztgate.service is running the old binary until it is restarted"
 fi
