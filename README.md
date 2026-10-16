@@ -14,7 +14,7 @@
 ![identity](https://img.shields.io/badge/identity-device%20%2B%20OIDC%20user-6b4fbb)
 ![windows](https://img.shields.io/badge/also-Windows%20client-888)
 
-[한눈에 보기](#한눈에-보기) · [시작하기](#시작하기) · [서버 구조](#서버-구조) · [프로토콜](#프로토콜) · [보안 모델](#보안-모델) · [표준 프로토콜과의 대조](#표준-프로토콜과의-대조) · [현재 한계](#현재-한계)
+[한눈에 보기](#한눈에-보기) · [시작하기](#시작하기) · [배포와 운영](#배포와-운영) · [서버 구조](#서버-구조) · [프로토콜](#프로토콜) · [보안 모델](#보안-모델) · [표준 프로토콜과의 대조](#표준-프로토콜과의-대조) · [현재 한계](#현재-한계)
 
 </div>
 
@@ -301,18 +301,9 @@ docker run -d --cap-add NET_ADMIN --device /dev/net/tun \
 </details>
 
 <details>
-<summary><b>서비스로 설치하기, 서버 뒤의 네트워크로 내보내기</b></summary>
+<summary><b>서버 뒤의 네트워크로 내보내기</b></summary>
 
 <br/>
-
-`mcp/install.sh`는 서버를 systemd 서비스(`my_vpn.service`)로 설치하고, 설정을 `/etc/my_vpn`에 둡니다. 함께 설치되는 root 헬퍼 `my_vpn_ctl`과 MCP 서버를 쓰면 AI 에이전트가 SSH로 붙어 서버를 올리고 내리고, 등록 코드를 만들고, ACL을 바꾸고, 감사 로그를 볼 수 있습니다. 셸은 열어 주지 않고, sudoers는 `my_vpn_ctl`을 인자 없이 부르는 것 하나만 허용합니다.
-
-```bash
-mcp/install.sh
-sudo systemctl start my_vpn
-echo '{"cmd":"enroll_create","label":"laptop"}' | sudo my_vpn_ctl
-claude mcp add my_vpn -- ssh -T <user>@<서버 IP> my_vpn_mcp       # AI 클라이언트 쪽
-```
 
 기기가 서버 뒤의 네트워크(예: `10.101.0.0/16`)에 닿으려면 ACL의 `allow` 규칙, IP 전달, 주소 변환(NAT)이 필요합니다. 서비스로 설치했다면 `/etc/my_vpn/server.env`에 `FORWARD_OUT=eth0`을 적으면 서비스가 뜰 때 IP 전달과 NAT, "안에서 시작한 연결의 답만 들인다"는 nft 규칙을 자기 표(`table ip my_vpn`)에 넣고 내려갈 때 뺍니다. 서버가 그 네트워크 안에 있지 않다면 아래의 커넥터를 씁니다.
 
@@ -346,6 +337,68 @@ sudo ./client/bin/vpn_client connector <서버 IP> 9000 eth0
 - **커넥터가 붙어 있지 않으면 그 대역으로 가는 패킷은 버립니다.** 서버의 tun으로 대신 보내지 않습니다 — 같은 목적지가 커넥터의 상태에 따라 다른 길로 가면 정책을 읽을 수 없습니다.
 
 </details>
+
+## 배포와 운영
+
+위의 "장비 두 대로 띄우기"는 손으로 띄우는 방법입니다. 서버를 계속 돌릴 장비에는 systemd 서비스로 설치합니다.
+
+### 서비스로 설치하기
+
+```bash
+mcp/install.sh                 # 일반 계정으로 실행한다. 필요한 곳에서 sudo 를 스스로 부른다
+sudo systemctl enable --now my_vpn
+```
+
+설치 스크립트는 서버를 빌드해 `/opt/my_vpn`에 root 소유로 복사하고, 처음 한 번만 `/etc/my_vpn`에 설정을 만듭니다. 다시 실행하면 실행 파일만 바꾸고 설정과 기기 목록은 건드리지 않습니다. 관리 헬퍼 `my_vpn_ctl`과 MCP 서버도 함께 설치하므로 Node.js(npm)가 필요합니다.
+
+| 경로 | 내용 |
+|---|---|
+| `/etc/my_vpn/server.env` | `PORT`, `TUN_IP`, `PREFIX`, `MTU`, `FORWARD_OUT`(서버 뒤로 내보낼 인터페이스, 기본 꺼짐) |
+| `/etc/my_vpn/devices.conf` | 기기 목록. 등록 코드로 온 기기를 서버가 직접 적는다 |
+| `/etc/my_vpn/enroll.conf` | 등록 코드의 대기 목록 |
+| `/etc/my_vpn/acl.conf` | 있으면 ACL이 켜진다 |
+| `/etc/my_vpn/idp.conf`, `jwks.json` | 있으면 사용자 로그인을 받는다 |
+| `/var/log/my_vpn/audit.log` | 감사 로그 (사건마다 JSON 한 줄) |
+| `/run/my_vpn/status.sock` | 상태 소켓 (root 전용) |
+
+유닛은 서버에 `CAP_NET_ADMIN`만 남기고(`CapabilityBoundingSet`), `ProtectSystem=strict`로 파일 시스템을 읽기 전용으로 만든 뒤 `/etc/my_vpn`과 로그 디렉터리만 쓰게 엽니다. 설정이 틀려 서버가 스스로 1로 끝나면 다시 올리지 않고, 그 밖의 이유로 죽으면 2초 뒤에 다시 올립니다.
+
+### 일상 운영
+
+| 하려는 일 | 방법 |
+|---|---|
+| 기기 추가 | `sudo env ENROLL_FILE=/etc/my_vpn/enroll.conf docker/enroll-code.sh <터널 IP> [조건] -l <이름>`으로 코드를 만들어 건넨다 |
+| 정책 바꾸기 | `acl.conf`나 `devices.conf`를 고치고 `sudo systemctl reload my_vpn`. 붙어 있는 기기는 다음 keepalive(10초 이내)부터 따른다 |
+| 기기 폐기 | `devices.conf`에서 그 줄을 지우고 reload. 다음 keepalive에서 끊긴다 |
+| IdP 키 교체 | 새 JWKS를 `jwks.json`에 받아 두고 reload. 깨진 파일이면 이전 키를 그대로 쓴다 |
+| ACL 켜기 / 끄기 | `acl.conf`를 만들거나 지우고 restart. 켜고 끄는 것은 시작할 때만 정해진다 |
+| 무슨 일이 있었나 | `sudo tail -f /var/log/my_vpn/audit.log` (세션, 거절, 접근, 로그인, 정책 변경) |
+| 지금 누가 붙어 있나 | `echo '{"cmd":"status"}' \| sudo my_vpn_ctl` (세션, 포스처, 사용자, 사유별 거절 수) |
+| 서버 로그 | `journalctl -u my_vpn` |
+
+`my_vpn_ctl`은 표준 입력으로 JSON 명령 하나를 받는 root 헬퍼입니다(`status`, `start` / `stop` / `restart` / `reload`, `logs`, `audit`, `device_*`, `enroll_*`, `acl_get` / `acl_set`). MCP 서버는 이 헬퍼를 감싸 AI 에이전트가 SSH로 같은 일을 하게 합니다. 셸은 열어 주지 않고, sudoers는 `my_vpn_ctl`을 인자 없이 부르는 것 하나만 허용합니다.
+
+```bash
+claude mcp add my_vpn -- ssh -T <user>@<서버 IP> my_vpn_mcp       # AI 클라이언트 쪽 (선택)
+```
+
+### 업그레이드
+
+1. 저장소를 받고 `mcp/install.sh`를 다시 실행한 뒤 `sudo systemctl restart my_vpn`.
+2. **서버와 클라이언트의 프로토콜 버전은 같아야 합니다.** 서버는 버전이 다른 패킷을 헤더에서 버리므로(`[drop] bad header`), 클라이언트에는 서버가 응답하지 않는 것처럼 보입니다. 프로토콜 버전이 바뀌는 업그레이드는 서버와 모든 클라이언트를 함께 올립니다.
+3. 서버를 다시 시작하면 세션은 모두 사라집니다. 클라이언트는 서버에서 30초 동안 아무것도 받지 못하면 스스로 다시 핸드셰이크합니다.
+
+### 문제 해결
+
+| 증상 | 원인과 해결 |
+|---|---|
+| 클라이언트가 `[HS] no response from server` | UDP 포트가 막혔거나(호스트 방화벽, 클라우드 보안 그룹) 서버가 꺼져 있습니다. 서버 로그에 `[drop] bad header`가 찍히면 프로토콜 버전이 다릅니다 |
+| `[HS] denied: unknown device` | 등록되지 않았거나 코드가 만료됐습니다. 감사 로그에서 `enrolled`를 찾습니다 |
+| `[deny] posture does not meet policy` | 기기의 포스처가 정책에 못 미칩니다. 클라이언트에서 `vpn_client posture`로 보고할 값을 보고 `devices.conf`의 조건과 비교합니다 |
+| 연결은 되는데 특정 목적지만 안 됨 | 그 목적지의 `allow` 규칙이 없거나 규칙의 조건(포스처, `user=`, `group=`)이 맞지 않습니다. 감사 로그의 `access` 줄에서 판정을 봅니다 |
+| 로그인이 거절됨 | `vpn_server verify-token /etc/my_vpn/idp.conf < token.txt`가 이유(서명, `iss`, `aud`, `exp`)를 알려 줍니다 |
+| 조건을 적었는데 정책이 바뀌지 않음 | `devices.conf`에서 조건은 터널 IP 바로 뒤에 적습니다. 줄 끝의 `# 이름` 뒤에 붙이면 주석이 됩니다 |
+| 서버가 설정 파일을 읽지 않음 | 키가 든 파일(`devices.conf`, `enroll.conf`, `acl.conf`)은 권한이 `600`이어야 합니다 |
 
 ## 기기 하나가 붙기까지
 
