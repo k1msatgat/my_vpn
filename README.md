@@ -1,16 +1,16 @@
 <div align="center">
 
-# my_vpn
+# ztgate
 
 **Linux에서 C로 설계한 L3 VPN + ZTNA 접근 제어**
 
 등록된 기기만 들어오고, 들어온 뒤에도 계속 확인하고, 허락한 곳에만 닿는다.
 
-[![ci](https://github.com/k1msatgat/my_vpn/actions/workflows/ci.yml/badge.svg)](https://github.com/k1msatgat/my_vpn/actions/workflows/ci.yml)
+[![ci](https://github.com/k1msatgat/ztgate/actions/workflows/ci.yml/badge.svg)](https://github.com/k1msatgat/ztgate/actions/workflows/ci.yml)
 ![server](https://img.shields.io/badge/server-Linux%20%C2%B7%20C%20%C2%B7%20epoll-2f6f4f)
 ![client](https://img.shields.io/badge/client-Linux%20%C2%B7%20C%20%C2%B7%20tun-2f6f4f)
 ![crypto](https://img.shields.io/badge/crypto-ECDH%20P--256%20%C2%B7%20AES--256--GCM-6b4fbb)
-![protocol](https://img.shields.io/badge/protocol-v5-555)
+![protocol](https://img.shields.io/badge/protocol-v6-555)
 ![identity](https://img.shields.io/badge/identity-device%20%2B%20OIDC%20user-6b4fbb)
 ![windows](https://img.shields.io/badge/also-Windows%20client-888)
 
@@ -20,7 +20,7 @@
 
 ---
 
-**my_vpn**은 Linux 서버와 Linux 클라이언트 사이에 L3 터널을 만들고, 그 터널을 지나는 모든 패킷에 "이 기기가 지금 여기에 닿아도 되는가"를 묻는 VPN입니다.
+**ztgate**는 Linux 서버와 Linux 클라이언트 사이에 L3 터널을 만들고, 그 터널을 지나는 모든 패킷에 "이 기기가 지금 여기에 닿아도 되는가"를 묻는 VPN입니다.
 WireGuard나 IPsec이 하는 일(터널, 키 합의, 암호화)과 Tailscale·NetBird 같은 ZTNA 제품이 그 위에 얹는 일(기기 등록, 단말 상태 확인, 정책)을 외부 VPN 라이브러리 없이 C로 처음부터 짰습니다.
 
 서버는 epoll 단일 스레드로 TUN과 UDP 소켓을 함께 처리합니다. 기기마다 다른 키로 챌린지-응답 인증을 하고, 핸드셰이크마다 일회용 ECDH P-256 키와 기기 키를 HKDF로 섞어 방향별 AES-256-GCM 세션 키를 만듭니다. 세션 패킷은 64개 폭의 재전송 창을 지나 ACL(첫 일치, 기본 거부)에 대 본 뒤에만 tun에 쓰이고, 클라이언트가 10초마다 다시 보고하는 포스처(커널 버전, 방화벽)가 정책에 못 미치면 세션 중에도 끊깁니다. 터널 주소와 경로는 클라이언트가 아니라 서버가 정해서 내려 줍니다. 그 장비를 **누가** 쓰는지는 회사 IdP(OIDC)에서 받은 토큰으로 확인합니다 — 서버는 JWT의 서명을 IdP의 공개키로 검증하고, ACL 규칙에 `user=` / `group=`을 적어 그 사람에게만 엽니다.
@@ -32,7 +32,7 @@ WireGuard나 IPsec이 하는 일(터널, 키 합의, 암호화)과 Tailscale·Ne
 | 어디까지 가는가 | 내부망 전체 | **적어서 연 곳만.** 규칙이 없으면 터널 대역 밖으로 나가지 못한다 |
 | 설정은 누가 갖는가 | 클라이언트의 설정 파일 | **서버.** 터널 주소와 경로를 서버가 내려 주고, 정책을 고치면 붙어 있는 기기가 따라온다 |
 
-> **상태: v0.5 (프로토콜 v5), [변경 기록](CHANGELOG.md).** Linux 서버, Linux 클라이언트, 앱 커넥터, Windows 클라이언트(서비스 + GUI)가 있습니다. CI가 푸시마다 서버 프로토콜 시험 237개, 전체 경로 시험 44개, Keycloak 연동 시험을 돌립니다. 암호 프로토콜은 아직 독립적인 보안 검토를 받지 않았습니다. 운영 환경에 두기 전에 [보안 모델](#보안-모델)과 [알려진 제약](#알려진-제약)을 먼저 읽어 주세요.
+> **상태: v0.6 (프로토콜 v6), [변경 기록](CHANGELOG.md).** 0.6.0에서 이름을 my_vpn에서 ztgate로 바꿨습니다. Linux 서버, Linux 클라이언트, 앱 커넥터, Windows 클라이언트(서비스 + GUI)가 있습니다. CI가 푸시마다 서버 프로토콜 시험 237개, 전체 경로 시험 44개, Keycloak 연동 시험을 돌립니다. 암호 프로토콜은 아직 독립적인 보안 검토를 받지 않았습니다. 운영 환경에 두기 전에 [보안 모델](#보안-모델)과 [알려진 제약](#알려진-제약)을 먼저 읽어 주세요.
 
 ## 한눈에 보기
 
@@ -41,9 +41,9 @@ flowchart LR
     subgraph CLI["Linux 클라이언트"]
         direction TB
         VC["vpn_client<br/><i>epoll · 포스처 · 설정 적용</i>"]
-        CT(["tun (myvpn0)<br/>10.0.0.2 — 서버가 준 주소"])
+        CT(["tun (ztgate0)<br/>10.0.0.2 — 서버가 준 주소"])
         ID[("신원 파일<br/>0600")]
-        LG["my_vpn_login<br/><i>OIDC 기기 인가</i>"]
+        LG["ztgate_login<br/><i>OIDC 기기 인가</i>"]
         TK[("토큰 파일<br/>0600")]
         ID --> VC
         LG --> TK --> VC
@@ -88,8 +88,8 @@ flowchart LR
 | **`vpn_server`** | Linux, root | 기기를 인증하고, 세션마다 키를 합의하고, 패킷마다 ACL에 대 본 뒤 tun에 쓴다. epoll 단일 스레드 |
 | **`vpn_client`** | Linux, root | 등록 코드로 기기를 올리고, 인증 핸드셰이크 뒤에 tun을 만들어 서버가 준 주소·MTU·경로를 넣는다. 10초마다 포스처(커널 버전, nftables 방화벽)를 다시 보고한다. 토큰 파일(`-t`)이 바뀌면 세션 안으로 보낸다 |
 | **`vpn_client connector`** | Linux, 내부망 안 | 앱 커넥터. 서버로 나가는 세션을 열고, 서버가 보내 준 내부망 행 패킷을 LAN으로 내보낸다 (NAT, 답만 들인다). 내부망에 들어오는 포트를 열지 않는다 |
-| **`my_vpn_login`** | Linux, 일반 사용자 | IdP에 OAuth 기기 인가(RFC 8628)로 로그인해 토큰을 파일에 쓰고, 끝나기 전에 갈아 끼운다. 비밀번호는 브라우저에서 IdP에만 넣는다 |
-| **MCP 서버 / `my_vpn_ctl`** | Linux | 관리자(또는 AI 에이전트)가 서버를 올리고 내리고, 등록 코드를 만들고, 정책을 바꾸고, 감사 로그를 본다 |
+| **`ztgate_login`** | Linux, 일반 사용자 | IdP에 OAuth 기기 인가(RFC 8628)로 로그인해 토큰을 파일에 쓰고, 끝나기 전에 갈아 끼운다. 비밀번호는 브라우저에서 IdP에만 넣는다 |
+| **MCP 서버 / `ztgate_ctl`** | Linux | 관리자(또는 AI 에이전트)가 서버를 올리고 내리고, 등록 코드를 만들고, 정책을 바꾸고, 감사 로그를 본다 |
 | **`tools/loadgen`** | Linux | 서버 데이터 경로의 부하 생성기. 클라이언트와 같은 프로토콜 코드를 쓴다 |
 | Windows 클라이언트 | Windows | 같은 프로토콜의 추가 구현 — 서비스 + GUI. [아래](#windows-클라이언트) |
 
@@ -172,14 +172,14 @@ sudo ./client/bin/vpn_client enroll <서버 IP> 9000 7K2QF-9XWM4-ABCDE-FGHJK-MNP
 sudo ./client/bin/vpn_client run <서버 IP> 9000
 ```
 
-`enroll`은 기기의 ID와 키를 새로 만들어 코드로 연 암호화된 세션 안에서 서버에 올리고, 서버가 받아 준 뒤에 `/var/lib/my_vpn/device`(0600)에 저장합니다. `run`은 서버가 받아 준 뒤에야 tun을 만들고, 서버가 준 주소, MTU, 경로를 넣습니다. 클라이언트에 적는 것은 서버 주소뿐입니다.
+`enroll`은 기기의 ID와 키를 새로 만들어 코드로 연 암호화된 세션 안에서 서버에 올리고, 서버가 받아 준 뒤에 `/var/lib/ztgate/device`(0600)에 저장합니다. `run`은 서버가 받아 준 뒤에야 tun을 만들고, 서버가 준 주소, MTU, 경로를 넣습니다. 클라이언트에 적는 것은 서버 주소뿐입니다.
 
 ```
 [HS] posture: kernel=331264 firewall=off antivirus=unknown
 [HS] established idx=b892bf00
 [cfg] address 10.0.0.2/24
 [cfg] mtu 1400
-[myvpn0] connected
+[ztgate0] connected
 ```
 
 **5. 터널을 확인합니다.**
@@ -245,32 +245,32 @@ any            any              any    any    deny
 **서버.** IdP의 공개키 묶음(JWKS)을 파일로 받아 두고 `-u`로 설정을 줍니다. 서버는 IdP와 직접 통신하지 않습니다 — 단일 스레드 이벤트 루프가 HTTPS 응답을 기다리는 동안 모든 터널이 멈추기 때문입니다. IdP가 키를 바꾸면 파일을 갈아 끼우고 `SIGHUP`을 보냅니다.
 
 ```bash
-curl -s https://idp.example.com/realms/corp/protocol/openid-connect/certs > /etc/my_vpn/jwks.json
-cat > /etc/my_vpn/idp.conf <<'EOF'
+curl -s https://idp.example.com/realms/corp/protocol/openid-connect/certs > /etc/ztgate/jwks.json
+cat > /etc/ztgate/idp.conf <<'EOF'
 issuer        https://idp.example.com/realms/corp    # 토큰의 iss 와 정확히 같아야 한다
-audience      my_vpn                                 # 토큰의 aud 에 들어 있어야 한다
+audience      ztgate                                 # 토큰의 aud 에 들어 있어야 한다
 jwks          jwks.json                              # 상대 경로는 이 파일 기준
 user-claim    preferred_username                     # 기본 sub
 groups-claim  groups                                 # 기본 groups
 EOF
-./server/bin/vpn_server verify-token /etc/my_vpn/idp.conf < token.txt    # 서버를 띄우기 전에 토큰 하나를 대 본다
+./server/bin/vpn_server verify-token /etc/ztgate/idp.conf < token.txt    # 서버를 띄우기 전에 토큰 하나를 대 본다
 # ok user=alice groups=ops expires_in=299s
 ```
 
-**클라이언트.** `my_vpn_login`이 기기 인가로 로그인해 토큰을 파일에 쓰고, `vpn_client -t`가 그 파일을 지켜보다 바뀌면 보냅니다. 비밀번호와 MFA는 브라우저에서 IdP에만 넣습니다.
+**클라이언트.** `ztgate_login`이 기기 인가로 로그인해 토큰을 파일에 쓰고, `vpn_client -t`가 그 파일을 지켜보다 바뀌면 보냅니다. 비밀번호와 MFA는 브라우저에서 IdP에만 넣습니다.
 
 ```bash
-client/my_vpn_login --issuer https://idp.example.com/realms/corp --client-id my_vpn --keep
+client/ztgate_login --issuer https://idp.example.com/realms/corp --client-id ztgate --keep
 #   Open this address in a browser and sign in:
 #       https://idp.example.com/realms/corp/device?user_code=WDJB-MJHT
-sudo ./client/bin/vpn_client -t ~/.config/my_vpn/token run <서버 IP> 9000
+sudo ./client/bin/vpn_client -t ~/.config/ztgate/token run <서버 IP> 9000
 #   [login] logged in as alice (token valid for 299s)
 ```
 
 **IdP (Keycloak 기준).** `test/keycloak_check.sh`가 CI에서 관리 API로 그대로 만드는 설정입니다.
 
-1. 클라이언트 `my_vpn`: 공개 클라이언트(client secret 없음 — 사용자의 장비에 비밀을 둘 수 없다), *OAuth 2.0 Device Authorization Grant* 켜기.
-2. 그 클라이언트의 매퍼 두 개: *Audience*(`my_vpn`을 access token의 `aud`에), *Group Membership*(클레임 이름 `groups`, full path 끄기).
+1. 클라이언트 `ztgate`: 공개 클라이언트(client secret 없음 — 사용자의 장비에 비밀을 둘 수 없다), *OAuth 2.0 Device Authorization Grant* 켜기.
+2. 그 클라이언트의 매퍼 두 개: *Audience*(`ztgate`를 access token의 `aud`에), *Group Membership*(클레임 이름 `groups`, full path 끄기).
 3. 사용자를 그룹에 넣는다.
 
 - 받는 서명은 RS256, ES256뿐입니다. `alg: none`과 HS256은 받지 않습니다 (HS256을 받으면 공개키를 HMAC 키로 쓴 위조 토큰이 통과합니다). `kid`로 키를 고르고 키의 종류가 `alg`와 맞아야 합니다.
@@ -288,15 +288,15 @@ sudo ./client/bin/vpn_client -t ~/.config/my_vpn/token run <서버 IP> 9000
 서버와 Linux 클라이언트가 한 이미지에 들어 있고, 첫 인자로 고릅니다. 권한은 `CAP_NET_ADMIN`과 `/dev/net/tun`만 줍니다.
 
 ```bash
-docker build -t my_vpn .
+docker build -t ztgate .
 docker run -d --name vpn --cap-add NET_ADMIN --device /dev/net/tun \
-    -p 9000:9000/udp -v my_vpn_etc:/etc/my_vpn my_vpn server
+    -p 9000:9000/udp -v ztgate_etc:/etc/ztgate ztgate server
 docker exec vpn enroll-code.sh 10.0.0.2 -l laptop
 docker run -d --cap-add NET_ADMIN --device /dev/net/tun \
-    -e SERVER=<서버 IP> -e ENROLL_CODE=<코드> -v my_vpn_id:/var/lib/my_vpn my_vpn client
+    -e SERVER=<서버 IP> -e ENROLL_CODE=<코드> -v ztgate_id:/var/lib/ztgate ztgate client
 ```
 
-서버 tun에 주소를 붙이는 일은 `docker/entrypoint.sh`가 합니다. `/etc/my_vpn/acl.conf`가 있으면 서버가 뜰 때 읽습니다. 클라이언트 컨테이너가 보고하는 방화벽 상태는 컨테이너 네트워크 네임스페이스의 nft 규칙셋이고, 커널 버전은 호스트의 것입니다. 서버 뒤의 네트워크로 내보내는 설정(NAT)은 컨테이너 예시에 넣지 않았습니다.
+서버 tun에 주소를 붙이는 일은 `docker/entrypoint.sh`가 합니다. `/etc/ztgate/acl.conf`가 있으면 서버가 뜰 때 읽습니다. 클라이언트 컨테이너가 보고하는 방화벽 상태는 컨테이너 네트워크 네임스페이스의 nft 규칙셋이고, 커널 버전은 호스트의 것입니다. 서버 뒤의 네트워크로 내보내는 설정(NAT)은 컨테이너 예시에 넣지 않았습니다.
 
 </details>
 
@@ -305,7 +305,7 @@ docker run -d --cap-add NET_ADMIN --device /dev/net/tun \
 
 <br/>
 
-기기가 서버 뒤의 네트워크(예: `10.101.0.0/16`)에 닿으려면 ACL의 `allow` 규칙, IP 전달, 주소 변환(NAT)이 필요합니다. 서비스로 설치했다면 `/etc/my_vpn/server.env`에 `FORWARD_OUT=eth0`을 적으면 서비스가 뜰 때 IP 전달과 NAT, "안에서 시작한 연결의 답만 들인다"는 nft 규칙을 자기 표(`table ip my_vpn`)에 넣고 내려갈 때 뺍니다. 서버가 그 네트워크 안에 있지 않다면 아래의 커넥터를 씁니다.
+기기가 서버 뒤의 네트워크(예: `10.101.0.0/16`)에 닿으려면 ACL의 `allow` 규칙, IP 전달, 주소 변환(NAT)이 필요합니다. 서비스로 설치했다면 `/etc/ztgate/server.env`에 `FORWARD_OUT=eth0`을 적으면 서비스가 뜰 때 IP 전달과 NAT, "안에서 시작한 연결의 답만 들인다"는 nft 규칙을 자기 표(`table ip ztgate`)에 넣고 내려갈 때 뺍니다. 서버가 그 네트워크 안에 있지 않다면 아래의 커넥터를 씁니다.
 
 </details>
 
@@ -333,7 +333,7 @@ sudo ./client/bin/vpn_client connector <서버 IP> 9000 eth0
 
 - **판정은 서버가 합니다.** 커넥터로 보내기 전에 ACL, 포스처, 사용자 조건을 모두 지납니다. 커넥터는 정책을 모르고 받은 것을 내보낼 뿐입니다. 클라이언트는 ACL에서 뽑은 경로를 그대로 받고, 커넥터에는 경로를 내려 주지 않습니다 (그 대역은 커넥터 쪽에서 바로 붙어 있는 네트워크입니다).
 - **커넥터가 보내는 것은 좁게 봅니다.** 출발지는 커넥터가 맡은 대역 안이어야 하고, 목적지는 붙어 있는 클라이언트여야 합니다. 서버의 주소나 다른 커넥터로는 보낼 수 없습니다.
-- **내부망 쪽에서 터널로 연결을 시작할 수 없습니다.** 커넥터 장비의 nftables 표(`table ip my_vpn_connector`)가 "tun → LAN은 통과, LAN → tun은 이미 있는 연결의 답만"을 지키고, 커넥터가 끝나면 표를 통째로 지웁니다.
+- **내부망 쪽에서 터널로 연결을 시작할 수 없습니다.** 커넥터 장비의 nftables 표(`table ip ztgate_connector`)가 "tun → LAN은 통과, LAN → tun은 이미 있는 연결의 답만"을 지키고, 커넥터가 끝나면 표를 통째로 지웁니다.
 - **커넥터가 붙어 있지 않으면 그 대역으로 가는 패킷은 버립니다.** 서버의 tun으로 대신 보내지 않습니다 — 같은 목적지가 커넥터의 상태에 따라 다른 길로 가면 정책을 읽을 수 없습니다.
 
 </details>
@@ -346,45 +346,45 @@ sudo ./client/bin/vpn_client connector <서버 IP> 9000 eth0
 
 ```bash
 mcp/install.sh                 # 일반 계정으로 실행한다. 필요한 곳에서 sudo 를 스스로 부른다
-sudo systemctl enable --now my_vpn
+sudo systemctl enable --now ztgate
 ```
 
-설치 스크립트는 서버를 빌드해 `/opt/my_vpn`에 root 소유로 복사하고, 처음 한 번만 `/etc/my_vpn`에 설정을 만듭니다. 다시 실행하면 실행 파일만 바꾸고 설정과 기기 목록은 건드리지 않습니다. 관리 헬퍼 `my_vpn_ctl`과 MCP 서버도 함께 설치하므로 Node.js(npm)가 필요합니다.
+설치 스크립트는 서버를 빌드해 `/opt/ztgate`에 root 소유로 복사하고, 처음 한 번만 `/etc/ztgate`에 설정을 만듭니다. 다시 실행하면 실행 파일만 바꾸고 설정과 기기 목록은 건드리지 않습니다. 관리 헬퍼 `ztgate_ctl`과 MCP 서버도 함께 설치하므로 Node.js(npm)가 필요합니다.
 
 | 경로 | 내용 |
 |---|---|
-| `/etc/my_vpn/server.env` | `PORT`, `TUN_IP`, `PREFIX`, `MTU`, `FORWARD_OUT`(서버 뒤로 내보낼 인터페이스, 기본 꺼짐) |
-| `/etc/my_vpn/devices.conf` | 기기 목록. 등록 코드로 온 기기를 서버가 직접 적는다 |
-| `/etc/my_vpn/enroll.conf` | 등록 코드의 대기 목록 |
-| `/etc/my_vpn/acl.conf` | 있으면 ACL이 켜진다 |
-| `/etc/my_vpn/idp.conf`, `jwks.json` | 있으면 사용자 로그인을 받는다 |
-| `/var/log/my_vpn/audit.log` | 감사 로그 (사건마다 JSON 한 줄) |
-| `/run/my_vpn/status.sock` | 상태 소켓 (root 전용) |
+| `/etc/ztgate/server.env` | `PORT`, `TUN_IP`, `PREFIX`, `MTU`, `FORWARD_OUT`(서버 뒤로 내보낼 인터페이스, 기본 꺼짐) |
+| `/etc/ztgate/devices.conf` | 기기 목록. 등록 코드로 온 기기를 서버가 직접 적는다 |
+| `/etc/ztgate/enroll.conf` | 등록 코드의 대기 목록 |
+| `/etc/ztgate/acl.conf` | 있으면 ACL이 켜진다 |
+| `/etc/ztgate/idp.conf`, `jwks.json` | 있으면 사용자 로그인을 받는다 |
+| `/var/log/ztgate/audit.log` | 감사 로그 (사건마다 JSON 한 줄) |
+| `/run/ztgate/status.sock` | 상태 소켓 (root 전용) |
 
-유닛은 서버에 `CAP_NET_ADMIN`만 남기고(`CapabilityBoundingSet`), `ProtectSystem=strict`로 파일 시스템을 읽기 전용으로 만든 뒤 `/etc/my_vpn`과 로그 디렉터리만 쓰게 엽니다. 설정이 틀려 서버가 스스로 1로 끝나면 다시 올리지 않고, 그 밖의 이유로 죽으면 2초 뒤에 다시 올립니다.
+유닛은 서버에 `CAP_NET_ADMIN`만 남기고(`CapabilityBoundingSet`), `ProtectSystem=strict`로 파일 시스템을 읽기 전용으로 만든 뒤 `/etc/ztgate`와 로그 디렉터리만 쓰게 엽니다. 설정이 틀려 서버가 스스로 1로 끝나면 다시 올리지 않고, 그 밖의 이유로 죽으면 2초 뒤에 다시 올립니다.
 
 ### 일상 운영
 
 | 하려는 일 | 방법 |
 |---|---|
-| 기기 추가 | `sudo env ENROLL_FILE=/etc/my_vpn/enroll.conf docker/enroll-code.sh <터널 IP> [조건] -l <이름>`으로 코드를 만들어 건넨다 |
-| 정책 바꾸기 | `acl.conf`나 `devices.conf`를 고치고 `sudo systemctl reload my_vpn`. 붙어 있는 기기는 다음 keepalive(10초 이내)부터 따른다 |
+| 기기 추가 | `sudo env ENROLL_FILE=/etc/ztgate/enroll.conf docker/enroll-code.sh <터널 IP> [조건] -l <이름>`으로 코드를 만들어 건넨다 |
+| 정책 바꾸기 | `acl.conf`나 `devices.conf`를 고치고 `sudo systemctl reload ztgate`. 붙어 있는 기기는 다음 keepalive(10초 이내)부터 따른다 |
 | 기기 폐기 | `devices.conf`에서 그 줄을 지우고 reload. 다음 keepalive에서 끊긴다 |
 | IdP 키 교체 | 새 JWKS를 `jwks.json`에 받아 두고 reload. 깨진 파일이면 이전 키를 그대로 쓴다 |
 | ACL 켜기 / 끄기 | `acl.conf`를 만들거나 지우고 restart. 켜고 끄는 것은 시작할 때만 정해진다 |
-| 무슨 일이 있었나 | `sudo tail -f /var/log/my_vpn/audit.log` (세션, 거절, 접근, 로그인, 정책 변경) |
-| 지금 누가 붙어 있나 | `echo '{"cmd":"status"}' \| sudo my_vpn_ctl` (세션, 포스처, 사용자, 사유별 거절 수) |
-| 서버 로그 | `journalctl -u my_vpn` |
+| 무슨 일이 있었나 | `sudo tail -f /var/log/ztgate/audit.log` (세션, 거절, 접근, 로그인, 정책 변경) |
+| 지금 누가 붙어 있나 | `echo '{"cmd":"status"}' \| sudo ztgate_ctl` (세션, 포스처, 사용자, 사유별 거절 수) |
+| 서버 로그 | `journalctl -u ztgate` |
 
-`my_vpn_ctl`은 표준 입력으로 JSON 명령 하나를 받는 root 헬퍼입니다(`status`, `start` / `stop` / `restart` / `reload`, `logs`, `audit`, `device_*`, `enroll_*`, `acl_get` / `acl_set`). MCP 서버는 이 헬퍼를 감싸 AI 에이전트가 SSH로 같은 일을 하게 합니다. 셸은 열어 주지 않고, sudoers는 `my_vpn_ctl`을 인자 없이 부르는 것 하나만 허용합니다.
+`ztgate_ctl`은 표준 입력으로 JSON 명령 하나를 받는 root 헬퍼입니다(`status`, `start` / `stop` / `restart` / `reload`, `logs`, `audit`, `device_*`, `enroll_*`, `acl_get` / `acl_set`). MCP 서버는 이 헬퍼를 감싸 AI 에이전트가 SSH로 같은 일을 하게 합니다. 셸은 열어 주지 않고, sudoers는 `ztgate_ctl`을 인자 없이 부르는 것 하나만 허용합니다.
 
 ```bash
-claude mcp add my_vpn -- ssh -T <user>@<서버 IP> my_vpn_mcp       # AI 클라이언트 쪽 (선택)
+claude mcp add ztgate -- ssh -T <user>@<서버 IP> ztgate_mcp       # AI 클라이언트 쪽 (선택)
 ```
 
 ### 업그레이드
 
-1. 저장소를 받고 `mcp/install.sh`를 다시 실행한 뒤 `sudo systemctl restart my_vpn`.
+1. 저장소를 받고 `mcp/install.sh`를 다시 실행한 뒤 `sudo systemctl restart ztgate`.
 2. **서버와 클라이언트의 프로토콜 버전은 같아야 합니다.** 서버는 버전이 다른 패킷을 헤더에서 버리므로(`[drop] bad header`), 클라이언트에는 서버가 응답하지 않는 것처럼 보입니다. 프로토콜 버전이 바뀌는 업그레이드는 서버와 모든 클라이언트를 함께 올립니다.
 3. 서버를 다시 시작하면 세션은 모두 사라집니다. 클라이언트는 서버에서 30초 동안 아무것도 받지 못하면 스스로 다시 핸드셰이크합니다.
 
@@ -396,7 +396,7 @@ claude mcp add my_vpn -- ssh -T <user>@<서버 IP> my_vpn_mcp       # AI 클라�
 | `[HS] denied: unknown device` | 등록되지 않았거나 코드가 만료됐습니다. 감사 로그에서 `enrolled`를 찾습니다 |
 | `[deny] posture does not meet policy` | 기기의 포스처가 정책에 못 미칩니다. 클라이언트에서 `vpn_client posture`로 보고할 값을 보고 `devices.conf`의 조건과 비교합니다 |
 | 연결은 되는데 특정 목적지만 안 됨 | 그 목적지의 `allow` 규칙이 없거나 규칙의 조건(포스처, `user=`, `group=`)이 맞지 않습니다. 감사 로그의 `access` 줄에서 판정을 봅니다 |
-| 로그인이 거절됨 | `vpn_server verify-token /etc/my_vpn/idp.conf < token.txt`가 이유(서명, `iss`, `aud`, `exp`)를 알려 줍니다 |
+| 로그인이 거절됨 | `vpn_server verify-token /etc/ztgate/idp.conf < token.txt`가 이유(서명, `iss`, `aud`, `exp`)를 알려 줍니다 |
 | 조건을 적었는데 정책이 바뀌지 않음 | `devices.conf`에서 조건은 터널 IP 바로 뒤에 적습니다. 줄 끝의 `# 이름` 뒤에 붙이면 주석이 됩니다 |
 | 서버가 설정 파일을 읽지 않음 | 키가 든 파일(`devices.conf`, `enroll.conf`, `acl.conf`)은 권한이 `600`이어야 합니다 |
 
@@ -449,7 +449,7 @@ sequenceDiagram
 
     rect rgb(245, 240, 255)
     Note over A,C: ⑤ 사용자 — 이 장비를 누가 쓰는가
-    C->>C: my_vpn_login — IdP 기기 인가로 로그인, 토큰 파일 저장 (0600)
+    C->>C: ztgate_login — IdP 기기 인가로 로그인, 토큰 파일 저장 (0600)
     C->>S: LOGIN (세션 안에서 JWT)
     S->>S: JWKS 로 서명 확인 → iss · aud · exp → 사용자와 그룹을 세션에
     S->>C: LOGIN (ok · 만료 시각 · alice)
@@ -566,7 +566,7 @@ OS별로 갈라지는 것은 알고리즘 호출뿐이고, 양쪽 `selftest`가 
 ```
 secret = ECDH(이번 핸드셰이크의 일회용 P-256 키 쌍)
 prk    = HKDF-Extract(salt = 기기 키, ikm = secret)
-keys   = HKDF-Expand(prk, "my_vpn v4 session" | SHA-256(AUTH 패킷 | RES 의 헤더와 pub_s), 96B)
+keys   = HKDF-Expand(prk, "ztgate v6 session" | SHA-256(AUTH 패킷 | RES 의 헤더와 pub_s), 96B)
        = C→S 키 | S→C 키 | RES_HANDSHAKE 키
 nonce  = 0x00000000 | counter (8B)            패킷마다, 방향마다 다른 키
 ```
@@ -629,8 +629,8 @@ tun_ip(4) | prefix_len(1) | n_routes(1) | mtu(2) | n_routes x ( addr(4) | prefix
 <br/>
 
 ```
-id  = HMAC-SHA256("my_vpn enroll id",  코드) 의 앞 16B     서버가 코드를 찾는 이름표
-key = HMAC-SHA256("my_vpn enroll key", 코드)               코드를 아는 쪽만 만드는 비밀
+id  = HMAC-SHA256("ztgate enroll id",  코드) 의 앞 16B     서버가 코드를 찾는 이름표
+key = HMAC-SHA256("ztgate enroll key", 코드)               코드를 아는 쪽만 만드는 비밀
 ```
 
 코드에서 임시 신원을 뽑아 **평소의 핸드셰이크를 그대로 돕니다.** 코드를 모르는 쪽은 세션을 열지 못하고, 서버인 척하는 쪽은 수락을 만들지 못하고, 기기의 진짜 키는 그 세션의 키로 감싸여 가므로 코드를 나중에 알게 된 사람도 녹화해 둔 등록에서 키를 꺼내지 못합니다. 새로 생긴 것은 `ENROLL` 메시지 하나입니다.
@@ -650,7 +650,7 @@ key = HMAC-SHA256("my_vpn enroll key", 코드)               코드를 아는 �
 
 - **토큰은 핸드셰이크가 아니라 세션이 열린 뒤에 보냅니다.** `AUTH`는 암호화되지 않으므로 거기에 실으면 토큰이 그대로 보이고, 토큰은 가진 사람이 곧 그 사용자인 증표입니다. 세션 패킷은 서버만 열 수 있고, 수락의 tag로 상대가 진짜 서버임도 이미 확인했습니다. 메시지 하나(`LOGIN`)만 늘었고 핸드셰이크는 그대로입니다.
 - **로그인은 세션의 조건이 아니라 규칙의 조건입니다.** 로그인하지 않은 세션도 열리고, 기기만으로 갈 수 있는 곳(사용자 조건이 없는 규칙)은 그대로 갑니다. 그래서 사용자 로그인을 서버에 붙이는 순간 모든 기기가 끊기지 않고, 사람이 로그인하기 전에 도는 것(업데이트, 백업 에이전트)도 따로 열어 둘 수 있습니다.
-- **서버는 IdP와 통신하지 않습니다.** 관리자가 받아 둔 JWKS로 서명만 확인합니다. 그래서 IdP가 잠깐 닿지 않아도 이미 받은 토큰은 계속 쓰이고, 데이터 경로에 네트워크 대기가 들어오지 않습니다. 대가로 토큰을 IdP에서 폐기해도 `exp`까지는 쓰입니다 — 토큰 수명을 짧게(분 단위) 두고 `my_vpn_login --keep`이 갈아 끼우게 하는 것이 그 보완입니다.
+- **서버는 IdP와 통신하지 않습니다.** 관리자가 받아 둔 JWKS로 서명만 확인합니다. 그래서 IdP가 잠깐 닿지 않아도 이미 받은 토큰은 계속 쓰이고, 데이터 경로에 네트워크 대기가 들어오지 않습니다. 대가로 토큰을 IdP에서 폐기해도 `exp`까지는 쓰입니다 — 토큰 수명을 짧게(분 단위) 두고 `ztgate_login --keep`이 갈아 끼우게 하는 것이 그 보완입니다.
 - **만료는 패킷마다 봅니다.** keepalive(10초)에서만 보면 토큰이 끝난 뒤에도 최대 10초 동안 그 사용자의 권한이 남습니다. 벽시계는 사용자 조건이 걸린 규칙에 닿았을 때만 읽으므로, 그런 규칙이 없는 정책의 데이터 경로에는 비용이 없습니다.
 - **틀린 토큰은 있던 로그인을 떼지 않습니다.** 갱신하다 실패했다고 아직 유효한 로그인까지 잃을 이유가 없습니다. 다른 사용자의 맞는 토큰은 그 사용자로 바꿉니다.
 - **JSON은 직접 읽습니다** (`server/src/json.c`). 원문을 한 번 훑어 토큰 배열을 만드는 방식이라 메모리를 따로 잡지 않고, 받아 준 JSON을 다른 구현이 다르게 읽는 일이 없도록 같은 키가 두 번 나오는 객체, 끝의 쉼표, 이스케이프된 키를 받지 않습니다.
@@ -851,7 +851,7 @@ sendto(buf, n + 32)     └─────────────────�
 ### 기능
 
 - **ACL 은 상태를 추적하지 않습니다.** 서버의 ACL 은 클라이언트가 보낸 패킷(UDP → tun)에만 걸리고, 연결 상태(conntrack)를 보지 않습니다. 돌아오는 방향을 막는 것은 서버의 nftables 전달 규칙(안에서 시작한 연결의 답만)에 맡깁니다. 규칙은 패킷 단위라 "이 TCP 연결은 허용됐다"는 개념이 없습니다.
-- **Windows 클라이언트는 아직 사용자 로그인을 하지 않습니다.** 프로토콜(v5)은 같아 붙을 수는 있지만 `user=` / `group=` 규칙에는 닿지 못합니다.
+- **Windows 클라이언트는 아직 사용자 로그인을 하지 않습니다.** 프로토콜(v6)은 같아 붙을 수는 있지만 `user=` / `group=` 규칙에는 닿지 못합니다.
 - **종료 통지가 없습니다.** 클라이언트가 종료해도 서버는 알지 못하고, 세션은 60초 뒤 만료로 정리됩니다.
 - **IPv4만 터널링합니다.** 멀티캐스트 / 브로드캐스트도 통과하지 못합니다.
 - **ACL이 막은 패킷은 클라이언트에게 알리지 않습니다.** 사용자에게는 타임아웃으로 보입니다.
@@ -869,12 +869,12 @@ sendto(buf, n + 32)     └─────────────────�
 
 같은 프로토콜(`lib/common`)을 쓰는 Windows 구현입니다. 터널은 시스템 서비스(`vpn_service.exe`, Wintun 가상 어댑터)가 맡고, GUI(`vpn_gui.exe`, MFC)는 권한 없이 이름 있는 파이프로 조종합니다. 기기 키는 DPAPI 로 보관하고, 포스처는 OS 빌드, Windows 방화벽, 보안 센터의 백신 상태를 봅니다. 서비스 없이 도는 콘솔 클라이언트(`vpn_client.exe`)도 있습니다.
 
-CI 는 MSVC `/W4` 빌드와 selftest 까지 확인합니다. 실제 Windows 10 장비에서 콘솔 클라이언트와 서비스(설치, `ctl` 로 상태 / 거절 확인, 권한 없는 GUI 가 붙는 것)를 확인했고, GUI 화면에서의 조작과 재부팅 뒤 이어서 연결하는 것은 확인하지 않았습니다. 빌드는 Visual Studio 2022로 `windows/my_vpn.sln`(x64)이고, Wintun은 저장소에 넣지 않아 [wintun.net](https://www.wintun.net)에서 받아 `windows/third_party`에 풉니다.
+CI 는 MSVC `/W4` 빌드와 selftest 까지 확인합니다. 실제 Windows 10 장비에서 콘솔 클라이언트와 서비스(설치, `ctl` 로 상태 / 거절 확인, 권한 없는 GUI 가 붙는 것)를 확인했고, GUI 화면에서의 조작과 재부팅 뒤 이어서 연결하는 것은 확인하지 않았습니다. 빌드는 Visual Studio 2022로 `windows/ztgate.sln`(x64)이고, Wintun은 저장소에 넣지 않아 [wintun.net](https://www.wintun.net)에서 받아 `windows/third_party`에 풉니다.
 
 ## 프로젝트 구조
 
 ```
-my_vpn/
+ztgate/
 ├── lib/common/                # 서버와 두 클라이언트가 함께 빌드하는 코드
 │   ├── include/{proto,crypt,secure}.h
 │   └── src/{proto,secure}.c, crypt_openssl.c (Linux 쪽 암호 도구, OpenSSL)
@@ -898,7 +898,7 @@ my_vpn/
 │       ├── posture.c          # 커널 버전, nftables 방화벽
 │       ├── netcfg.c           # 서버가 준 주소 · MTU · 경로를 tun 에
 │       └── connector.c        # 커넥터: IP 전달과 nftables (NAT, 답만 들인다)
-│   └── my_vpn_login           # IdP 로그인 (OIDC 기기 인가) -> 토큰 파일
+│   └── ztgate_login           # IdP 로그인 (OIDC 기기 인가) -> 토큰 파일
 ├── tools/loadgen/             # 서버 부하 생성기와 측정 스크립트 (bench.sh, iperf.sh)
 ├── tools/idp/                 # 시험용 IdP — 키 / JWKS / 토큰(mint.py), OIDC 서버(mock_oidc.py)
 ├── test/
@@ -907,7 +907,7 @@ my_vpn/
 │   ├── keycloak_check.sh      # 실제 IdP(Keycloak)의 토큰
 │   └── server.sh, client.sh   # 두 장비 시나리오
 ├── Dockerfile, docker-compose.yml, docker/   # 이미지(서버 + 클라이언트), entrypoint, 등록 코드, 데모
-├── mcp/                       # 서버 관리 — MCP 서버(Node.js)와 root 헬퍼 my_vpn_ctl, systemd 유닛
+├── mcp/                       # 서버 관리 — MCP 서버(Node.js)와 root 헬퍼 ztgate_ctl, systemd 유닛
 ├── windows/                   # Windows 클라이언트 (서비스 + GUI + 콘솔, Visual Studio 솔루션)
 ├── docs/experiments.md         # 직접 돌려 보고 깨뜨려 본 실험의 기록
 └── .github/workflows/ci.yml
@@ -987,9 +987,9 @@ my_vpn/
 | Docker — `Dockerfile`, `docker/entrypoint.sh`, `docker/enroll-code.sh`, `docker-compose.yml`, `docker/demo.sh`, CI 의 `docker` 잡 |
 | `docs/experiments.md`의 실험 절차와 해석 초안 (실험 0은 CI 가 돌린 측정, 1~8은 직접 실행) |
 | 이 README — Linux 기준 재구성, "표준 프로토콜과의 대조", 보안 모델의 확인 열 |
-| 사용자 로그인 (프로토콜 v5) — `server/src/idp.c`(JWT 검증, JWKS), `server/src/json.c`, `policy.c` 의 사용자 조건, `alc.c` / `server.c` / `audit.c` / `status.c` 의 연결, `vpn_server verify-token`, 클라이언트의 `-t` 와 `LOGIN`, `client/my_vpn_login`(OIDC 기기 인가), `tools/idp/`(시험용 IdP), `auth_check.py` 의 로그인 시험, `linux_e2e.sh` 의 5단계, `test/keycloak_check.sh` 와 CI 의 `idp` 잡, MCP 의 ACL 사용자 조건. 토큰을 세션이 열린 뒤에 싣는 것, 서버가 IdP 와 통신하지 않는 것, 로그인을 세션이 아니라 규칙의 조건으로 두는 것은 AI가 제안하고 검토 후 채택 |
+| 사용자 로그인 (프로토콜 v5) — `server/src/idp.c`(JWT 검증, JWKS), `server/src/json.c`, `policy.c` 의 사용자 조건, `alc.c` / `server.c` / `audit.c` / `status.c` 의 연결, `vpn_server verify-token`, 클라이언트의 `-t` 와 `LOGIN`, `client/ztgate_login`(OIDC 기기 인가), `tools/idp/`(시험용 IdP), `auth_check.py` 의 로그인 시험, `linux_e2e.sh` 의 5단계, `test/keycloak_check.sh` 와 CI 의 `idp` 잡, MCP 의 ACL 사용자 조건. 토큰을 세션이 열린 뒤에 싣는 것, 서버가 IdP 와 통신하지 않는 것, 로그인을 세션이 아니라 규칙의 조건으로 두는 것은 AI가 제안하고 검토 후 채택 |
 | 앱 커넥터 — `server.c` 의 `relay_to_connector` / `relay_from_connector`, `device.c` 의 `connector=`, `client/src/connector.c`, `vpn_client connector`, `auth_check.py` / `linux_e2e.sh` 의 커넥터 시험, MCP 의 `connector`. 커넥터가 없을 때 서버 tun 으로 돌리지 않고 버리는 것, 판정을 서버에만 두는 것은 AI가 제안하고 검토 후 채택 |
 | `linux_e2e.sh` / `iperf.sh` 가 클라이언트를 셸 함수로 띄워 끝난 뒤에도 남기던 것을 고친 것 |
-| `windows/my_vpn.sln` 에 빠져 있던 `vpn_service` 프로젝트를 넣은 것 (CI 가 서비스를 빌드하지 않고 있었다) |
+| `windows/ztgate.sln` 에 빠져 있던 `vpn_service` 프로젝트를 넣은 것 (CI 가 서비스를 빌드하지 않고 있었다) |
 
 </details>

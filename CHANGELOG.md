@@ -2,6 +2,14 @@
 
 버전의 두 번째 숫자는 프로토콜 버전(`lib/common/include/proto.h`의 `PROTOCOL_VERSION`)과 같습니다. 서버는 버전이 다른 패킷을 버리므로, 두 번째 숫자가 바뀌면 서버와 클라이언트를 함께 올려야 합니다. 태그는 0.5.0부터 붙였고, 그 이전 버전은 해당 구간의 첫 커밋으로 적었습니다.
 
+## 0.6.0 — 2026-10-16 (프로토콜 v6)
+
+### 바뀜
+- **이름을 my_vpn에서 ztgate로 바꿨습니다.** 배포된 적이 없어 옛 이름을 함께 받아 주는 이행 경로는 두지 않았습니다. 0.5.0 이전 항목의 경로와 명령은 그때의 이름 그대로 적혀 있습니다.
+- **프로토콜 v6.** 키 유도(`"ztgate v6 session"`), 핸드셰이크 중 거절의 mac(`"ztgate deny"`), 등록 코드에서 임시 신원을 뽑는 HMAC 키(`"ztgate enroll id"` / `"ztgate enroll key"`)의 라벨이 바뀌어 v5와는 통하지 않습니다. 버전을 올려 옛 빌드가 tag 불일치로 조용히 실패하지 않고 헤더에서 바로 걸리게 했습니다. (`3965db1`)
+- 경로 `/etc/ztgate`, `/opt/ztgate`, `/var/log/ztgate`, `/run/ztgate`, `/var/lib/ztgate`, 서비스 `ztgate.service`, 명령 `ztgate_ctl` / `ztgate_mcp` / `ztgate_login`, nft 표 `ztgate` / `ztgate_connector`, 클라이언트 tun 기본 이름 `ztgate0`, Docker 이미지 `ztgate`. (`5143e4a`)
+- Windows: 솔루션 `windows/ztgate.sln`, 서비스 `ztgate`, 설치 폴더 `%ProgramFiles%\ztgate`, 레지스트리 `Software\ztgate`, 파이프 `\\.\pipe\ztgate`. (`921925f`)
+
 ## 0.5.0 — 2026-10-16 (프로토콜 v5)
 
 ### 추가
