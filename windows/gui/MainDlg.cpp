@@ -204,7 +204,7 @@ void CMainDlg::LoadSettings()
 {
 	CWinApp *app = AfxGetApp();
 
-	SetDlgItemText(IDC_ADAPTER, app->GetProfileString(_T("conn"), _T("adapter"), _T("my_vpn")));
+	SetDlgItemText(IDC_ADAPTER, app->GetProfileString(_T("conn"), _T("adapter"), _T("ztgate")));
 	SetDlgItemText(IDC_SERVER, app->GetProfileString(_T("conn"), _T("server"), _T("49.247.139.39")));
 	SetDlgItemText(IDC_PORT, app->GetProfileString(_T("conn"), _T("port"), _T("9000")));
 }
@@ -359,7 +359,7 @@ void CMainDlg::OnClear()
 
 void CMainDlg::OnSave()
 {
-	CFileDialog dlg(FALSE, _T("csv"), _T("my_vpn_packets.csv"),
+	CFileDialog dlg(FALSE, _T("csv"), _T("ztgate_packets.csv"),
 			OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST,
 			_T("CSV 파일 (*.csv)|*.csv|모든 파일 (*.*)|*.*||"), this);
 

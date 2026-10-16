@@ -27,19 +27,19 @@
   <!-- 설치된 VS의 기본 툴셋을 쓴다. VS2022는 v143, VS2026은 v145.
        Microsoft.Cpp.Default.props가 $(DefaultPlatformToolset)을 채워주므로 이 위치여야 한다. -->
   <PropertyGroup Label="Toolset">
-    <MyVpnToolset Condition="'$(DefaultPlatformToolset)'!=''">$(DefaultPlatformToolset)</MyVpnToolset>
-    <MyVpnToolset Condition="'$(MyVpnToolset)'==''">v143</MyVpnToolset>
+    <ZtgateToolset Condition="'$(DefaultPlatformToolset)'!=''">$(DefaultPlatformToolset)</ZtgateToolset>
+    <ZtgateToolset Condition="'$(ZtgateToolset)'==''">v143</ZtgateToolset>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
-    <PlatformToolset>$(MyVpnToolset)</PlatformToolset>
+    <PlatformToolset>$(ZtgateToolset)</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
-    <PlatformToolset>$(MyVpnToolset)</PlatformToolset>
+    <PlatformToolset>$(ZtgateToolset)</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>

@@ -27,7 +27,7 @@ bool DrawButton(const DRAWITEMSTRUCT *dis);
 
 /* ---- 탭 줄 --------------------------------------------------------------- */
 
-#define UI_TABS_CLASS	L"MyVpnTabs"
+#define UI_TABS_CLASS	L"ZtgateTabs"
 
 /* 탭을 바꾸면 부모에게 WM_COMMAND 를 보낸다 (HIWORD(wParam) == UI_TABS_CHANGED). */
 #define UI_TABS_CHANGED	1

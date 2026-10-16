@@ -25,7 +25,7 @@ param(
     # 터널 IP 는 클라이언트에 넘기지 않는다. 서버가 기기 목록에 적힌 주소를 내려 준다.
     # 여기 적는 것은 "서버가 이 주소를 줬어야 한다"는 기대값이고, 뜬 어댑터와 대조한다.
     [string]$ClientTunIp = $(if ($env:CLIENT_TUN_IP)  { $env:CLIENT_TUN_IP }  else { '10.0.0.3' }),
-    [string]$Adapter     = $(if ($env:ADAPTER)        { $env:ADAPTER }        else { 'my_vpn' }),
+    [string]$Adapter     = $(if ($env:ADAPTER)        { $env:ADAPTER }        else { 'ztgate' }),
     [string]$Config      = $(if ($env:CONFIG)         { $env:CONFIG }         else { 'Debug' }),
 
     # 권한 상승 후 자기 자신을 다시 부를 때만 쓴다.
@@ -130,8 +130,8 @@ function Show-Idx {
 # tunnel_run 이 어댑터와 터널 IP 를 스스로 정리). 자식이 우리 콘솔을 공유하므로
 # GenerateConsoleCtrlEvent(group 0) 로 보낼 수 있는데, 그러면 이 스크립트도 같이 받는다.
 # SetConsoleCtrlHandler(NULL, TRUE) 로 우리 쪽만 Ctrl-C 를 무시하게 해 두고 보낸다.
-if (-not ('MyVpn.ConsoleCtrl' -as [type])) {
-    Add-Type -Namespace MyVpn -Name ConsoleCtrl -MemberDefinition @'
+if (-not ('Ztgate.ConsoleCtrl' -as [type])) {
+    Add-Type -Namespace Ztgate -Name ConsoleCtrl -MemberDefinition @'
 [DllImport("kernel32.dll", SetLastError = true)]
 public static extern bool GenerateConsoleCtrlEvent(uint dwCtrlEvent, uint dwProcessGroupId);
 
@@ -142,14 +142,14 @@ public static extern bool SetConsoleCtrlHandler(IntPtr handlerRoutine, bool add)
 
 function Send-CtrlC {
     try {
-        if (-not [MyVpn.ConsoleCtrl]::SetConsoleCtrlHandler([IntPtr]::Zero, $true)) {
+        if (-not [Ztgate.ConsoleCtrl]::SetConsoleCtrlHandler([IntPtr]::Zero, $true)) {
             return $false
         }
         try {
-            return [MyVpn.ConsoleCtrl]::GenerateConsoleCtrlEvent(0, 0)   # 0 = CTRL_C_EVENT
+            return [Ztgate.ConsoleCtrl]::GenerateConsoleCtrlEvent(0, 0)   # 0 = CTRL_C_EVENT
         }
         finally {
-            [MyVpn.ConsoleCtrl]::SetConsoleCtrlHandler([IntPtr]::Zero, $false) | Out-Null
+            [Ztgate.ConsoleCtrl]::SetConsoleCtrlHandler([IntPtr]::Zero, $false) | Out-Null
         }
     }
     catch {

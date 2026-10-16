@@ -154,7 +154,7 @@ jobs:
       - name: Build vpn_client + vpn_service + vpn_gui (Release x64)
         shell: pwsh
         run: |
-          msbuild windows\my_vpn.sln -m -nologo -p:Configuration=Release -p:Platform=x64 "-flp:logfile=build.log;verbosity=minimal;encoding=utf-8"
+          msbuild windows\ztgate.sln -m -nologo -p:Configuration=Release -p:Platform=x64 "-flp:logfile=build.log;verbosity=minimal;encoding=utf-8"
           $code = $LASTEXITCODE
 
           $root = "$env:GITHUB_WORKSPACE\"
@@ -200,7 +200,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: my_vpn-windows-x64
+          name: ztgate-windows-x64
           path: |
             windows/build/Release/*.exe
             windows/build/Release/wintun.dll

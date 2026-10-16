@@ -30,7 +30,7 @@
 extern "C" {
 #endif
 
-#define IPC_PIPE_NAME	L"\\\\.\\pipe\\my_vpn"
+#define IPC_PIPE_NAME	L"\\\\.\\pipe\\ztgate"
 #define IPC_VERSION	1
 
 /* 한 메시지의 최대 크기. 패킷 사건을 묶어 보내는 것이 가장 크다. */

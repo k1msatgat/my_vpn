@@ -29,10 +29,10 @@
 #include "crypt.h"
 #include "ipc.h"
 
-#define SERVICE_NAME	L"my_vpn"
-#define SERVICE_DISPLAY	L"my_vpn tunnel"
-#define INSTALL_DIR	L"%ProgramFiles%\\my_vpn"
-#define STATE_REG_PATH	L"Software\\my_vpn\\service"
+#define SERVICE_NAME	L"ztgate"
+#define SERVICE_DISPLAY	L"ztgate tunnel"
+#define INSTALL_DIR	L"%ProgramFiles%\\ztgate"
+#define STATE_REG_PATH	L"Software\\ztgate\\service"
 
 /* 연결을 원하는데 터널이 내려갔을 때 다시 올리기까지의 시간. 부팅 직후에는 네트워크가
  * 아직 없어 첫 시도가 실패하는 것이 보통이다. */
@@ -968,7 +968,7 @@ static int install(void)
 		}
 	}
 
-	desc.lpDescription = L"Keeps the my_vpn tunnel up. The GUI talks to this service; it does not hold the tunnel itself.";
+	desc.lpDescription = L"Keeps the ztgate tunnel up. The GUI talks to this service; it does not hold the tunnel itself.";
 	ChangeServiceConfig2W(svc, SERVICE_CONFIG_DESCRIPTION, &desc);
 
 	if (!StartServiceW(svc, 0, NULL) && GetLastError() != ERROR_SERVICE_ALREADY_RUNNING) {

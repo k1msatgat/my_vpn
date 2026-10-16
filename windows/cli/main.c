@@ -275,7 +275,7 @@ int main(int argc, char *argv[])
 		fprintf(stderr, "       %s enroll <server-ip> <port> <code> [--force]   enroll with a code from the administrator\n", argv[0]);
 		fprintf(stderr, "       %s enroll [--force]                             print an id and key to register by hand\n", argv[0]);
 		fprintf(stderr, "       %s device\n", argv[0]);
-		fprintf(stderr, " e.g. %s my_vpn 49.247.139.39 9000\n", argv[0]);
+		fprintf(stderr, " e.g. %s ztgate 49.247.139.39 9000\n", argv[0]);
 		fprintf(stderr, " the tunnel address and the routes come from the server\n");
 		return 1;
 	}

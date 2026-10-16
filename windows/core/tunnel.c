@@ -1468,7 +1468,7 @@ int tunnel_run(const tunnel_config_t *cfg, HANDLE stop_event)
 		goto out;
 	}
 
-	t->adapter = WintunCreateAdapter(cfg->adapter_name, L"my_vpn", &ADAPTER_GUID);
+	t->adapter = WintunCreateAdapter(cfg->adapter_name, L"ztgate", &ADAPTER_GUID);
 	if (!t->adapter) {
 		err = GetLastError();
 		tlog(t, "WintunCreateAdapter failed: %lu%s", err,

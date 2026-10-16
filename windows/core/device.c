@@ -5,9 +5,9 @@
 
 #include "device.h"
 
-/* GUI 의 연결 설정(HKCU\Software\my_vpn\vpn_gui)과 같은 뿌리 아래에 둔다.
+/* GUI 의 연결 설정(HKCU\Software\ztgate\vpn_gui)과 같은 뿌리 아래에 둔다.
  * 콘솔 클라이언트와 GUI 가 같은 신원을 쓰도록 프로그램 이름 아래가 아니라 옆에 둔다. */
-#define DEVICE_REG_PATH	L"Software\\my_vpn\\device"
+#define DEVICE_REG_PATH	L"Software\\ztgate\\device"
 #define DEVICE_REG_ID	L"id"
 #define DEVICE_REG_KEY	L"key"
 
@@ -39,7 +39,7 @@ static int key_protect(const uint8_t *key, DATA_BLOB *sealed)
 	plain.cbData = AUTH_KEY_LEN;
 
 	/* 이 프로그램은 서비스나 워커 스레드에서도 돌 수 있어 UI 를 띄우면 안 된다. */
-	if (!CryptProtectData(&plain, L"my_vpn device key", NULL, NULL, NULL,
+	if (!CryptProtectData(&plain, L"ztgate device key", NULL, NULL, NULL,
 			CRYPTPROTECT_UI_FORBIDDEN, sealed)) {
 		return -1;
 	}
