@@ -20,8 +20,12 @@
 #   4. 같은 IdP 가 다른 클라이언트(other)에 준 토큰 -> wrong_token (aud)
 #   5. 서명 뒤에 바꾼 토큰 -> untrusted
 #   6. 기기 인가 엔드포인트가 기기 코드를 준다 (client/ztgate_login 이 쓰는 첫 단계)
+#   7. Windows GUI 의 흐름: 인가 코드 + PKCE, 루프백 redirect. 브라우저가 하는 일(로그인 화면에
+#      입력하고 앱의 127.0.0.1:<포트> 로 돌아가기)을 스크립트가 대신한다. 포트 두 개로 해서
+#      IdP 가 루프백의 포트를 가리지 않는지 본다. PKCE 없는 요청은 거절돼야 한다.
+#   8. 받은 refresh token 으로 갱신되고, 폐기(RFC 7009)한 뒤에는 갱신되지 않는다.
 #
-# 토큰은 비밀번호 방식(direct access grant)으로 받는다. 기기 인가는 사람이 브라우저에서
+# 3~5 의 토큰은 비밀번호 방식(direct access grant)으로 받는다. 기기 인가는 사람이 브라우저에서
 # 승인해야 끝나므로 자동 시험에서는 첫 단계까지만 본다. 나머지 흐름은 linux_e2e.sh 가
 # 시험용 OIDC 서버로 확인한다.
 
@@ -67,11 +71,14 @@ api() {	# api <method> <path> [json]
 api POST "" "{\"realm\":\"$REALM\",\"enabled\":true}" || { echo "cannot create realm" >&2; exit 1; }
 
 # 공개 클라이언트: 비밀이 없다 (사용자의 장비에 비밀을 둘 수 없다). 기기 인가를 켠다.
+# Windows GUI 용으로 표준 흐름(인가 코드)을 켜고, 돌아올 주소는 루프백만, PKCE(S256)는 필수.
 # audience 매퍼가 토큰의 aud 에 ztgate 를 넣고, 그룹 매퍼가 groups 클레임에 그룹 이름을 넣는다.
 api POST "/$REALM/clients" '{
-	"clientId": "ztgate", "publicClient": true, "standardFlowEnabled": false,
+	"clientId": "ztgate", "publicClient": true, "standardFlowEnabled": true,
+	"redirectUris": ["http://127.0.0.1/*"],
 	"directAccessGrantsEnabled": true,
-	"attributes": {"oauth2.device.authorization.grant.enabled": "true"},
+	"attributes": {"oauth2.device.authorization.grant.enabled": "true",
+	               "pkce.code.challenge.method": "S256"},
 	"protocolMappers": [
 		{"name": "audience", "protocol": "openid-connect", "protocolMapper": "oidc-audience-mapper",
 		 "config": {"included.client.audience": "ztgate", "access.token.claim": "true", "id.token.claim": "false"}},
@@ -129,6 +136,95 @@ DEVICE=$(json 'j.get("device_authorization_endpoint", "")' < "$WORK/discovery.js
 check "keycloak: discovery offers device authorization" "$([ -n "$DEVICE" ] && echo yes || echo no)" yes
 GOT=$(curl -sf -d client_id=ztgate -d scope=openid "$DEVICE" | json '"device_code" in j and "user_code" in j')
 check "keycloak: device authorization hands out a code" "$GOT" True
+
+# ---- 7 ~ 8. Windows GUI 의 흐름: 인가 코드 + PKCE, 루프백 redirect, 갱신, 폐기 --------------
+cat > "$WORK/pkce.py" <<'PY'
+"""브라우저가 하는 일을 대신한다: 로그인 화면을 받아 입력하고, 앱으로 돌아가는 주소를 받는다.
+인자: discovery.json, 그 뒤로 할 일. 결과는 한 줄씩 'key value'."""
+import base64, hashlib, html.parser, http.cookiejar, json, secrets, sys, urllib.error, urllib.parse, urllib.request
+
+meta = json.load(open(sys.argv[1]))
+
+
+class Form(html.parser.HTMLParser):
+    action = None
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        if tag == "form" and a.get("id") == "kc-form-login":
+            self.action = a["action"]
+
+
+class Stop(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *a, **k):
+        return None
+
+
+def call(op, url, form=None):
+    try:
+        r = op.open(urllib.request.Request(url, urllib.parse.urlencode(form).encode() if form else None))
+        return r.status, r.read().decode(), r.headers
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode(), e.headers
+
+
+def login(port, pkce=True):
+    jar = http.cookiejar.CookieJar()
+    op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar), Stop)
+    verifier = secrets.token_urlsafe(32)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    redirect = "http://127.0.0.1:%d/callback" % port
+    q = {"response_type": "code", "client_id": "ztgate", "redirect_uri": redirect, "scope": "openid",
+         "state": secrets.token_urlsafe(8)}
+    if pkce:
+        q.update(code_challenge=challenge, code_challenge_method="S256")
+    _, body, _ = call(op, meta["authorization_endpoint"] + "?" + urllib.parse.urlencode(q))
+    f = Form()
+    f.feed(body)
+    if not f.action:
+        return None
+    # 브라우저는 127.0.0.1 을 안전한 출처로 보고 Secure 쿠키도 보낸다. urllib 은 그렇지 않다.
+    for c in jar:
+        c.secure = False
+    _, _, h = call(op, f.action, {"username": "alice", "password": "alice-pw", "credentialId": ""})
+    back = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(h.get("Location", "")).query))
+    if not h.get("Location", "").startswith(redirect) or back.get("state") != q["state"]:
+        return None
+    _, body, _ = call(op, meta["token_endpoint"], {"grant_type": "authorization_code", "code": back["code"],
+                                                   "redirect_uri": redirect, "client_id": "ztgate",
+                                                   "code_verifier": verifier})
+    return json.loads(body)
+
+
+def refresh(rt):
+    st, _, _ = call(urllib.request.build_opener(), meta["token_endpoint"],
+                    {"grant_type": "refresh_token", "refresh_token": rt, "client_id": "ztgate"})
+    return st
+
+
+a = login(49823)
+b = login(61234)
+print("port_a", "ok" if a and "access_token" in a else "fail")
+print("port_b", "ok" if b and "access_token" in b else "fail")
+print("no_pkce", "refused" if login(50001, pkce=False) is None else "accepted")
+if a:
+    open(sys.argv[2], "w").write(a["access_token"])
+    print("refresh", refresh(a["refresh_token"]))
+    st, _, _ = call(urllib.request.build_opener(), meta["revocation_endpoint"],
+                    {"token": a["refresh_token"], "token_type_hint": "refresh_token", "client_id": "ztgate"})
+    print("revoke", st)
+    print("refresh_after_revoke", refresh(a["refresh_token"]))
+PY
+python3 "$WORK/pkce.py" "$WORK/discovery.json" "$WORK/pkce.jwt" > "$WORK/pkce.out" 2>&1
+pk() { awk -v k="$1" '$1 == k { print $2 }' "$WORK/pkce.out"; }
+check "keycloak: code + PKCE, loopback port 49823" "$(pk port_a)" ok
+check "keycloak: code + PKCE, loopback port 61234" "$(pk port_b)" ok
+check "keycloak: a code request without PKCE" "$(pk no_pkce)" refused
+check "keycloak: that token on the server" "$( [ -s "$WORK/pkce.jwt" ] && verify < "$WORK/pkce.jwt")" "ok user=alice groups=ops"
+check "keycloak: refresh token works" "$(pk refresh)" 200
+check "keycloak: revocation (RFC 7009)" "$(pk revoke)" 200
+check "keycloak: refresh after revocation" "$(pk refresh_after_revoke)" 400
+[ "$failed" -eq 0 ] || cat "$WORK/pkce.out"
 
 echo
 if [ "$failed" -eq 0 ]; then
