@@ -153,14 +153,18 @@ bool DrawButton(const DRAWITEMSTRUCT *dis)
 	pressed = (dis->itemState & ODS_SELECTED) != 0;
 	disabled = (dis->itemState & ODS_DISABLED) != 0;
 
+	/* 링크 버튼은 놓인 곳의 색을 바탕으로 쓴다. 창 바탕 위인지 판 위인지. */
+	const bool link = data->kind == BUTTON_LINK || data->kind == BUTTON_CARD_LINK;
+	const COLORREF under = data->kind == BUTTON_LINK ? c.bg : c.card;
+
 	if (disabled) {
 		/* 링크 버튼은 바탕 없이 글자만 흐리게. 상자가 생기면 눌러 볼 것처럼 보인다. */
-		fill = data->kind == BUTTON_LINK ? c.bg : c.disabledFill;
-		border = data->kind == BUTTON_LINK ? CLR_NONE : c.border;
+		fill = link ? under : c.disabledFill;
+		border = link ? CLR_NONE : c.border;
 		text = c.disabledText;
 	}
-	else if (data->kind == BUTTON_LINK) {
-		fill = pressed ? c.buttonPressed : data->hover ? c.border : c.bg;
+	else if (link) {
+		fill = pressed ? c.buttonPressed : data->hover ? (data->kind == BUTTON_LINK ? c.border : c.bg) : under;
 		border = CLR_NONE;
 		text = (c.highContrast && (pressed || data->hover)) ? c.onAccent : c.accent;
 	}
@@ -177,7 +181,7 @@ bool DrawButton(const DRAWITEMSTRUCT *dis)
 
 	/* 둥근 모서리 바깥은 버튼이 놓인 곳의 색이다. 링크 버튼은 창 바탕에, 나머지는 판에. */
 	{
-		HBRUSH back = CreateSolidBrush(data->kind == BUTTON_LINK ? c.bg : c.card);
+		HBRUSH back = CreateSolidBrush(link ? under : c.card);
 
 		FillRect(dis->hDC, &rc, back);
 		DeleteObject(back);

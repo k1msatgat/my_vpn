@@ -2,6 +2,7 @@
 #include "resource.h"
 #include "SettingsDlg.h"
 #include "tunnel.h"
+#include "Oidc.h"
 
 CSettingsDlg::CSettingsDlg(CWnd *parent)
 	: CDialogEx(IDD_SETTINGS, parent)
@@ -43,6 +44,24 @@ bool CSettingsDlg::Check(const CString &server, const CString &port, const CStri
 	return true;
 }
 
+bool CSettingsDlg::CheckLogin(const CString &issuer, const CString &client_id, int *bad_id, CString *why)
+{
+	if (issuer.IsEmpty()) {
+		return true;	/* 사용자 로그인을 쓰지 않는다 */
+	}
+	if (!oidc::IssuerUsable(issuer, why)) {
+		*bad_id = IDC_ISSUER;
+		return false;
+	}
+	if (client_id.IsEmpty()) {
+		*bad_id = IDC_CLIENT_ID;
+		*why = _T("IdP 에 등록된 이 앱의 클라이언트 ID 입니다. 관리자가 알려 줍니다.");
+		return false;
+	}
+
+	return true;
+}
+
 BOOL CSettingsDlg::OnInitDialog()
 {
 	CDialogEx::OnInitDialog();
@@ -50,11 +69,15 @@ BOOL CSettingsDlg::OnInitDialog()
 	SetDlgItemText(IDC_SERVER, m_server);
 	SetDlgItemText(IDC_PORT, m_port);
 	SetDlgItemText(IDC_ADAPTER, m_adapter);
+	SetDlgItemText(IDC_ISSUER, m_issuer);
+	SetDlgItemText(IDC_CLIENT_ID, m_client_id);
 
 	/* 빈 칸에 무엇을 적는지 흐린 글씨로 알려 준다. */
 	GetDlgItem(IDC_SERVER)->SendMessage(EM_SETCUEBANNER, FALSE, (LPARAM)L"203.0.113.10");
 	GetDlgItem(IDC_PORT)->SendMessage(EM_SETCUEBANNER, FALSE, (LPARAM)L"9000");
 	GetDlgItem(IDC_ADAPTER)->SendMessage(EM_SETCUEBANNER, FALSE, (LPARAM)L"ztgate");
+	GetDlgItem(IDC_ISSUER)->SendMessage(EM_SETCUEBANNER, FALSE, (LPARAM)L"https://idp.example.com/realms/corp");
+	GetDlgItem(IDC_CLIENT_ID)->SendMessage(EM_SETCUEBANNER, FALSE, (LPARAM)L"ztgate");
 
 	if (m_point_id != 0) {
 		FieldError(m_point_id, m_point_msg);
@@ -66,17 +89,21 @@ BOOL CSettingsDlg::OnInitDialog()
 
 void CSettingsDlg::OnOK()
 {
-	CString server, port, adapter, why;
+	CString server, port, adapter, issuer, client_id, why;
 	int bad = 0;
 
 	GetDlgItemText(IDC_SERVER, server);
 	GetDlgItemText(IDC_PORT, port);
 	GetDlgItemText(IDC_ADAPTER, adapter);
+	GetDlgItemText(IDC_ISSUER, issuer);
+	GetDlgItemText(IDC_CLIENT_ID, client_id);
 	server.Trim();
 	port.Trim();
 	adapter.Trim();
+	issuer.Trim();
+	client_id.Trim();
 
-	if (!Check(server, port, adapter, &bad, &why)) {
+	if (!Check(server, port, adapter, &bad, &why) || !CheckLogin(issuer, client_id, &bad, &why)) {
 		FieldError(bad, why);
 		return;
 	}
@@ -84,6 +111,8 @@ void CSettingsDlg::OnOK()
 	m_server = server;
 	m_port = port;
 	m_adapter = adapter;
+	m_issuer = issuer;
+	m_client_id = client_id;
 
 	CDialogEx::OnOK();
 }

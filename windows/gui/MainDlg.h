@@ -11,6 +11,7 @@
 
 #include "PacketStore.h"
 #include "DiagDlg.h"
+#include "Oidc.h"
 #include "ui_theme.h"
 #include "ui_controls.h"
 
@@ -20,6 +21,12 @@
 /* 알림 영역 아이콘이 보내는 메시지와 아이콘 번호 (이 창에 하나뿐이다) */
 #define WM_TRAYICON	(WM_APP + 20)
 #define TRAY_ID		1
+
+/* 로그인 워커가 끝났다. lParam = LoginDone* (받는 쪽이 지운다) */
+#define WM_LOGIN_DONE	(WM_APP + 21)
+
+/* 토큰을 갱신하지 못했을 때 다시 해 보는 간격 */
+#define LOGIN_RETRY_MS	30000
 
 #define TIMER_TICK_ID 1
 #define TIMER_TICK_MS 500
@@ -47,7 +54,8 @@ enum {
 
 /* 연결 정보 판의 줄 */
 enum {
-	INFO_SERVER = 0,
+	INFO_USER = 0,
+	INFO_SERVER,
 	INFO_TUNNEL,
 	INFO_TRAFFIC,
 	INFO_DEVICE,
@@ -97,6 +105,7 @@ protected:
 	afx_msg void OnEnroll();
 	afx_msg void OnDiag();
 	afx_msg void OnSettings();
+	afx_msg void OnLogin();
 	afx_msg void OnDestroy();
 	afx_msg void OnSize(UINT type, int cx, int cy);
 	afx_msg void OnTimer(UINT_PTR id);
@@ -117,6 +126,8 @@ protected:
 	afx_msg LRESULT OnVpnService(WPARAM wParam, LPARAM lParam);
 	afx_msg LRESULT OnVpnDevice(WPARAM wParam, LPARAM lParam);
 	afx_msg LRESULT OnVpnError(WPARAM wParam, LPARAM lParam);
+	afx_msg LRESULT OnVpnLogin(WPARAM wParam, LPARAM lParam);
+	afx_msg LRESULT OnLoginDone(WPARAM wParam, LPARAM lParam);
 	afx_msg LRESULT OnTrayIcon(WPARAM wParam, LPARAM lParam);
 	afx_msg LRESULT OnTaskbarCreated(WPARAM wParam, LPARAM lParam);
 	bool ServiceReady();
@@ -147,6 +158,14 @@ private:
 	void TrayMenu(int x, int y);
 	void ShowFromTray();
 	void NotifyTransition(tunnel_state_t prev, tunnel_state_t now, bool userStop);
+
+	/* 사용자 로그인: IdP 에서 토큰을 받아(브라우저 또는 refresh token) 서비스에 건넨다 */
+	void StartLogin(bool interactive);
+	void Logout(const CString &why);
+	void SendToken();
+	void ScheduleRefresh(__int64 expires_at);
+	void UpdateLoginButton();
+	HomeRow LoginRow() const;
 
 	void LoadDeviceId();
 	void TrackAuth(const tunnel_packet_t &p);
@@ -179,6 +198,19 @@ private:
 	std::deque<CString> m_logLines;
 	CDiagDlg m_diag;
 
+	/* 사용자 로그인. 설정(IdP)은 설정 창에서 바뀐다. */
+	CString m_issuer;		/* 비어 있으면 사용자 로그인을 쓰지 않는다 */
+	CString m_client_id;
+	oidc::Tokens m_tokens;		/* access 가 비어 있으면 로그인하지 않은 것 */
+	ipc_login_t m_login;		/* 서비스가 알려 준 서버의 답 */
+	HANDLE m_login_thread;		/* 로그인 / 갱신 워커. 없으면 nullptr */
+	HANDLE m_login_cancel;		/* manual-reset. 브라우저 로그인을 그만둔다 */
+	bool m_login_interactive;	/* 워커가 브라우저 로그인 중이다 (아니면 갱신) */
+	unsigned m_login_gen;		/* 로그아웃하면 는다. 그 전에 시작한 워커의 결과는 버린다 */
+	ULONGLONG m_refresh_at;		/* 다음 갱신 (GetTickCount64), 0 이면 없음 */
+	CString m_login_error;		/* 마지막 실패. 연결 정보 판에 보인다 */
+	CString m_login_user;		/* 서버가 마지막으로 확인해 준 사용자 */
+
 	bool m_tray_added;		/* 알림 영역에 아이콘을 달았다 */
 	bool m_told_tray;		/* "알림 영역에서 계속 실행됩니다"를 한 번 알렸다 */
 	bool m_exiting;			/* 알림 영역 메뉴의 [종료] — 닫기를 숨기기로 바꾸지 않는다 */
@@ -192,6 +224,7 @@ private:
 	CRect m_rc_hero_text;		/* 상태 판에서 글자가 바뀌는 곳 (버튼 위) */
 	CRect m_rc_security;		/* 보안 상태 판 */
 	CRect m_rc_conn;		/* 연결 정보 판 */
+	CRect m_rc_login;		/* 사용자 줄 끝의 로그인 버튼. 로그인을 쓰지 않으면 빈 사각형 */
 
 	CString m_status_title;
 	CString m_status_sub;

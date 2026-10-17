@@ -25,6 +25,7 @@ BEGIN
     PUSHBUTTON      "설정", IDC_SETTINGS, 10, 370, 70, 18
     PUSHBUTTON      "기기 등록", IDC_ENROLL, 85, 370, 70, 18
     PUSHBUTTON      "진단", IDC_DIAG, 160, 370, 70, 18
+    PUSHBUTTON      "로그인", IDC_LOGIN, 180, 300, 40, 14
 END
 
 /* 진단 창. 패킷 표, 로그, 통계. 주 창과 같이 실제 배치는 CDiagDlg::LayoutChildren 이 잡고,
@@ -59,7 +60,7 @@ BEGIN
 END
 
 /* 연결 설정. 꾸미지 않은 표준 다이얼로그다. */
-IDD_SETTINGS DIALOGEX 0, 0, 260, 118
+IDD_SETTINGS DIALOGEX 0, 0, 260, 196
 STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "연결 설정"
 FONT 9, "Segoe UI", 400, 0, 0x1
@@ -72,8 +73,14 @@ BEGIN
     EDITTEXT        IDC_ADAPTER, 70, 52, 100, 13, ES_AUTOHSCROLL
     LTEXT           "어댑터는 연결할 때 이 PC 에 생기는 가상 네트워크 장치입니다. 터널 주소는 서버가 정해 줍니다.", IDC_STATIC, 14, 72, 232, 18
 
-    DEFPUSHBUTTON   "저장", IDOK, 128, 96, 56, 16
-    PUSHBUTTON      "취소", IDCANCEL, 190, 96, 56, 16
+    LTEXT           "로그인 주소", IDC_STATIC, 14, 102, 54, 9
+    EDITTEXT        IDC_ISSUER, 70, 100, 176, 13, ES_AUTOHSCROLL
+    LTEXT           "클라이언트 ID", IDC_STATIC, 14, 121, 54, 9
+    EDITTEXT        IDC_CLIENT_ID, 70, 119, 100, 13, ES_AUTOHSCROLL
+    LTEXT           "회사 계정으로 로그인할 IdP(OpenID Connect)의 발급자 주소입니다. 관리자가 알려 줍니다. 비워 두면 사용자 로그인 없이 기기 신원만으로 연결합니다.", IDC_STATIC, 14, 139, 232, 27
+
+    DEFPUSHBUTTON   "저장", IDOK, 128, 174, 56, 16
+    PUSHBUTTON      "취소", IDCANCEL, 190, 174, 56, 16
 END
 
 IDD_ENROLL DIALOGEX 0, 0, 356, 150
