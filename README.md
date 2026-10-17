@@ -811,6 +811,7 @@ sendto(buf, n + 32)     └─────────────────�
 | 터널 처리량 | `tools/loadgen/iperf.sh` — 실제 서버와 클라이언트 사이의 iperf3 TCP / UDP, 같은 veth 의 직결 값과 나란히 | CI |
 | 실제 IdP | `test/keycloak_check.sh` — Keycloak 을 아래 설정대로 만들고, 그 토큰을 `vpn_server verify-token` 에 넣는다 (받기, 다른 앱의 토큰, 변조, 기기 인가 첫 단계) | CI |
 | 두 장비 시나리오 | `test/server.sh` + `test/client.sh [idle\|stop\|restart]` — 유휴 중 keepalive, 클라이언트 정지 뒤 만료와 복구, 서버 재시작 복구 | 실제 장비 (v4 이후의 클라이언트로는 아직 돌려 보지 않음) |
+| 실사용 시나리오 | 실서버 + Windows 클라이언트(서비스 + GUI)로 사람이 쓰는 순서대로: 서비스 설치 → GUI 로 등록 코드 입력 → 연결 → 브라우저로 터널 안의 사내 서비스(`tools/intranet/intranet.py`) 열기 → 허용하지 않은 포트는 시간 초과 → 서버 정책을 조여 차단, 풀어 30초 안에 자동 복구. 판정은 서버의 감사 로그(ACL 판정)와 사내 서비스의 요청 로그(실제 도착)를 맞대어 본다 | 실제 장비, 손으로 (2026-10-17) |
 
 `auth_check.py`가 보는 것: 모르는 기기와 틀린 키, `AUTH` 재전송과 만료된 nonce, 서명 뒤의 변조, 곡선 위에 없는 공개키, 핸드셰이크 방해, 포스처 정책의 경계값, 세션 패킷의 변조 / 재전송 / 다른 세션의 키, 순서가 바뀐 패킷과 창, 정책 다시 읽기, 규칙별 포스처, 터널 설정의 발급과 갱신, 규칙이 없을 때의 차단, 감사 로그, 등록 코드의 일회성과 등록용 세션의 제한, 사용자 토큰의 검증(서명 · 알고리즘 · 키 · iss · aud · exp · nbf · 이름)과 사용자 / 그룹 규칙, 세션 중의 만료, 깨진 JWKS 를 다시 읽을 때, 커넥터로의 전달과 커넥터가 보낸 패킷의 출발지 / 목적지 검사.
 
@@ -869,7 +870,16 @@ sendto(buf, n + 32)     └─────────────────�
 
 같은 프로토콜(`lib/common`)을 쓰는 Windows 구현입니다. 터널은 시스템 서비스(`vpn_service.exe`, Wintun 가상 어댑터)가 맡고, GUI(`vpn_gui.exe`, MFC)는 권한 없이 이름 있는 파이프로 조종합니다. 기기 키는 DPAPI 로 보관하고, 포스처는 OS 빌드, Windows 방화벽, 보안 센터의 백신 상태를 봅니다. 서비스 없이 도는 콘솔 클라이언트(`vpn_client.exe`)도 있습니다.
 
-CI 는 MSVC `/W4` 빌드와 selftest 까지 확인합니다. 실제 Windows 10 장비에서 콘솔 클라이언트와 서비스(설치, `ctl` 로 상태 / 거절 확인, 권한 없는 GUI 가 붙는 것)를 확인했고, GUI 화면에서의 조작과 재부팅 뒤 이어서 연결하는 것은 확인하지 않았습니다. 빌드는 Visual Studio 2022로 `windows/ztgate.sln`(x64)이고, Wintun은 저장소에 넣지 않아 [wintun.net](https://www.wintun.net)에서 받아 `windows/third_party`에 풉니다.
+GUI 는 상용 에이전트처럼 나뉘어 있습니다.
+
+| 창 | 하는 일 |
+|---|---|
+| 주 창 | 작은 고정 크기 창. 상태(큰 기호, 경과 시간)와 [연결], 차단됐을 때 할 일("Windows 방화벽이 꺼져 있습니다. 켜면 자동으로 다시 연결됩니다"), 보안 상태(방화벽 / 백신 / OS 빌드 / 서버 판정), 연결 정보(서버, 배정받은 터널 주소, 주고받은 양, 기기) |
+| 진단 | 터널을 오가는 패킷 표(헤더 필드, 16진수), 로그, 통계, CSV 저장. 닫혀 있는 동안의 기록도 열면 보인다 |
+| 설정 | 서버 주소, 포트, 어댑터 이름 |
+| 알림 영역 | 창을 닫아도 남아 상태를 툴팁으로 보이고, 차단 / 끊김 / 연결을 Windows 알림으로 알린다. 끝내기는 아이콘 메뉴의 [종료] |
+
+CI 는 MSVC `/W4` 빌드와 selftest 까지 확인합니다. 실제 Windows 10 / 11 장비에서 콘솔 클라이언트와 서비스(설치, `ctl` 로 상태 / 거절 확인, 권한 없는 GUI 가 붙는 것)를 확인했고, 2026-10-17 에 실서버로 GUI 의 등록, 연결, 서버 정책에 의한 차단과 자동 복구, 알림 영역으로 숨기고 되돌리기를 확인했습니다. 알림 토스트가 화면에 뜨는 것과 재부팅 뒤 이어서 연결하는 것은 확인하지 않았습니다. 빌드는 Visual Studio 2022로 `windows/ztgate.sln`(x64)이고, Wintun은 저장소에 넣지 않아 [wintun.net](https://www.wintun.net)에서 받아 `windows/third_party`에 풉니다.
 
 ## 프로젝트 구조
 
@@ -901,6 +911,7 @@ ztgate/
 │   └── ztgate_login           # IdP 로그인 (OIDC 기기 인가) -> 토큰 파일
 ├── tools/loadgen/             # 서버 부하 생성기와 측정 스크립트 (bench.sh, iperf.sh)
 ├── tools/idp/                 # 시험용 IdP — 키 / JWKS / 토큰(mint.py), OIDC 서버(mock_oidc.py)
+├── tools/intranet/            # 터널 안에 두는 시험용 사내 서비스 (HTTP, 요청 로그, 내 세션 대시보드)
 ├── test/
 │   ├── linux_e2e.sh           # Linux 서버 <-> 클라이언트 (netns 두 개)
 │   ├── auth_check.py          # 서버의 프로토콜 검사
@@ -991,5 +1002,7 @@ ztgate/
 | 앱 커넥터 — `server.c` 의 `relay_to_connector` / `relay_from_connector`, `device.c` 의 `connector=`, `client/src/connector.c`, `vpn_client connector`, `auth_check.py` / `linux_e2e.sh` 의 커넥터 시험, MCP 의 `connector`. 커넥터가 없을 때 서버 tun 으로 돌리지 않고 버리는 것, 판정을 서버에만 두는 것은 AI가 제안하고 검토 후 채택 |
 | `linux_e2e.sh` / `iperf.sh` 가 클라이언트를 셸 함수로 띄워 끝난 뒤에도 남기던 것을 고친 것 |
 | `windows/ztgate.sln` 에 빠져 있던 `vpn_service` 프로젝트를 넣은 것 (CI 가 서비스를 빌드하지 않고 있었다) |
+| 시험용 사내 서비스 — `tools/intranet/intranet.py`. 터널 주소에만 바인드하는 것, 다른 기기의 정보는 보이지 않는 것은 AI가 제안하고 검토 후 채택 |
+| GUI 2차 재설계 — 진단 창(`gui/DiagDlg`), 설정 창(`gui/SettingsDlg`), 표시 문자열(`gui/PacketText`), 주 창의 홈 화면과 알림 영역 아이콘(`gui/MainDlg`). "사용자 화면과 진단 분리" 방향은 사용자가 고르고, 화면 구성은 AI가 제안 |
 
 </details>
