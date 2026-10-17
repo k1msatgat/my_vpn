@@ -154,8 +154,9 @@ bool DrawButton(const DRAWITEMSTRUCT *dis)
 	disabled = (dis->itemState & ODS_DISABLED) != 0;
 
 	if (disabled) {
-		fill = c.disabledFill;
-		border = c.border;
+		/* 링크 버튼은 바탕 없이 글자만 흐리게. 상자가 생기면 눌러 볼 것처럼 보인다. */
+		fill = data->kind == BUTTON_LINK ? c.bg : c.disabledFill;
+		border = data->kind == BUTTON_LINK ? CLR_NONE : c.border;
 		text = c.disabledText;
 	}
 	else if (data->kind == BUTTON_LINK) {

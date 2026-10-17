@@ -659,7 +659,8 @@ void CMainDlg::RefreshPosture(bool collect)
 	rows[CHECK_OS].value = s;
 
 	if (m_deny_reason != 0) {
-		rows[CHECK_SERVER].value = _T("차단 — ") + pkt::DenyReasonName(m_deny_reason);
+		/* 사유는 상태 판에 있다. 여기에 또 적으면 판의 폭을 넘어 잘린다. */
+		rows[CHECK_SERVER].value = _T("차단됨");
 		rows[CHECK_SERVER].level = LEVEL_BAD;
 	}
 	else if (m_state == TUNNEL_STATE_CONNECTED) {
@@ -827,7 +828,7 @@ CString CMainDlg::DenyHint() const
 		if (m_local.antivirus == POSTURE_OFF) {
 			return _T("백신의 실시간 보호가 꺼져 있습니다. 켜면 자동으로 다시 연결됩니다.");
 		}
-		return _T("이 PC 의 보안 상태가 회사 정책에 맞지 않습니다. 업데이트를 확인하거나 관리자에게 문의하세요.");
+		return _T("이 PC 가 회사 보안 정책에 맞지 않습니다. 관리자에게 문의하세요.");
 	case DENY_UNKNOWN_DEVICE:
 		return _T("서버에 이 기기가 없습니다. 관리자에게 새 등록 코드를 받아 [기기 등록] 을 해 주세요.");
 	case DENY_BAD_AUTH:
