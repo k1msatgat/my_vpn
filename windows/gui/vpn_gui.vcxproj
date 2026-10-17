@@ -116,6 +116,7 @@
     <ClCompile Include="PacketStore.cpp" />
     <ClCompile Include="PacketText.cpp" />
     <ClCompile Include="DiagDlg.cpp" />
+    <ClCompile Include="SettingsDlg.cpp" />
     <ClCompile Include="ui_theme.cpp" />
     <ClCompile Include="ui_controls.cpp" />
     <!-- 터널(tunnel.c)과 암호 도구, 기기의 키를 읽는 코드는 이 프로그램에 들어 있지 않다.
@@ -134,6 +135,7 @@
     <ClInclude Include="PacketStore.h" />
     <ClInclude Include="PacketText.h" />
     <ClInclude Include="DiagDlg.h" />
+    <ClInclude Include="SettingsDlg.h" />
     <ClInclude Include="ui_theme.h" />
     <ClInclude Include="ui_controls.h" />
     <ClInclude Include="..\core\vpn_session.h" />

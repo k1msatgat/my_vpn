@@ -5,6 +5,7 @@
 #include "EnrollDlg.h"
 #include "PacketText.h"
 #include "DiagDlg.h"
+#include "SettingsDlg.h"
 
 #ifdef _MSC_VER
 #pragma comment(lib, "uxtheme.lib")
@@ -43,6 +44,7 @@ BEGIN_MESSAGE_MAP(CMainDlg, CDialogEx)
 	ON_BN_CLICKED(IDC_CONNECT, &CMainDlg::OnConnect)
 	ON_BN_CLICKED(IDC_ENROLL, &CMainDlg::OnEnroll)
 	ON_BN_CLICKED(IDC_DIAG, &CMainDlg::OnDiag)
+	ON_BN_CLICKED(IDC_SETTINGS, &CMainDlg::OnSettings)
 	ON_WM_DESTROY()
 	ON_WM_SIZE()
 	ON_WM_GETMINMAXINFO()
@@ -82,21 +84,14 @@ BOOL CMainDlg::OnInitDialog()
 	ui::StyleButton(::GetDlgItem(GetSafeHwnd(), IDC_CONNECT), ui::BUTTON_PRIMARY);
 	ui::StyleButton(::GetDlgItem(GetSafeHwnd(), IDC_ENROLL), ui::BUTTON_SECONDARY);
 	ui::StyleButton(::GetDlgItem(GetSafeHwnd(), IDC_DIAG), ui::BUTTON_SECONDARY);
-
-	/* 빈 칸에 무엇을 적는지 흐린 글씨로 알려 준다. */
-	GetDlgItem(IDC_SERVER)->SendMessage(EM_SETCUEBANNER, FALSE, (LPARAM)L"203.0.113.10");
-	GetDlgItem(IDC_PORT)->SendMessage(EM_SETCUEBANNER, FALSE, (LPARAM)L"9000");
-	/* 터널 IP 는 적는 칸이 아니라 보는 칸이다. 서버가 이 기기에 정해 준 주소가 연결된
-	 * 뒤에 여기에 나온다. 전에는 서버가 이미 아는 값을 사용자가 똑같이 한 번 더 적어야
-	 * 했고, 틀리면 거절당할 뿐이었다. */
-	GetDlgItem(IDC_TUNIP)->SendMessage(EM_SETREADONLY, TRUE, 0);
-	GetDlgItem(IDC_TUNIP)->SendMessage(EM_SETCUEBANNER, TRUE, (LPARAM)L"서버가 배정");
+	ui::StyleButton(::GetDlgItem(GetSafeHwnd(), IDC_SETTINGS), ui::BUTTON_SECONDARY);
 
 	SetupPostureList();
 	LoadDeviceId();
 	RefreshPosture(true);
 
 	LoadSettings();
+	UpdateInfo();
 
 	/* 창이 만들어진 뒤여야 PostMessage 대상 HWND 를 넘길 수 있다. */
 	m_session = vpn_session_create(GetSafeHwnd());
@@ -137,63 +132,79 @@ void CMainDlg::LoadSettings()
 {
 	CWinApp *app = AfxGetApp();
 
-	SetDlgItemText(IDC_ADAPTER, app->GetProfileString(_T("conn"), _T("adapter"), _T("ztgate")));
-	SetDlgItemText(IDC_SERVER, app->GetProfileString(_T("conn"), _T("server"), _T("49.247.139.39")));
-	SetDlgItemText(IDC_PORT, app->GetProfileString(_T("conn"), _T("port"), _T("9000")));
+	m_adapter = app->GetProfileString(_T("conn"), _T("adapter"), _T("ztgate"));
+	m_server = app->GetProfileString(_T("conn"), _T("server"), _T("49.247.139.39"));
+	m_port = app->GetProfileString(_T("conn"), _T("port"), _T("9000"));
 }
 
 void CMainDlg::SaveSettings()
 {
 	CWinApp *app = AfxGetApp();
-	CString s;
 
-	GetDlgItemText(IDC_ADAPTER, s);
-	app->WriteProfileString(_T("conn"), _T("adapter"), s);
-	GetDlgItemText(IDC_SERVER, s);
-	app->WriteProfileString(_T("conn"), _T("server"), s);
-	GetDlgItemText(IDC_PORT, s);
-	app->WriteProfileString(_T("conn"), _T("port"), s);
+	app->WriteProfileString(_T("conn"), _T("adapter"), m_adapter);
+	app->WriteProfileString(_T("conn"), _T("server"), m_server);
+	app->WriteProfileString(_T("conn"), _T("port"), m_port);
+}
+
+/* 설정 창을 연다. bad_id 가 있으면 그 칸을 가리키며 연다. 저장했으면 true. */
+bool CMainDlg::EditSettings(int bad_id, const CString &why)
+{
+	CSettingsDlg dlg(this);
+
+	dlg.m_server = m_server;
+	dlg.m_port = m_port;
+	dlg.m_adapter = m_adapter;
+	if (bad_id != 0) {
+		dlg.PointAt(bad_id, why);
+	}
+	if (dlg.DoModal() != IDOK) {
+		return false;
+	}
+
+	m_server = dlg.m_server;
+	m_port = dlg.m_port;
+	m_adapter = dlg.m_adapter;
+	SaveSettings();
+	UpdateInfo();
+
+	return true;
+}
+
+void CMainDlg::OnSettings()
+{
+	EditSettings(0, CString());
+}
+
+/* 저장된 설정이 쓸 수 있는 값인가. 아니면 설정 창을 그 칸에 맞춰 연다 — 레지스트리를
+ * 손으로 고쳤거나 예전 버전이 남긴 값일 수 있다. */
+bool CMainDlg::SettingsUsable()
+{
+	CString why;
+	int bad = 0;
+
+	if (CSettingsDlg::Check(m_server, m_port, m_adapter, &bad, &why)) {
+		return true;
+	}
+
+	return EditSettings(bad, why);
 }
 
 /* ---- 설정 읽기 ---------------------------------------------------------- */
 bool CMainDlg::BuildConfig(tunnel_config_t &cfg)
 {
-	CString adapter;
-	CString server;
-	CString port;
-	int port_num;
-
-	GetDlgItemText(IDC_ADAPTER, adapter);
-	GetDlgItemText(IDC_SERVER, server);
-	GetDlgItemText(IDC_PORT, port);
-
-	adapter.Trim();
-	server.Trim();
-	port.Trim();
-
 	ZeroMemory(&cfg, sizeof(cfg));
 	/* on_packet 을 쓰므로 코어의 패킷 텍스트 로그는 필요 없다. */
 	cfg.log_packets = 0;
 
-	if (adapter.IsEmpty() || adapter.GetLength() >= TUNNEL_ADAPTER_NAME_LEN) {
-		FieldError(IDC_ADAPTER, _T("터널 어댑터의 이름입니다. 비워 둘 수 없습니다."));
+	if (!SettingsUsable()) {
 		return false;
 	}
+
 	/* adapter_name 은 wchar_t 배열이고 cfg 는 구조체째로 복사되므로
-	 * CString 의 수명에 의존하지 않는다. */
-	wcscpy_s(cfg.adapter_name, TUNNEL_ADAPTER_NAME_LEN, adapter);
-
-	if (InetPtonW(AF_INET, server, &cfg.server_ip) != 1) {
-		FieldError(IDC_SERVER, _T("서버의 IPv4 주소를 적어 주세요. 예) 203.0.113.10"));
-		return false;
-	}
-
-	port_num = _ttoi(port);
-	if (port_num <= 0 || port_num > 65535) {
-		FieldError(IDC_PORT, _T("1 부터 65535 사이의 숫자여야 합니다."));
-		return false;
-	}
-	cfg.server_port = static_cast<uint16_t>(port_num);
+	 * CString 의 수명에 의존하지 않는다. 값은 SettingsUsable 이 확인했다. */
+	wcscpy_s(cfg.adapter_name, TUNNEL_ADAPTER_NAME_LEN, m_adapter);
+	InetPtonW(AF_INET, m_server, &cfg.server_ip);
+	cfg.server_port = static_cast<uint16_t>(_ttoi(m_port));
 
 	/* 터널은 서비스가 연다. 이 프로그램은 어디로 붙을지만 알려 준다 — 기기의 키는
 	 * 서비스만 읽을 수 있는 곳에 있고 여기로는 오지 않는다. */
@@ -261,24 +272,6 @@ void CMainDlg::RequestDisconnect()
 	SetUiState(m_state);
 }
 
-/* 잘못 적은 칸을 가리키며 말한다. 메시지 상자는 확인을 누르고 나면 어느 칸이었는지
- * 다시 찾아야 한다. */
-void CMainDlg::FieldError(int id, LPCTSTR message)
-{
-	CWnd *edit = GetDlgItem(id);
-	EDITBALLOONTIP tip;
-
-	ZeroMemory(&tip, sizeof(tip));
-	tip.cbStruct = sizeof(tip);
-	tip.pszTitle = L"입력을 확인해 주세요";
-	tip.pszText = message;
-	tip.ttiIcon = TTI_WARNING;
-
-	edit->SetFocus();
-	edit->SendMessage(EM_SETSEL, 0, -1);
-	edit->SendMessage(EM_SHOWBALLOONTIP, 0, reinterpret_cast<LPARAM>(&tip));
-}
-
 /* 이 기기의 ID 와 키를 새로 만든다. */
 void CMainDlg::OnEnroll()
 {
@@ -303,17 +296,13 @@ void CMainDlg::OnEnroll()
 		}
 	}
 
-	/* 보통은 관리자가 준 등록 코드로 올린다. 어느 서버에 올리는지는 위의 연결 설정을
+	/* 보통은 관리자가 준 등록 코드로 올린다. 어느 서버에 올리는지는 연결 설정을
 	 * 그대로 쓴다 — 등록한 서버와 연결할 서버가 다를 이유가 없다. */
-	CString server;
-	CString port;
+	if (!SettingsUsable()) {
+		return;
+	}
 
-	GetDlgItemText(IDC_SERVER, server);
-	GetDlgItemText(IDC_PORT, port);
-	server.Trim();
-	port.Trim();
-
-	CEnrollCodeDlg ask(_T("올릴 서버  ") + server + _T(" : ") + port, this);
+	CEnrollCodeDlg ask(_T("올릴 서버  ") + m_server + _T(" : ") + m_port, this);
 	INT_PTR choice = ask.DoModal();
 
 	if (choice == CEnrollCodeDlg::RESULT_MANUAL) {
@@ -345,18 +334,10 @@ void CMainDlg::OnEnroll()
 	}
 
 	tunnel_config_t cfg;
-	int port_num = _ttoi(port);
 
 	ZeroMemory(&cfg, sizeof(cfg));
-	if (InetPtonW(AF_INET, server, &cfg.server_ip) != 1) {
-		FieldError(IDC_SERVER, _T("등록할 서버의 IPv4 주소를 먼저 적어 주세요. 예) 203.0.113.10"));
-		return;
-	}
-	if (port_num <= 0 || port_num > 65535) {
-		FieldError(IDC_PORT, _T("1 부터 65535 사이의 숫자여야 합니다."));
-		return;
-	}
-	cfg.server_port = static_cast<uint16_t>(port_num);
+	InetPtonW(AF_INET, m_server, &cfg.server_ip);
+	cfg.server_port = static_cast<uint16_t>(_ttoi(m_port));
 
 	int result;
 
@@ -642,7 +623,7 @@ void CMainDlg::TrackAuth(const tunnel_packet_t &p)
 			}
 			if (text != m_tun_text) {
 				m_tun_text = text;
-				SetDlgItemText(IDC_TUNIP, text);
+				UpdateInfo();
 			}
 		}
 	}
@@ -816,17 +797,27 @@ void CMainDlg::SetUiState(tunnel_state_t state)
 	 * 그것이 [연결]이라 편하지만, 열려 있을 때는 같은 버튼이 [연결 해제]다 — 패킷을
 	 * 보다가 Enter 를 눌렀다고 터널이 끊겨서는 안 된다. 그동안은 기본 버튼을 버튼이
 	 * 아닌 컨트롤로 돌려 둔다 (그쪽으로 가는 BN_CLICKED 는 받는 곳이 없다). */
-	SendMessage(DM_SETDEFID, stopped ? IDC_CONNECT : IDC_TAB);
+	SendMessage(DM_SETDEFID, stopped ? IDC_CONNECT : IDC_POSTURE);
 
 	/* 연결 중에 설정을 바꿔도 반영되지 않으므로 잠근다. */
-	GetDlgItem(IDC_ADAPTER)->EnableWindow(stopped);
-	GetDlgItem(IDC_SERVER)->EnableWindow(stopped);
-	GetDlgItem(IDC_PORT)->EnableWindow(stopped);
+	GetDlgItem(IDC_SETTINGS)->EnableWindow(stopped);
 
 	/* 터널이 닫히면 받았던 주소도 더는 내 것이 아니다. */
 	if (stopped && !m_tun_text.IsEmpty()) {
 		m_tun_text.Empty();
-		SetDlgItemText(IDC_TUNIP, _T(""));
+		UpdateInfo();
+	}
+}
+
+/* 머리 오른쪽의 연결 정보: 어느 서버로 붙는지와 서버가 배정한 터널 주소. 보는 칸이다 —
+ * 서버 주소는 설정 창에서 바꾸고, 터널 주소는 서버가 정해 준다. */
+void CMainDlg::UpdateInfo()
+{
+	m_info_server = m_server + _T(" : ") + m_port;
+	m_info_tunnel = m_tun_text.IsEmpty() ? CString(_T("연결하면 서버가 배정")) : m_tun_text;
+
+	if (!m_rc_info.IsRectEmpty()) {
+		InvalidateRect(&m_rc_info, FALSE);
 	}
 }
 
@@ -951,12 +942,8 @@ HBRUSH CMainDlg::OnCtlColor(CDC *pDC, CWnd *pWnd, UINT type)
 	const ui::Palette &c = ui::Colors();
 
 	if (type == CTLCOLOR_STATIC || type == CTLCOLOR_BTN) {
-		const int id = pWnd->GetDlgCtrlID();
-		const bool label = (id == IDC_LBL_ADAPTER || id == IDC_LBL_TUNIP ||
-				id == IDC_LBL_SERVER || id == IDC_LBL_PORT);
-
 		pDC->SetBkColor(c.card);
-		pDC->SetTextColor(label ? c.muted : c.text);
+		pDC->SetTextColor(c.text);
 
 		return static_cast<HBRUSH>(m_card_brush.GetSafeHandle());
 	}
@@ -1049,6 +1036,27 @@ void CMainDlg::PaintBackground(HDC dc)
 				DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 		ui::Text(dc, sub, m_status_sub, m_fonts.label, m_status_sub_color,
 				DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+		/* 연결 정보: 이름은 흐리게, 값은 진하게. 두 줄. */
+		if (!m_rc_info.IsRectEmpty()) {
+			const int labelW = ui::Scale(64);
+			CRect row = m_rc_info;
+
+			row.bottom = row.top + m_rc_info.Height() / 2;
+			for (int i = 0; i < 2; i++) {
+				CRect name = row;
+				CRect value = row;
+
+				name.right = name.left + labelW;
+				value.left = name.right;
+				ui::Text(dc, name, i == 0 ? _T("서버") : _T("터널 주소"), m_fonts.label, c.muted,
+						DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+				ui::Text(dc, value, i == 0 ? m_info_server : m_info_tunnel, m_fonts.label,
+						(i == 1 && m_tun_text.IsEmpty()) ? c.muted : c.text,
+						DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+				row.OffsetRect(0, row.Height());
+			}
+		}
 	}
 
 	/* 내용: 제목 + 포스처 표 */
@@ -1159,34 +1167,20 @@ void CMainDlg::LayoutChildren(int cx, int cy)
 		}
 	};
 
-	/* 머리: 오른쪽 끝에 버튼, 그 왼쪽에 입력 칸 두 줄, 남는 왼쪽이 상태다. */
+	/* 머리: 오른쪽 끝에 [연결], 그 아래 작게 [설정]. 왼쪽에 상태, 가운데에 연결 정보. */
 	const int btnW = DX(74);
 	const int btnH = DY(20);
 	const int btnX = m_rc_header.right - DX(10) - btnW;
-	Place(IDC_CONNECT, btnX, m_rc_header.top + (m_rc_header.Height() - btnH) / 2, btnW, btnH);
+	const int btnY = m_rc_header.top + DY(7);
+	Place(IDC_CONNECT, btnX, btnY, btnW, btnH);
+	Place(IDC_SETTINGS, btnX, btnY + btnH + DY(3), btnW, DY(13));
 
-	const int lblW = DX(30);
-	const int edit1W = DX(88);
-	const int edit2W = DX(60);
-	const int edit2X = btnX - DX(14) - edit2W;
-	const int lbl2X = edit2X - lblW;
-	const int edit1X = lbl2X - DX(10) - edit1W;
-	const int lbl1X = edit1X - lblW;
-	const int row1 = m_rc_header.top + DY(9);
-	const int row2 = m_rc_header.top + DY(27);
-	const int editH = DY(13);
-
-	Place(IDC_LBL_SERVER, lbl1X, row1 + DY(2), lblW, DY(9));
-	Place(IDC_SERVER, edit1X, row1, edit1W, editH);
-	Place(IDC_LBL_PORT, lbl2X, row1 + DY(2), lblW, DY(9));
-	Place(IDC_PORT, edit2X, row1, edit2W, editH);
-	Place(IDC_LBL_TUNIP, lbl1X, row2 + DY(2), lblW, DY(9));
-	Place(IDC_TUNIP, edit1X, row2, edit1W, editH);
-	Place(IDC_LBL_ADAPTER, lbl2X, row2 + DY(2), lblW, DY(9));
-	Place(IDC_ADAPTER, edit2X, row2, edit2W, editH);
+	const int infoW = DX(170);
+	m_rc_info.SetRect(btnX - DX(14) - infoW, m_rc_header.top + DY(9),
+			btnX - DX(14), m_rc_header.bottom - DY(9));
 
 	m_rc_status.SetRect(m_rc_header.left + DX(12), m_rc_header.top + DY(8),
-			lbl1X - DX(8), m_rc_header.bottom - DY(8));
+			m_rc_info.left - DX(8), m_rc_header.bottom - DY(8));
 
 	/* 내용의 윗줄: 왼쪽에 제목(그린다), 오른쪽에 버튼 */
 	const int rowTop = m_rc_content.top + DY(3);

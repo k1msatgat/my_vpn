@@ -45,6 +45,7 @@ protected:
 	afx_msg void OnConnect();
 	afx_msg void OnEnroll();
 	afx_msg void OnDiag();
+	afx_msg void OnSettings();
 	afx_msg void OnDestroy();
 	afx_msg void OnSize(UINT type, int cx, int cy);
 	afx_msg void OnGetMinMaxInfo(MINMAXINFO *mmi);
@@ -76,7 +77,9 @@ private:
 	bool BuildConfig(tunnel_config_t &cfg);
 	void AppendLog(const CString &text);
 	void RequestDisconnect();
-	void FieldError(int id, LPCTSTR message);
+	bool EditSettings(int bad_id, const CString &why);
+	bool SettingsUsable();
+	void UpdateInfo();
 	void SetUiState(tunnel_state_t state);
 	void UpdateStatus();
 	void PaintBackground(HDC dc);
@@ -112,7 +115,12 @@ private:
 	int m_posture_ticks;
 
 	uint32_t m_session_idx;		/* 지금 세션, 없으면 0 */
-	CString m_tun_text;		/* 터널 IP 칸에 적어 둔 글. 같은 값으로 다시 쓰지 않으려고 기억한다 */
+	CString m_tun_text;		/* 서버가 배정한 터널 주소. 같은 값으로 다시 그리지 않으려고 기억한다 */
+
+	/* 연결 설정 (레지스트리에 둔다). 설정 창에서만 바뀐다. */
+	CString m_server;
+	CString m_port;
+	CString m_adapter;
 	int m_link;			/* 서비스와의 연결 (vpn_remote_link_t) */
 	bool m_stopping;		/* 해제를 요청하고 워커가 끝나기를 기다리는 중 */
 
@@ -127,11 +135,14 @@ private:
 	CBrush m_card_brush;		/* 판 위에 놓인 라벨 / 체크 상자의 바탕 */
 	CImageList m_row_pad;		/* 리스트의 행 높이를 늘리는 빈 이미지 목록 */
 	CRect m_rc_header;
-	CRect m_rc_status;		/* 상태 글자가 바뀔 때 다시 그릴 영역 */
+	CRect m_rc_status;
+	CRect m_rc_info;		/* 머리 가운데의 연결 정보 */		/* 상태 글자가 바뀔 때 다시 그릴 영역 */
 	CRect m_rc_content;
 	CRect m_rc_content_title;
 	int m_sep_y;			/* 제목 줄 아래 구분선 */
 
+	CString m_info_server;
+	CString m_info_tunnel;
 	CString m_status_title;
 	CString m_status_sub;
 	COLORREF m_status_dot;
