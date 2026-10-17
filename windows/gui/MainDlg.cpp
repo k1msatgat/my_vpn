@@ -1,5 +1,6 @@
 #include "framework.h"
 #include <uxtheme.h>
+#include <windowsx.h>
 #include "resource.h"
 #include "MainDlg.h"
 #include "EnrollDlg.h"
@@ -10,6 +11,10 @@
 #ifdef _MSC_VER
 #pragma comment(lib, "uxtheme.lib")
 #endif
+
+/* 탐색기가 다시 뜨면 알림 영역의 아이콘이 모두 사라진다. 새 작업 표시줄이 만들어질 때
+ * 모든 최상위 창에 이 메시지가 오므로, 받으면 아이콘을 다시 단다. */
+static const UINT WM_TASKBAR_CREATED = RegisterWindowMessageW(L"TaskbarCreated");
 
 
 CMainDlg::CMainDlg(CWnd *parent)
@@ -23,6 +28,10 @@ CMainDlg::CMainDlg(CWnd *parent)
 	, m_link(VPN_REMOTE_DOWN)
 	, m_stopping(false)
 	, m_diag(m_store, m_logLines)
+	, m_tray_added(false)
+	, m_told_tray(false)
+	, m_exiting(false)
+	, m_notified_deny(0)
 	, m_status_icon(ICON_POWER)
 	, m_status_color(0)
 	, m_status_hint_color(0)
@@ -68,6 +77,8 @@ BEGIN_MESSAGE_MAP(CMainDlg, CDialogEx)
 	ON_MESSAGE(WM_VPN_SERVICE, &CMainDlg::OnVpnService)
 	ON_MESSAGE(WM_VPN_DEVICE, &CMainDlg::OnVpnDevice)
 	ON_MESSAGE(WM_VPN_ERROR, &CMainDlg::OnVpnError)
+	ON_MESSAGE(WM_TRAYICON, &CMainDlg::OnTrayIcon)
+	ON_REGISTERED_MESSAGE(WM_TASKBAR_CREATED, &CMainDlg::OnTaskbarCreated)
 END_MESSAGE_MAP()
 
 BOOL CMainDlg::OnInitDialog()
@@ -109,6 +120,9 @@ BOOL CMainDlg::OnInitDialog()
 	UpdateInfo();
 	SetUiState(TUNNEL_STATE_STOPPED);
 	SetTimer(TIMER_TICK_ID, TIMER_TICK_MS, nullptr);
+
+	m_tray_tip = _T("ztgate \x2014 ") + m_status_title;
+	TrayAdd();
 
 	/* 창 크기는 내용에 맞춘 고정 크기다. 늘려도 보여 줄 것이 더 없다. */
 	FitWindow();
@@ -443,6 +457,15 @@ LRESULT CMainDlg::OnVpnPackets(WPARAM, LPARAM)
 	UpdateStatus();
 	RefreshPosture(false);
 
+	/* 거부는 사유를 알게 되는 여기서 알린다. 같은 거부를 keepalive 마다 다시 알리지 않는다. */
+	if (m_deny_reason != 0 && m_deny_reason != m_notified_deny) {
+		m_notified_deny = m_deny_reason;
+		TrayNotify(_T("접속 차단됨"), DenyHint(), true);
+	}
+	else if (m_deny_reason == 0) {
+		m_notified_deny = 0;
+	}
+
 	return 0;
 }
 
@@ -690,6 +713,8 @@ void CMainDlg::SetUiState(tunnel_state_t state)
 {
 	BOOL stopped;
 	CWnd *connect = GetDlgItem(IDC_CONNECT);
+	const tunnel_state_t prev = m_state;
+	const bool userStop = m_stopping;	/* 아래에서 지우기 전에 */
 
 	if (state == TUNNEL_STATE_CONNECTED && m_connected_at == 0) {
 		m_connected_at = GetTickCount64();
@@ -703,6 +728,9 @@ void CMainDlg::SetUiState(tunnel_state_t state)
 	m_state = state;
 	UpdateStatus();
 	RefreshPosture(false);
+	if (prev != state) {
+		NotifyTransition(prev, state, userStop);
+	}
 
 	stopped = (state == TUNNEL_STATE_STOPPED) ? TRUE : FALSE;
 
@@ -915,6 +943,7 @@ void CMainDlg::UpdateStatus()
 	if (!m_rc_hero_text.IsRectEmpty()) {
 		InvalidateRect(&m_rc_hero_text, FALSE);
 	}
+	TrayTip(_T("ztgate \x2014 ") + title);
 }
 
 void CMainDlg::OnTimer(UINT_PTR id)
@@ -1222,11 +1251,223 @@ void CMainDlg::LayoutChildren(int cx, int)
 	Invalidate(FALSE);
 }
 
+/* ---- 알림 영역 (트레이) ------------------------------------------------- */
+
+void CMainDlg::TrayAdd()
+{
+	NOTIFYICONDATAW nid;
+
+	ZeroMemory(&nid, sizeof(nid));
+	nid.cbSize = sizeof(nid);
+	nid.hWnd = GetSafeHwnd();
+	nid.uID = TRAY_ID;
+	nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
+	nid.uCallbackMessage = WM_TRAYICON;
+	nid.hIcon = static_cast<HICON>(LoadImageW(AfxGetInstanceHandle(), MAKEINTRESOURCEW(IDI_APP),
+			IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_SHARED));
+	wcsncpy_s(nid.szTip, ARRAYSIZE(nid.szTip), m_tray_tip, _TRUNCATE);
+
+	m_tray_added = Shell_NotifyIconW(NIM_ADD, &nid) != FALSE;
+	if (!m_tray_added) {
+		/* 그러면 닫기가 예전처럼 프로그램을 끝낸다 (OnCancel). */
+		AppendLog(_T("[gui] 알림 영역에 아이콘을 달지 못했습니다"));
+	}
+	else {
+		/* 버전 4: 왼쪽 클릭이 NIN_SELECT 로, 오른쪽 클릭이 WM_CONTEXTMENU 로 오고, 키보드로
+		 * 고른 것도 같은 길로 온다. 툴팁은 NIF_SHOWTIP 을 줘야 보인다. */
+		nid.uVersion = NOTIFYICON_VERSION_4;
+		Shell_NotifyIconW(NIM_SETVERSION, &nid);
+	}
+}
+
+LRESULT CMainDlg::OnTaskbarCreated(WPARAM, LPARAM)
+{
+	TrayAdd();
+
+	return 0;
+}
+
+/* 아이콘에 마우스를 올렸을 때의 글. 같은 글로 다시 부르지 않는다. */
+void CMainDlg::TrayTip(const CString &tip)
+{
+	NOTIFYICONDATAW nid;
+
+	if (tip == m_tray_tip) {
+		return;
+	}
+	m_tray_tip = tip;
+	if (!m_tray_added) {
+		return;
+	}
+
+	ZeroMemory(&nid, sizeof(nid));
+	nid.cbSize = sizeof(nid);
+	nid.hWnd = GetSafeHwnd();
+	nid.uID = TRAY_ID;
+	nid.uFlags = NIF_TIP | NIF_SHOWTIP;
+	wcsncpy_s(nid.szTip, ARRAYSIZE(nid.szTip), tip, _TRUNCATE);
+	Shell_NotifyIconW(NIM_MODIFY, &nid);
+}
+
+/* Windows 의 알림(토스트)으로 띄운다. 사용자가 이 창을 보고 있으면 띄우지 않는다 — 같은
+ * 것이 화면에 이미 있다. */
+void CMainDlg::TrayNotify(LPCTSTR title, const CString &text, bool warning)
+{
+	NOTIFYICONDATAW nid;
+
+	if (!m_tray_added) {
+		return;
+	}
+	if (IsWindowVisible() && !IsIconic() && ::GetForegroundWindow() == GetSafeHwnd()) {
+		return;
+	}
+
+	ZeroMemory(&nid, sizeof(nid));
+	nid.cbSize = sizeof(nid);
+	nid.hWnd = GetSafeHwnd();
+	nid.uID = TRAY_ID;
+	nid.uFlags = NIF_INFO;
+	nid.dwInfoFlags = warning ? NIIF_WARNING : NIIF_INFO;
+	wcsncpy_s(nid.szInfoTitle, ARRAYSIZE(nid.szInfoTitle), title, _TRUNCATE);
+	wcsncpy_s(nid.szInfo, ARRAYSIZE(nid.szInfo), text, _TRUNCATE);
+	Shell_NotifyIconW(NIM_MODIFY, &nid);
+}
+
+/* 상태가 바뀐 순간 중 사용자가 알아야 하는 것만 알린다. 연결 중 / 재연결 중 같은 지나가는
+ * 상태는 알리지 않는다 — 몇 초 뒤면 결과가 나온다. 거부는 사유를 알게 되는 OnVpnPackets 가
+ * 따로 알린다. */
+void CMainDlg::NotifyTransition(tunnel_state_t prev, tunnel_state_t now, bool userStop)
+{
+	if (now == TUNNEL_STATE_CONNECTED && prev != TUNNEL_STATE_CONNECTED) {
+		TrayNotify(_T("연결됨"), prev == TUNNEL_STATE_RECONNECTING ?
+				CString(_T("사내망에 다시 연결됐습니다.")) : CString(_T("사내망에 연결됐습니다.")), false);
+	}
+	else if (now == TUNNEL_STATE_STOPPED && !userStop && m_deny_reason == 0 &&
+			(prev == TUNNEL_STATE_CONNECTED || prev == TUNNEL_STATE_RECONNECTING)) {
+		TrayNotify(_T("연결이 끊겼습니다"),
+				CString(_T("다시 연결하려면 ztgate 를 열어 [연결] 을 누르세요.")), true);
+	}
+}
+
+void CMainDlg::ShowFromTray()
+{
+	ShowWindow(SW_SHOW);
+	if (IsIconic()) {
+		ShowWindow(SW_RESTORE);
+	}
+	SetForegroundWindow();
+}
+
+LRESULT CMainDlg::OnTrayIcon(WPARAM wParam, LPARAM lParam)
+{
+	switch (LOWORD(lParam)) {
+	case NIN_SELECT:
+	case NIN_KEYSELECT:
+	case NIN_BALLOONUSERCLICK:
+		ShowFromTray();
+		break;
+	case WM_CONTEXTMENU:
+		/* 버전 4 에서는 메뉴를 띄울 자리가 wParam 에 온다 (키보드로 연 경우도). */
+		TrayMenu(GET_X_LPARAM(wParam), GET_Y_LPARAM(wParam));
+		break;
+	default:
+		break;
+	}
+
+	return 0;
+}
+
+void CMainDlg::TrayMenu(int x, int y)
+{
+	enum { CMD_OPEN = 1, CMD_CONNECT, CMD_DIAG, CMD_EXIT };
+	const bool active = vpn_session_active(m_session) != 0;
+	HMENU menu = CreatePopupMenu();
+	UINT cmd;
+
+	if (!menu) {
+		return;
+	}
+
+	AppendMenuW(menu, MF_STRING, CMD_OPEN, L"ztgate 열기");
+	SetMenuDefaultItem(menu, CMD_OPEN, FALSE);
+	AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+	AppendMenuW(menu, MF_STRING | (m_stopping ? MF_GRAYED : 0), CMD_CONNECT,
+			active ? L"연결 해제" : L"연결");
+	AppendMenuW(menu, MF_STRING, CMD_DIAG, L"진단");
+	AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+	AppendMenuW(menu, MF_STRING, CMD_EXIT, L"종료");
+
+	/* 이 창이 앞에 있지 않으면 메뉴 바깥을 눌러도 메뉴가 닫히지 않는다. 메뉴가 닫힌 뒤
+	 * WM_NULL 을 보내는 것도 같은 문제를 피하는 관례다 (KB135788). */
+	SetForegroundWindow();
+	cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN, x, y, 0,
+			GetSafeHwnd(), nullptr);
+	PostMessage(WM_NULL);
+	DestroyMenu(menu);
+
+	switch (cmd) {
+	case CMD_OPEN:
+		ShowFromTray();
+		break;
+	case CMD_CONNECT:
+		/* 연결은 등록 / 설정을 물을 수 있으니 창을 먼저 보인다. 해제는 묻지 않는다. */
+		if (!active) {
+			ShowFromTray();
+		}
+		OnConnect();
+		break;
+	case CMD_DIAG:
+		OnDiag();
+		break;
+	case CMD_EXIT:
+		m_exiting = true;
+		CDialogEx::OnCancel();
+		break;
+	default:
+		break;
+	}
+}
+
+/* 닫기(X, Esc)는 알림 영역으로 숨기기다. 터널은 어차피 서비스가 맡고 있어 이 창을 닫아도
+ * 끊기지 않는다. 숨겨 두면 차단되거나 끊겼을 때 알려 줄 수 있다. 끝내기는 알림 영역의
+ * 메뉴에서 한다. 알림 영역에 아이콘을 달지 못했으면 예전처럼 닫는다. */
+void CMainDlg::OnCancel()
+{
+	if (!m_tray_added || m_exiting) {
+		CDialogEx::OnCancel();
+		return;
+	}
+
+	ShowWindow(SW_HIDE);
+	if (!m_told_tray) {
+		m_told_tray = true;
+		TrayNotify(_T("ztgate 는 알림 영역에서 계속 실행됩니다"),
+				CString(_T("연결 상태가 바뀌면 알려 드립니다. 끝내려면 아이콘을 오른쪽 클릭해 [종료] 를 누르세요.")),
+				false);
+	}
+}
+
+/* Enter 가 다이얼로그를 닫지 않게. 기본 버튼은 SetUiState 가 정한다. */
+void CMainDlg::OnOK()
+{
+}
+
 /* ---- 종료 -------------------------------------------------------------- */
 void CMainDlg::OnDestroy()
 {
 	KillTimer(TIMER_TICK_ID);
 	SaveSettings();
+
+	if (m_tray_added) {
+		NOTIFYICONDATAW nid;
+
+		ZeroMemory(&nid, sizeof(nid));
+		nid.cbSize = sizeof(nid);
+		nid.hWnd = GetSafeHwnd();
+		nid.uID = TRAY_ID;
+		Shell_NotifyIconW(NIM_DELETE, &nid);
+		m_tray_added = false;
+	}
 
 	/* 진단 창은 이 창이 가진 패킷과 로그를 가리킨다. 그것들보다 먼저 사라져야 한다. */
 	if (m_diag.GetSafeHwnd()) {

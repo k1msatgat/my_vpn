@@ -17,6 +17,10 @@
 /* 한 번에 링버퍼에서 꺼내는 패킷 수. 너무 크면 UI 가 한 번에 오래 멈춘다. */
 #define PACKET_DRAIN_BATCH 256
 
+/* 알림 영역 아이콘이 보내는 메시지와 아이콘 번호 (이 창에 하나뿐이다) */
+#define WM_TRAYICON	(WM_APP + 20)
+#define TRAY_ID		1
+
 #define TIMER_TICK_ID 1
 #define TIMER_TICK_MS 500
 
@@ -86,6 +90,8 @@ public:
 
 protected:
 	BOOL OnInitDialog() override;
+	void OnOK() override;
+	void OnCancel() override;
 
 	afx_msg void OnConnect();
 	afx_msg void OnEnroll();
@@ -111,6 +117,8 @@ protected:
 	afx_msg LRESULT OnVpnService(WPARAM wParam, LPARAM lParam);
 	afx_msg LRESULT OnVpnDevice(WPARAM wParam, LPARAM lParam);
 	afx_msg LRESULT OnVpnError(WPARAM wParam, LPARAM lParam);
+	afx_msg LRESULT OnTrayIcon(WPARAM wParam, LPARAM lParam);
+	afx_msg LRESULT OnTaskbarCreated(WPARAM wParam, LPARAM lParam);
 	bool ServiceReady();
 
 	DECLARE_MESSAGE_MAP()
@@ -131,6 +139,14 @@ private:
 	void FitWindow();
 	void LoadSettings();
 	void SaveSettings();
+
+	/* 알림 영역: 창을 닫아도 남아 상태를 알린다 */
+	void TrayAdd();
+	void TrayTip(const CString &tip);
+	void TrayNotify(LPCTSTR title, const CString &text, bool warning);
+	void TrayMenu(int x, int y);
+	void ShowFromTray();
+	void NotifyTransition(tunnel_state_t prev, tunnel_state_t now, bool userStop);
 
 	void LoadDeviceId();
 	void TrackAuth(const tunnel_packet_t &p);
@@ -162,6 +178,12 @@ private:
 	/* 패킷과 로그는 진단 창이 닫혀 있어도 여기에 쌓는다. 진단 창은 이것을 보여 줄 뿐이다. */
 	std::deque<CString> m_logLines;
 	CDiagDlg m_diag;
+
+	bool m_tray_added;		/* 알림 영역에 아이콘을 달았다 */
+	bool m_told_tray;		/* "알림 영역에서 계속 실행됩니다"를 한 번 알렸다 */
+	bool m_exiting;			/* 알림 영역 메뉴의 [종료] — 닫기를 숨기기로 바꾸지 않는다 */
+	int m_notified_deny;		/* 이미 알린 거부 사유. 같은 거부를 되풀이해 알리지 않는다 */
+	CString m_tray_tip;
 
 	/* 직접 그리는 것들. 자리는 LayoutChildren 이 정하고 PaintBackground 가 그린다. */
 	ui::Fonts m_fonts;
