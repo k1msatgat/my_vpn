@@ -244,6 +244,14 @@ Result Http(const std::string &url, const std::string *form, Response *r, CStrin
 		return RESULT_NETWORK;
 	}
 
+	/* 토큰 요청(POST)은 리다이렉트를 따라가지 않는다. 307 / 308 을 따라가면 코드나 refresh
+	 * token 이 든 본문을 그 응답이 가리키는 다른 곳으로 다시 보낸다. */
+	if (form) {
+		DWORD off = WINHTTP_DISABLE_REDIRECTS;
+
+		WinHttpSetOption(req.h, WINHTTP_OPTION_DISABLE_FEATURE, &off, sizeof(off));
+	}
+
 	if (form) {
 		ok = WinHttpSendRequest(req.h,
 				L"Content-Type: application/x-www-form-urlencoded\r\nAccept: application/json\r\n",
@@ -348,7 +356,14 @@ private:
 struct Endpoints {
 	std::string authorize;
 	std::string token;
+	std::string revoke;	/* 없을 수 있다 */
 };
+
+/* IdP 가 잠시 답하지 못한다 (점검, 과부하). 설정이 틀린 것과 달리 다시 해 볼 일이다. */
+bool Transient(DWORD status)
+{
+	return status == 0 || status == 429 || status >= 500;
+}
 
 /* 설정 문서의 issuer 는 설정한 주소와 같아야 한다 (OIDC Discovery 4.3). 다르면 다른 IdP 의
  * 문서를 받은 것이고, 그 IdP 가 준 토큰은 서버도 받지 않는다. */
@@ -367,7 +382,7 @@ Result Discover(const Config &cfg, Endpoints *ep, CString *detail)
 	}
 	if (r.status != 200) {
 		detail->Format(_T("IdP 의 설정 문서를 받지 못함 (HTTP %lu)"), r.status);
-		return RESULT_PROTOCOL;
+		return Transient(r.status) ? RESULT_NETWORK : RESULT_PROTOCOL;
 	}
 	if (!j.Parse(r.body) || !j.Str("issuer", &iss) || !j.Str("token_endpoint", &ep->token)) {
 		*detail = _T("IdP 의 설정 문서를 읽지 못함");
@@ -382,6 +397,9 @@ Result Discover(const Config &cfg, Endpoints *ep, CString *detail)
 		return RESULT_CONFIG;
 	}
 	j.Str("authorization_endpoint", &ep->authorize);
+	if (j.Str("revocation_endpoint", &ep->revoke) && !ParseUrl(ep->revoke, &u)) {
+		ep->revoke.clear();
+	}
 
 	return RESULT_OK;
 }
@@ -399,7 +417,7 @@ Result TokenRequest(const Endpoints &ep, const std::string &form, Tokens *t, CSt
 	}
 	if (!j.Parse(r.body)) {
 		detail->Format(_T("토큰 응답을 읽지 못함 (HTTP %lu)"), r.status);
-		return RESULT_PROTOCOL;
+		return Transient(r.status) ? RESULT_NETWORK : RESULT_PROTOCOL;
 	}
 
 	if (r.status != 200) {
@@ -411,8 +429,10 @@ Result TokenRequest(const Endpoints &ep, const std::string &form, Tokens *t, CSt
 				(LPCTSTR)WideC(desc));
 
 		/* invalid_grant: 코드나 refresh token 이 끝났다 (IdP 에서 로그아웃, 세션 만료). */
-		return (err == "invalid_grant" || err == "access_denied" || err == "unauthorized_client") ?
-			RESULT_DENIED : RESULT_PROTOCOL;
+		if (err == "invalid_grant" || err == "access_denied" || err == "unauthorized_client") {
+			return RESULT_DENIED;
+		}
+		return (Transient(r.status) || err == "temporarily_unavailable") ? RESULT_NETWORK : RESULT_PROTOCOL;
 	}
 
 	if (!j.Str("access_token", &t->access) || t->access.empty()) {
@@ -654,6 +674,7 @@ Outcome Login(const Config &cfg, HANDLE cancel)
 	Socket listener;
 	std::string verifier, challenge, state, code, redirect, url, form;
 	const std::string client = Utf8(cfg.client_id);
+	const std::string scope = cfg.scope.IsEmpty() ? std::string("openid") : Utf8(cfg.scope);
 	int port = 0;
 
 	o.result = Discover(cfg, &ep, &o.detail);
@@ -682,7 +703,7 @@ Outcome Login(const Config &cfg, HANDLE cancel)
 	url = ep.authorize + (ep.authorize.find('?') == std::string::npos ? "?" : "&") +
 		"response_type=code&client_id=" + Encode(client) +
 		"&redirect_uri=" + Encode(redirect) +
-		"&scope=openid&state=" + state +
+		"&scope=" + Encode(scope) + "&state=" + state +
 		"&code_challenge=" + challenge + "&code_challenge_method=S256";
 
 	/* 기본 브라우저로 연다. ShellExecute 는 셸 확장을 부를 수 있어 COM 이 필요하다. */
@@ -746,21 +767,48 @@ Outcome Refresh(const Config &cfg, const std::string &refresh_token, HANDLE canc
 	return o;
 }
 
+void Revoke(const Config &cfg, const std::string &refresh_token)
+{
+	Endpoints ep;
+	Response r;
+	CString detail;
+	std::string form;
+
+	if (refresh_token.empty() || Discover(cfg, &ep, &detail) != RESULT_OK || ep.revoke.empty()) {
+		return;
+	}
+
+	form = "token=" + Encode(refresh_token) + "&token_type_hint=refresh_token&client_id=" +
+		Encode(Utf8(cfg.client_id));
+	Http(ep.revoke, &form, &r, &detail);
+	Wipe(form);
+}
+
 /* ---- refresh token 보관 ------------------------------------------------------ */
 static const TCHAR LOGIN_SECTION[] = _T("login");
 static const TCHAR REFRESH_VALUE[] = _T("refresh");
 
-bool SaveRefresh(const std::string &token)
+/* DPAPI 의 추가 엔트로피: 이 토큰을 준 IdP 와 클라이언트. 다른 값으로는 풀리지 않는다. */
+static std::string Binding(const Config &cfg)
 {
+	return "ztgate refresh\n" + StripSlash(Utf8(cfg.issuer)) + "\n" + Utf8(cfg.client_id);
+}
+
+bool SaveRefresh(const Config &cfg, const std::string &token)
+{
+	std::string bind = Binding(cfg);
 	DATA_BLOB in;
+	DATA_BLOB entropy;
 	DATA_BLOB out;
 	BOOL ok;
 
 	in.cbData = (DWORD)token.size();
 	in.pbData = reinterpret_cast<BYTE *>(const_cast<char *>(token.data()));
+	entropy.cbData = (DWORD)bind.size();
+	entropy.pbData = reinterpret_cast<BYTE *>(&bind[0]);
 	ZeroMemory(&out, sizeof(out));
 
-	if (!CryptProtectData(&in, L"ztgate refresh token", nullptr, nullptr, nullptr,
+	if (!CryptProtectData(&in, L"ztgate refresh token", &entropy, nullptr, nullptr,
 				CRYPTPROTECT_UI_FORBIDDEN, &out)) {
 		return false;
 	}
@@ -770,11 +818,13 @@ bool SaveRefresh(const std::string &token)
 	return ok != FALSE;
 }
 
-bool LoadRefresh(std::string *token)
+bool LoadRefresh(const Config &cfg, std::string *token)
 {
+	std::string bind = Binding(cfg);
 	BYTE *data = nullptr;
 	UINT len = 0;
 	DATA_BLOB in;
+	DATA_BLOB entropy;
 	DATA_BLOB out;
 	BOOL ok;
 
@@ -785,8 +835,10 @@ bool LoadRefresh(std::string *token)
 
 	in.cbData = len;
 	in.pbData = data;
+	entropy.cbData = (DWORD)bind.size();
+	entropy.pbData = reinterpret_cast<BYTE *>(&bind[0]);
 	ZeroMemory(&out, sizeof(out));
-	ok = CryptUnprotectData(&in, nullptr, nullptr, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &out);
+	ok = CryptUnprotectData(&in, nullptr, &entropy, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &out);
 	delete[] data;
 	if (!ok) {
 		return false;

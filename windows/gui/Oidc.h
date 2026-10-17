@@ -28,6 +28,8 @@ namespace oidc {
 struct Config {
 	CString issuer;		/* 예) https://idp.example.com/realms/corp */
 	CString client_id;	/* IdP 에 등록한 공개 클라이언트 (client secret 없음) */
+	CString scope;		/* 비어 있으면 "openid". refresh token 을 받으려면 IdP 에 따라
+				 * offline_access 를, 서버용 access token 을 받으려면 그 API 의 scope 를 더한다 */
 };
 
 struct Tokens {
@@ -41,7 +43,7 @@ enum Result {
 	RESULT_CANCELLED,	/* cancel 이 신호됐다 */
 	RESULT_TIMEOUT,		/* 브라우저에서 로그인을 마치지 않았다 */
 	RESULT_DENIED,		/* IdP 가 거절했다 (로그인 거부, refresh token 만료) */
-	RESULT_NETWORK,		/* IdP 에 닿지 못했다 */
+	RESULT_NETWORK,		/* IdP 에 닿지 못했다, 또는 IdP 가 잠시 답하지 못한다 (5xx). 다시 해 볼 일이다 */
 	RESULT_PROTOCOL,	/* IdP 의 답이 기대한 모양이 아니다 */
 	RESULT_CONFIG		/* 설정한 주소를 쓸 수 없다 */
 };
@@ -58,10 +60,16 @@ Outcome Login(const Config &cfg, HANDLE cancel);
 /* refresh token 으로 새 토큰을 받는다. 브라우저를 띄우지 않는다. */
 Outcome Refresh(const Config &cfg, const std::string &refresh_token, HANDLE cancel);
 
+/* IdP 에 refresh token 을 버려 달라고 한다 (RFC 7009). IdP 가 revocation_endpoint 를 알려 주지
+ * 않으면 아무것도 하지 않는다. 결과는 보지 않는다 — 로그아웃은 이 PC 에서 이미 끝났다. */
+void Revoke(const Config &cfg, const std::string &refresh_token);
+
 /* refresh token 을 이 Windows 사용자의 DPAPI 로 감싸 레지스트리에 둔다. 다음에 켤 때
- * 브라우저를 다시 띄우지 않고 로그인한다. 같은 PC 의 다른 사용자는 풀 수 없다. */
-bool SaveRefresh(const std::string &token);
-bool LoadRefresh(std::string *token);
+ * 브라우저를 다시 띄우지 않고 로그인한다. 같은 PC 의 다른 사용자는 풀 수 없다.
+ * 감쌀 때 IdP 주소와 클라이언트 ID 를 함께 묶는다 — 레지스트리의 IdP 주소가 밖에서
+ * 바뀌어도 그 IdP 로 이 refresh token 을 보내지 않는다 (풀리지 않는다). */
+bool SaveRefresh(const Config &cfg, const std::string &token);
+bool LoadRefresh(const Config &cfg, std::string *token);
 void ForgetRefresh();
 
 /* 토큰을 메모리에서 지운다. */

@@ -14,6 +14,7 @@
 /* 사용자 로그인 (IdP 칸은 설정 창에, 로그인 / 로그아웃은 주 창의 연결 정보 판에) */
 #define IDC_ISSUER		1006
 #define IDC_CLIENT_ID		1007
+#define IDC_SCOPE		1008
 #define IDC_LOGIN		1018
 
 /* 패킷 / 로그 */

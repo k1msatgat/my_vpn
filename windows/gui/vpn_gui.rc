@@ -60,7 +60,7 @@ BEGIN
 END
 
 /* 연결 설정. 꾸미지 않은 표준 다이얼로그다. */
-IDD_SETTINGS DIALOGEX 0, 0, 260, 196
+IDD_SETTINGS DIALOGEX 0, 0, 260, 215
 STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "연결 설정"
 FONT 9, "Segoe UI", 400, 0, 0x1
@@ -77,10 +77,12 @@ BEGIN
     EDITTEXT        IDC_ISSUER, 70, 100, 176, 13, ES_AUTOHSCROLL
     LTEXT           "클라이언트 ID", IDC_STATIC, 14, 121, 54, 9
     EDITTEXT        IDC_CLIENT_ID, 70, 119, 100, 13, ES_AUTOHSCROLL
-    LTEXT           "회사 계정으로 로그인할 IdP(OpenID Connect)의 발급자 주소입니다. 관리자가 알려 줍니다. 비워 두면 사용자 로그인 없이 기기 신원만으로 연결합니다.", IDC_STATIC, 14, 139, 232, 27
+    LTEXT           "범위 (scope)", IDC_STATIC, 14, 140, 54, 9
+    EDITTEXT        IDC_SCOPE, 70, 138, 176, 13, ES_AUTOHSCROLL
+    LTEXT           "회사 계정으로 로그인할 IdP(OpenID Connect)의 발급자 주소입니다. 관리자가 알려 줍니다. 비워 두면 사용자 로그인 없이 기기 신원만으로 연결합니다.", IDC_STATIC, 14, 158, 232, 27
 
-    DEFPUSHBUTTON   "저장", IDOK, 128, 174, 56, 16
-    PUSHBUTTON      "취소", IDCANCEL, 190, 174, 56, 16
+    DEFPUSHBUTTON   "저장", IDOK, 128, 193, 56, 16
+    PUSHBUTTON      "취소", IDCANCEL, 190, 193, 56, 16
 END
 
 IDD_ENROLL DIALOGEX 0, 0, 356, 150

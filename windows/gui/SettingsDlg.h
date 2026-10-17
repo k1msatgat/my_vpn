@@ -22,6 +22,7 @@ public:
 	CString m_adapter;
 	CString m_issuer;	/* 비어 있으면 사용자 로그인을 쓰지 않는다 */
 	CString m_client_id;
+	CString m_scope;	/* 비어 있으면 openid */
 
 	/* 값이 맞는지. 아니면 틀린 칸의 ID 와 이유를 돌려준다. 주 창이 연결 전에도 쓴다. */
 	static bool Check(const CString &server, const CString &port, const CString &adapter,

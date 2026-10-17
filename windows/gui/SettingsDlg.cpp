@@ -71,6 +71,7 @@ BOOL CSettingsDlg::OnInitDialog()
 	SetDlgItemText(IDC_ADAPTER, m_adapter);
 	SetDlgItemText(IDC_ISSUER, m_issuer);
 	SetDlgItemText(IDC_CLIENT_ID, m_client_id);
+	SetDlgItemText(IDC_SCOPE, m_scope);
 
 	/* 빈 칸에 무엇을 적는지 흐린 글씨로 알려 준다. */
 	GetDlgItem(IDC_SERVER)->SendMessage(EM_SETCUEBANNER, FALSE, (LPARAM)L"203.0.113.10");
@@ -78,6 +79,7 @@ BOOL CSettingsDlg::OnInitDialog()
 	GetDlgItem(IDC_ADAPTER)->SendMessage(EM_SETCUEBANNER, FALSE, (LPARAM)L"ztgate");
 	GetDlgItem(IDC_ISSUER)->SendMessage(EM_SETCUEBANNER, FALSE, (LPARAM)L"https://idp.example.com/realms/corp");
 	GetDlgItem(IDC_CLIENT_ID)->SendMessage(EM_SETCUEBANNER, FALSE, (LPARAM)L"ztgate");
+	GetDlgItem(IDC_SCOPE)->SendMessage(EM_SETCUEBANNER, FALSE, (LPARAM)L"openid  (IdP 에 따라 offline_access 등을 더함)");
 
 	if (m_point_id != 0) {
 		FieldError(m_point_id, m_point_msg);
@@ -89,7 +91,7 @@ BOOL CSettingsDlg::OnInitDialog()
 
 void CSettingsDlg::OnOK()
 {
-	CString server, port, adapter, issuer, client_id, why;
+	CString server, port, adapter, issuer, client_id, scope, why;
 	int bad = 0;
 
 	GetDlgItemText(IDC_SERVER, server);
@@ -97,11 +99,13 @@ void CSettingsDlg::OnOK()
 	GetDlgItemText(IDC_ADAPTER, adapter);
 	GetDlgItemText(IDC_ISSUER, issuer);
 	GetDlgItemText(IDC_CLIENT_ID, client_id);
+	GetDlgItemText(IDC_SCOPE, scope);
 	server.Trim();
 	port.Trim();
 	adapter.Trim();
 	issuer.Trim();
 	client_id.Trim();
+	scope.Trim();
 
 	if (!Check(server, port, adapter, &bad, &why) || !CheckLogin(issuer, client_id, &bad, &why)) {
 		FieldError(bad, why);
@@ -113,6 +117,7 @@ void CSettingsDlg::OnOK()
 	m_adapter = adapter;
 	m_issuer = issuer;
 	m_client_id = client_id;
+	m_scope = scope;
 
 	CDialogEx::OnOK();
 }

@@ -128,6 +128,7 @@ protected:
 	afx_msg LRESULT OnVpnError(WPARAM wParam, LPARAM lParam);
 	afx_msg LRESULT OnVpnLogin(WPARAM wParam, LPARAM lParam);
 	afx_msg LRESULT OnLoginDone(WPARAM wParam, LPARAM lParam);
+	afx_msg LRESULT OnSessionChange(WPARAM wParam, LPARAM lParam);
 	afx_msg LRESULT OnTrayIcon(WPARAM wParam, LPARAM lParam);
 	afx_msg LRESULT OnTaskbarCreated(WPARAM wParam, LPARAM lParam);
 	bool ServiceReady();
@@ -165,6 +166,8 @@ private:
 	void SendToken();
 	void ScheduleRefresh(__int64 expires_at);
 	void UpdateLoginButton();
+	void CheckLoginExpiry();
+	oidc::Config LoginConfig() const;
 	HomeRow LoginRow() const;
 
 	void LoadDeviceId();
@@ -201,6 +204,7 @@ private:
 	/* 사용자 로그인. 설정(IdP)은 설정 창에서 바뀐다. */
 	CString m_issuer;		/* 비어 있으면 사용자 로그인을 쓰지 않는다 */
 	CString m_client_id;
+	CString m_scope;
 	oidc::Tokens m_tokens;		/* access 가 비어 있으면 로그인하지 않은 것 */
 	ipc_login_t m_login;		/* 서비스가 알려 준 서버의 답 */
 	HANDLE m_login_thread;		/* 로그인 / 갱신 워커. 없으면 nullptr */
@@ -210,6 +214,10 @@ private:
 	ULONGLONG m_refresh_at;		/* 다음 갱신 (GetTickCount64), 0 이면 없음 */
 	CString m_login_error;		/* 마지막 실패. 연결 정보 판에 보인다 */
 	CString m_login_user;		/* 서버가 마지막으로 확인해 준 사용자 */
+	bool m_expired_retry;		/* 서버가 만료라고 해서 한 번 갱신했다. 또 그러면 멈춘다 */
+	int m_expiry_stage;		/* 만료를 알린 단계: 0 없음, 1 곧 끝남, 2 끝남 */
+	uint32_t m_notified_login;	/* 이미 알린 서버의 거절 (login_status_t + 1), 0 이면 없음 */
+	bool m_suspended;		/* 이 Windows 세션이 화면에서 떨어졌다. 그동안 서비스에 토큰을 두지 않는다 */
 
 	bool m_tray_added;		/* 알림 영역에 아이콘을 달았다 */
 	bool m_told_tray;		/* "알림 영역에서 계속 실행됩니다"를 한 번 알렸다 */

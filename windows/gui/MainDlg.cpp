@@ -9,8 +9,11 @@
 #include "DiagDlg.h"
 #include "SettingsDlg.h"
 
+#include <wtsapi32.h>
+
 #ifdef _MSC_VER
 #pragma comment(lib, "uxtheme.lib")
+#pragma comment(lib, "wtsapi32.lib")
 #endif
 
 /* 탐색기가 다시 뜨면 알림 영역의 아이콘이 모두 사라진다. 새 작업 표시줄이 만들어질 때
@@ -34,6 +37,10 @@ CMainDlg::CMainDlg(CWnd *parent)
 	, m_login_interactive(false)
 	, m_login_gen(0)
 	, m_refresh_at(0)
+	, m_expired_retry(false)
+	, m_expiry_stage(0)
+	, m_notified_login(0)
+	, m_suspended(false)
 	, m_tray_added(false)
 	, m_told_tray(false)
 	, m_exiting(false)
@@ -88,6 +95,7 @@ BEGIN_MESSAGE_MAP(CMainDlg, CDialogEx)
 	ON_MESSAGE(WM_VPN_ERROR, &CMainDlg::OnVpnError)
 	ON_MESSAGE(WM_VPN_LOGIN, &CMainDlg::OnVpnLogin)
 	ON_MESSAGE(WM_LOGIN_DONE, &CMainDlg::OnLoginDone)
+	ON_MESSAGE(WM_WTSSESSION_CHANGE, &CMainDlg::OnSessionChange)
 	ON_MESSAGE(WM_TRAYICON, &CMainDlg::OnTrayIcon)
 	ON_REGISTERED_MESSAGE(WM_TASKBAR_CREATED, &CMainDlg::OnTaskbarCreated)
 END_MESSAGE_MAP()
@@ -132,10 +140,13 @@ BOOL CMainDlg::OnInitDialog()
 
 	/* 지난번에 로그인해 둔 채였으면 브라우저 없이 이어서 로그인한다. */
 	m_login_cancel = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-	if (!m_issuer.IsEmpty() && oidc::LoadRefresh(&m_tokens.refresh)) {
+	if (!m_issuer.IsEmpty() && oidc::LoadRefresh(LoginConfig(), &m_tokens.refresh)) {
 		StartLogin(false);
 	}
 	UpdateLoginButton();
+
+	/* 사용자 전환이나 원격 세션이 끊기는 것을 알아야 한다 (OnSessionChange). */
+	WTSRegisterSessionNotification(GetSafeHwnd(), NOTIFY_FOR_THIS_SESSION);
 
 	UpdateInfo();
 	SetUiState(TUNNEL_STATE_STOPPED);
@@ -160,6 +171,7 @@ void CMainDlg::LoadSettings()
 	m_port = app->GetProfileString(_T("conn"), _T("port"), _T("9000"));
 	m_issuer = app->GetProfileString(_T("login"), _T("issuer"), _T(""));
 	m_client_id = app->GetProfileString(_T("login"), _T("client_id"), _T("ztgate"));
+	m_scope = app->GetProfileString(_T("login"), _T("scope"), _T("openid"));
 }
 
 void CMainDlg::SaveSettings()
@@ -171,6 +183,7 @@ void CMainDlg::SaveSettings()
 	app->WriteProfileString(_T("conn"), _T("port"), m_port);
 	app->WriteProfileString(_T("login"), _T("issuer"), m_issuer);
 	app->WriteProfileString(_T("login"), _T("client_id"), m_client_id);
+	app->WriteProfileString(_T("login"), _T("scope"), m_scope);
 }
 
 /* 설정 창을 연다. bad_id 가 있으면 그 칸을 가리키며 연다. 저장했으면 true. */
@@ -183,6 +196,7 @@ bool CMainDlg::EditSettings(int bad_id, const CString &why)
 	dlg.m_adapter = m_adapter;
 	dlg.m_issuer = m_issuer;
 	dlg.m_client_id = m_client_id;
+	dlg.m_scope = m_scope;
 	if (bad_id != 0) {
 		dlg.PointAt(bad_id, why);
 	}
@@ -195,10 +209,12 @@ bool CMainDlg::EditSettings(int bad_id, const CString &why)
 	m_adapter = dlg.m_adapter;
 
 	/* 토큰은 그것을 준 IdP 와 클라이언트의 것이다. 바뀌었으면 들고 있던 로그인을 버린다. */
-	if (dlg.m_issuer != m_issuer || dlg.m_client_id != m_client_id) {
+	if (dlg.m_issuer != m_issuer || dlg.m_client_id != m_client_id || dlg.m_scope != m_scope) {
+		/* 옛 설정으로 로그아웃한다 — refresh token 폐기는 그것을 준 IdP 에 해야 한다. */
+		Logout(_T("로그인 설정이 바뀌어 로그아웃했습니다"));
 		m_issuer = dlg.m_issuer;
 		m_client_id = dlg.m_client_id;
-		Logout(_T("로그인 설정이 바뀌어 로그아웃했습니다"));
+		m_scope = dlg.m_scope;
 		m_login_error.Empty();
 
 		CRect rc;
@@ -667,6 +683,38 @@ static DWORD WINAPI LoginThread(LPVOID arg)
 	return 0;
 }
 
+/* 서버가 보내는 사용자 이름은 UTF-8 이다. CString(char *) 는 ANSI 코드페이지로 읽어 깨진다. */
+static CString FromUtf8(const char *s)
+{
+	const int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, nullptr, 0);
+	CString out;
+
+	if (n > 1) {
+		MultiByteToWideChar(CP_UTF8, 0, s, -1, out.GetBuffer(n), n);
+		out.ReleaseBuffer();
+	}
+
+	return out;
+}
+
+/* 리프레시 토큰을 IdP 에서 폐기하는 워커. 결과를 기다리지 않는다 (로그아웃은 이 PC 에서 이미
+ * 끝났다). 창이 먼저 사라져도 되게 필요한 것을 모두 복사해 간다. */
+struct RevokeJob {
+	oidc::Config cfg;
+	std::string refresh;
+};
+
+static DWORD WINAPI RevokeThread(LPVOID arg)
+{
+	RevokeJob *job = static_cast<RevokeJob *>(arg);
+
+	oidc::Revoke(job->cfg, job->refresh);
+	SecureZeroMemory(&job->refresh[0], job->refresh.size());
+	delete job;
+
+	return 0;
+}
+
 /* 서버가 토큰을 받지 않은 이유. 사용자가 할 수 있는 일이 거의 없으므로 짧게. */
 static CString LoginStatusText(uint32_t status)
 {
@@ -684,14 +732,14 @@ static CString LoginStatusText(uint32_t status)
 void CMainDlg::OnLogin()
 {
 	/* 브라우저를 기다리는 중이면 그만둔다. */
-	if (m_login_thread) {
-		if (m_login_interactive) {
-			SetEvent(m_login_cancel);
-		}
+	if (m_login_thread && m_login_interactive) {
+		SetEvent(m_login_cancel);
 		return;
 	}
 
-	if (!m_tokens.access.empty() || m_login.state != IPC_LOGIN_NONE) {
+	/* 갱신 워커가 돌고 있어도 로그아웃은 바로 한다. 그 워커의 결과는 세대가 바뀌어 버려진다.
+	 * IdP 에 닿지 않아 갱신이 재시도를 거듭하는 중일수록 사용자는 끊고 싶어 한다. */
+	if (!m_tokens.access.empty() || !m_tokens.refresh.empty() || m_login.state != IPC_LOGIN_NONE) {
 		Logout(_T("[login] 로그아웃했습니다"));
 		return;
 	}
@@ -709,8 +757,7 @@ void CMainDlg::StartLogin(bool interactive)
 	}
 
 	job = new LoginJob;
-	job->cfg.issuer = m_issuer;
-	job->cfg.client_id = m_client_id;
+	job->cfg = LoginConfig();
 	job->refresh = interactive ? std::string() : m_tokens.refresh;
 	job->interactive = interactive;
 	job->gen = m_login_gen;
@@ -760,12 +807,26 @@ LRESULT CMainDlg::OnLoginDone(WPARAM, LPARAM lParam)
 	case oidc::RESULT_OK: {
 		CString line;
 
+		/* 토큰은 UDP 패킷 하나에 들어가야 한다. 그룹이나 역할이 아주 많으면 넘는다 — 그때는 IdP
+		 * 쪽에서 클레임을 줄여야 한다 (README "사용자 로그인"). 기다리게 두지 않고 바로 알린다. */
+		if (o.tokens.access.size() > LOGIN_TOKEN_MAX) {
+			line.Format(_T("토큰이 너무 큽니다 (%u / %u 바이트). 관리자에게 알려 주세요"),
+					(unsigned)o.tokens.access.size(), (unsigned)LOGIN_TOKEN_MAX);
+			Logout(_T("[login] ") + line);
+			m_login_error = line;
+			break;
+		}
+
 		oidc::Wipe(&m_tokens);
 		m_tokens = o.tokens;
 		if (!m_tokens.refresh.empty()) {
-			oidc::SaveRefresh(m_tokens.refresh);
+			oidc::SaveRefresh(LoginConfig(), m_tokens.refresh);
+		}
+		else {
+			AppendLog(_T("[login] IdP 가 refresh token 을 주지 않았습니다. 토큰이 끝나면 다시 로그인해야 합니다 (scope 에 offline_access 가 필요한 IdP 일 수 있습니다)"));
 		}
 		m_login_error.Empty();
+		m_expiry_stage = 0;
 		ScheduleRefresh(m_tokens.expires_at);
 		SendToken();
 
@@ -808,7 +869,12 @@ LRESULT CMainDlg::OnLoginDone(WPARAM, LPARAM lParam)
 		break;
 	default:
 		AppendLog(_T("[login] ") + o.detail);
-		m_login_error = _T("로그인하지 못했습니다 (진단 창의 로그)");
+		if (done->interactive || m_tokens.access.empty()) {
+			m_login_error = _T("로그인하지 못했습니다 (진단 창의 로그)");
+		}
+		if (!done->interactive) {
+			m_refresh_at = GetTickCount64() + 5 * LOGIN_RETRY_MS;
+		}
 		break;
 	}
 
@@ -830,10 +896,31 @@ void CMainDlg::Logout(const CString &why)
 		SetEvent(m_login_cancel);
 	}
 
+	/* IdP 에도 그 refresh token 을 버리라고 한다. 이 PC 에서 지우기만 하면 누가 미리 복사해
+	 * 둔 것은 IdP 의 세션이 끝날 때까지 쓰인다. */
+	if (!m_tokens.refresh.empty() && !m_issuer.IsEmpty()) {
+		RevokeJob *job = new RevokeJob;
+		HANDLE h;
+
+		job->cfg = LoginConfig();
+		job->refresh = m_tokens.refresh;
+		h = CreateThread(nullptr, 0, RevokeThread, job, 0, nullptr);
+		if (h) {
+			CloseHandle(h);
+		}
+		else {
+			SecureZeroMemory(&job->refresh[0], job->refresh.size());
+			delete job;
+		}
+	}
+
 	oidc::Wipe(&m_tokens);
 	oidc::ForgetRefresh();
 	m_refresh_at = 0;
 	m_login_user.Empty();
+	m_expired_retry = false;
+	m_expiry_stage = 0;
+	m_notified_login = 0;
 	if (m_session) {
 		vpn_remote_logout(m_session);
 	}
@@ -848,7 +935,7 @@ void CMainDlg::Logout(const CString &why)
 /* 서비스에 토큰을 건넨다. 서비스에 붙지 못했으면 붙을 때 다시 부른다 (OnVpnService). */
 void CMainDlg::SendToken()
 {
-	if (m_tokens.access.empty() || m_link != VPN_REMOTE_UP) {
+	if (m_tokens.access.empty() || m_link != VPN_REMOTE_UP || m_suspended) {
 		return;
 	}
 
@@ -885,7 +972,7 @@ LRESULT CMainDlg::OnVpnLogin(WPARAM, LPARAM)
 		CString line;
 
 		if (now.status == LOGIN_OK) {
-			line.Format(_T("[login] 서버: %S 로 로그인됨"), now.user);
+			line.Format(_T("[login] 서버: %s 로 로그인됨"), (LPCTSTR)FromUtf8(now.user));
 		}
 		else {
 			line = _T("[login] 서버가 토큰을 받지 않음: ") + LoginStatusText(now.status);
@@ -897,7 +984,7 @@ LRESULT CMainDlg::OnVpnLogin(WPARAM, LPARAM)
 	/* 갱신한 토큰을 건넬 때마다 서비스는 "서버의 답을 기다림"으로 돌아간다. 그동안에도 앞서
 	 * 확인된 사용자를 보여 준다 — 몇 분마다 줄이 깜빡이지 않게. */
 	if (now.state == IPC_LOGIN_DONE) {
-		m_login_user = now.status == LOGIN_OK ? CString(now.user) : CString();
+		m_login_user = now.status == LOGIN_OK ? FromUtf8(now.user) : CString();
 	}
 	else if (now.state == IPC_LOGIN_NONE) {
 		m_login_user.Empty();
@@ -907,9 +994,26 @@ LRESULT CMainDlg::OnVpnLogin(WPARAM, LPARAM)
 		if (now.status == LOGIN_OK && m_tokens.expires_at == 0 && m_refresh_at == 0) {
 			ScheduleRefresh(now.expires);
 		}
-		/* 갱신이 늦었다. 지금 바로 받아 온다. */
-		if (now.status == LOGIN_EXPIRED && !m_login_thread) {
+		if (now.status == LOGIN_OK) {
+			m_expired_retry = false;
+			m_notified_login = 0;
+		}
+		/* 갱신이 늦었다. 지금 바로 받아 온다. 새 토큰도 만료라고 하면 PC 와 서버(또는 IdP)의
+		 * 시계가 어긋난 것이다 — 갱신을 거듭해 IdP 를 두드리지 않고 멈춰서 알린다. */
+		else if (now.status == LOGIN_EXPIRED && !m_login_thread && !m_expired_retry && !m_tokens.refresh.empty()) {
+			m_expired_retry = true;
 			StartLogin(false);
+		}
+		/* 서버에 사용자 로그인이 없다. 고칠 것이 없으므로 갱신도, 경고도 하지 않는다. */
+		else if (now.status == LOGIN_NO_IDP) {
+			m_refresh_at = 0;
+		}
+		else if (m_notified_login != now.status + 1) {
+			m_notified_login = now.status + 1;
+			TrayNotify(_T("사용자 로그인이 거절됐습니다"),
+					LoginStatusText(now.status) + (now.status == LOGIN_EXPIRED ?
+						CString(_T(". PC 의 시계가 맞는지 확인하고, 그대로면 관리자에게 알려 주세요.")) :
+						CString(_T(". 관리자에게 알려 주세요."))), true);
 		}
 	}
 
@@ -945,6 +1049,14 @@ HomeRow CMainDlg::LoginRow() const
 			row.value = _T("로그인하지 않음");
 		}
 	}
+	else if (m_tokens.expires_at != 0 && _time64(nullptr) >= m_tokens.expires_at) {
+		/* 갱신하지 못한 채 끝났다. 서버도 사용자를 뗐다. */
+		row.value = m_tokens.refresh.empty() ? _T("로그인이 끝남 \x2014 다시 로그인하세요") : _T("로그인이 끝남 \x2014 갱신을 다시 시도하는 중");
+		row.level = LEVEL_BAD;
+	}
+	else if (m_suspended) {
+		row.value = _T("이 화면이 잠시 떨어져 쉬는 중");
+	}
 	else if (m_link != VPN_REMOTE_UP || m_login.state == IPC_LOGIN_NONE) {
 		row.value = _T("서비스에 건네는 중\x2026");
 	}
@@ -956,8 +1068,11 @@ HomeRow CMainDlg::LoginRow() const
 		row.value = (m_state == TUNNEL_STATE_CONNECTED) ? _T("서버가 확인하는 중\x2026") : _T("연결하면 서버에 알립니다");
 	}
 	else if (m_login.status == LOGIN_OK) {
-		row.value = CString(m_login.user);
+		row.value = FromUtf8(m_login.user);
 		row.level = LEVEL_OK;
+	}
+	else if (m_login.status == LOGIN_NO_IDP) {
+		row.value = LoginStatusText(m_login.status);	/* 잘못된 것이 아니다. 붉게 칠하지 않는다 */
 	}
 	else {
 		row.value = LoginStatusText(m_login.status);
@@ -994,6 +1109,82 @@ void CMainDlg::UpdateLoginButton()
 		btn->SetWindowText(text);
 	}
 	btn->EnableWindow(enable);
+}
+
+oidc::Config CMainDlg::LoginConfig() const
+{
+	oidc::Config cfg;
+
+	cfg.issuer = m_issuer;
+	cfg.client_id = m_client_id;
+	cfg.scope = m_scope;
+
+	return cfg;
+}
+
+/* 토큰이 곧 끝나거나 끝났는데 새 것을 받지 못했다. 사용자별 접근이 닫히므로 알린다.
+ * refresh token 이 없는 IdP 는 1분 전에 미리 알린다 (다시 로그인할 틈을 준다). */
+void CMainDlg::CheckLoginExpiry()
+{
+	const __int64 now = _time64(nullptr);
+
+	if (m_tokens.access.empty() || m_tokens.expires_at == 0) {
+		return;
+	}
+
+	if (now >= m_tokens.expires_at && m_expiry_stage < 2) {
+		m_expiry_stage = 2;
+		TrayNotify(_T("사용자 로그인이 끝났습니다"),
+				m_tokens.refresh.empty() ?
+				CString(_T("사용자별 접근이 닫혔습니다. ztgate 에서 다시 로그인하세요.")) :
+				CString(_T("IdP 에 닿지 못해 로그인을 이어 가지 못했습니다. 닿는 대로 다시 시도합니다.")), true);
+		UpdateInfo();
+	}
+	else if (m_tokens.refresh.empty() && now >= m_tokens.expires_at - 60 && m_expiry_stage < 1) {
+		m_expiry_stage = 1;
+		TrayNotify(_T("곧 로그인이 끝납니다"),
+				CString(_T("1분 뒤 사용자별 접근이 닫힙니다. 계속 쓰려면 ztgate 에서 로그아웃한 뒤 다시 로그인하세요.")), false);
+	}
+}
+
+/* 이 Windows 세션이 화면에서 떨어지거나(사용자 전환, 원격 연결 끊김) 로그오프하면 서비스에서
+ * 토큰을 뺀다. 터널은 PC 하나에 하나라, 그대로 두면 다음에 화면 앞에 앉은 사람의 트래픽이
+ * 이 사람의 신원으로 나간다. 돌아오면 다시 건넨다 (끝났으면 갱신한다). */
+LRESULT CMainDlg::OnSessionChange(WPARAM wParam, LPARAM)
+{
+	switch (wParam) {
+	case WTS_CONSOLE_DISCONNECT:
+	case WTS_REMOTE_DISCONNECT:
+	case WTS_SESSION_LOGOFF:
+		if (!m_suspended) {
+			m_suspended = true;
+			if (m_session) {
+				vpn_remote_logout(m_session);
+			}
+			AppendLog(_T("[login] 이 세션이 화면에서 떨어져 사용자 신원을 서비스에서 뺐습니다"));
+		}
+		break;
+	case WTS_CONSOLE_CONNECT:
+	case WTS_REMOTE_CONNECT:
+		if (m_suspended) {
+			m_suspended = false;
+			AppendLog(_T("[login] 이 세션으로 돌아왔습니다"));
+			if (m_tokens.expires_at != 0 && _time64(nullptr) >= m_tokens.expires_at - 30 && !m_login_thread) {
+				StartLogin(false);
+			}
+			else {
+				SendToken();
+			}
+		}
+		break;
+	default:
+		break;
+	}
+
+	UpdateInfo();
+	UpdateLoginButton();
+
+	return 0;
 }
 
 /* 패킷 이벤트에서 "무엇을 보고했고 서버가 뭐라고 했는지"를 주워 둔다.
@@ -1379,6 +1570,8 @@ void CMainDlg::OnTimer(UINT_PTR id)
 			RefreshPosture(true);
 			UpdateStatus();	/* 거부 안내는 지금 꺼져 있는 것을 가리킨다 */
 		}
+
+		CheckLoginExpiry();
 
 		/* 토큰이 끝나기 전에 refresh token 으로 새 것을 받아 온다. */
 		if (m_refresh_at != 0 && GetTickCount64() >= m_refresh_at && !m_login_thread) {
@@ -1828,7 +2021,8 @@ LRESULT CMainDlg::OnTrayIcon(WPARAM wParam, LPARAM lParam)
 
 void CMainDlg::TrayMenu(int x, int y)
 {
-	enum { CMD_OPEN = 1, CMD_CONNECT, CMD_DIAG, CMD_EXIT };
+	enum { CMD_OPEN = 1, CMD_CONNECT, CMD_LOGIN, CMD_DIAG, CMD_EXIT };
+	const bool loggedIn = !m_tokens.access.empty() || m_login.state != IPC_LOGIN_NONE;
 	const bool active = vpn_session_active(m_session) != 0;
 	HMENU menu = CreatePopupMenu();
 	UINT cmd;
@@ -1842,6 +2036,21 @@ void CMainDlg::TrayMenu(int x, int y)
 	AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 	AppendMenuW(menu, MF_STRING | (m_stopping ? MF_GRAYED : 0), CMD_CONNECT,
 			active ? L"연결 해제" : L"연결");
+	if (!m_issuer.IsEmpty()) {
+		CString item;
+
+		if (m_login_thread && m_login_interactive) {
+			item = _T("로그인 취소");
+		}
+		else if (loggedIn) {
+			item = m_login_user.IsEmpty() ? CString(_T("로그아웃")) : _T("로그아웃 (") + m_login_user + _T(")");
+		}
+		else {
+			item = _T("회사 계정으로 로그인");
+		}
+		AppendMenuW(menu, MF_STRING | ((m_login_thread && !m_login_interactive && !loggedIn) ? MF_GRAYED : 0),
+				CMD_LOGIN, item);
+	}
 	AppendMenuW(menu, MF_STRING, CMD_DIAG, L"진단");
 	AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 	AppendMenuW(menu, MF_STRING, CMD_EXIT, L"종료");
@@ -1864,6 +2073,9 @@ void CMainDlg::TrayMenu(int x, int y)
 			ShowFromTray();
 		}
 		OnConnect();
+		break;
+	case CMD_LOGIN:
+		OnLogin();
 		break;
 	case CMD_DIAG:
 		OnDiag();
@@ -1940,9 +2152,14 @@ void CMainDlg::OnDestroy()
 	/* 로그인 워커를 그만두게 한다. 브라우저를 기다리는 중이면 0.25초 안에, 갱신 중이면
 	 * IdP 의 응답(길면 10초)을 기다린다. 그 안에 끝나지 않으면 핸들을 남겨 둔다 — 워커가
 	 * 아직 쓰고 있다. */
+	WTSUnRegisterSessionNotification(GetSafeHwnd());
+
+	/* 갱신 중이면 끝날 때까지 기다린다 (IdP 가 refresh token 을 바꿔 주는 중일 수 있고, 그 새
+	 * 것을 저장하지 못하면 다음에 켤 때 브라우저로 다시 로그인해야 한다). 요청 둘이 각자 10초
+	 * 안에 끝나므로 넉넉히 25초. 브라우저 로그인은 cancel 로 곧 끝난다. */
 	if (m_login_thread) {
 		SetEvent(m_login_cancel);
-		if (WaitForSingleObject(m_login_thread, 3000) == WAIT_OBJECT_0) {
+		if (WaitForSingleObject(m_login_thread, m_login_interactive ? 3000 : 25000) == WAIT_OBJECT_0) {
 			CloseHandle(m_login_thread);
 			CloseHandle(m_login_cancel);
 		}
@@ -1956,8 +2173,16 @@ void CMainDlg::OnDestroy()
 	{
 		MSG msg;
 
+		/* 화면과 서비스는 이미 없다. 결과에서 저장할 것(바뀐 refresh token)만 챙긴다. */
 		while (PeekMessageW(&msg, GetSafeHwnd(), WM_LOGIN_DONE, WM_LOGIN_DONE, PM_REMOVE)) {
-			OnLoginDone(msg.wParam, msg.lParam);
+			LoginDone *done = reinterpret_cast<LoginDone *>(msg.lParam);
+
+			if (done->gen == m_login_gen && done->outcome.result == oidc::RESULT_OK &&
+					!done->outcome.tokens.refresh.empty()) {
+				oidc::SaveRefresh(LoginConfig(), done->outcome.tokens.refresh);
+			}
+			oidc::Wipe(&done->outcome.tokens);
+			delete done;
 		}
 	}
 	/* 메모리의 토큰을 지운다. 저장해 둔 refresh token 은 남긴다 — 다음에 켤 때 이어서 로그인한다. */
