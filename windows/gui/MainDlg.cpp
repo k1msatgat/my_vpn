@@ -3,6 +3,7 @@
 #include "resource.h"
 #include "MainDlg.h"
 #include "EnrollDlg.h"
+#include "PacketText.h"
 
 #ifdef _MSC_VER
 #pragma comment(lib, "uxtheme.lib")
@@ -28,11 +29,7 @@ static const struct {
 };
 
 #define COLUMN_COUNT ((int)(sizeof(COLUMNS) / sizeof(COLUMNS[0])))
-
-/* 색을 따로 입히는 열 */
-#define COL_DIR		2
-#define COL_SUMMARY	6
-#define COL_TYPE	3
+static_assert(COLUMN_COUNT == pkt::COL_COUNT, "COLUMNS must follow pkt::Column");
 
 CMainDlg::CMainDlg(CWnd *parent)
 	: CDialogEx(IDD_MAIN, parent)
@@ -391,7 +388,7 @@ void CMainDlg::OnSave()
 				const tunnel_packet_t *p = m_store.ViewAt(i);
 				line.Empty();
 				for (int c = 0; c < COLUMN_COUNT; c++) {
-					CString v = ColumnText(*p, c);
+					CString v = pkt::ColumnText(*p, c);
 					v.Replace(_T("\""), _T("\"\""));
 					line += _T("\"") + v + _T("\"");
 					line += (c + 1 < COLUMN_COUNT) ? _T(",") : _T("\r\n");
@@ -671,7 +668,7 @@ void CMainDlg::OnGetDispInfo(NMHDR *pNMHDR, LRESULT *pResult)
 		return;
 	}
 
-	CString s = ColumnText(*p, di->item.iSubItem);
+	CString s = pkt::ColumnText(*p, di->item.iSubItem);
 	_tcsncpy_s(di->item.pszText, di->item.cchTextMax, s, _TRUNCATE);
 }
 
@@ -711,10 +708,10 @@ void CMainDlg::OnPacketCustomDraw(NMHDR *pNMHDR, LRESULT *pResult)
 		}
 		else {
 			cd->clrTextBk = c.card;
-			if (cd->iSubItem == COL_DIR) {
+			if (cd->iSubItem == pkt::COL_DIR) {
 				cd->clrText = (p->dir == TUNNEL_DIR_TX) ? c.tx : c.rx;
 			}
-			else if (cd->iSubItem == COL_SUMMARY || cd->iSubItem == COL_TYPE) {
+			else if (cd->iSubItem == pkt::COL_SUMMARY || cd->iSubItem == pkt::COL_TYPE) {
 				cd->clrText = c.text;
 			}
 			else {
@@ -971,7 +968,7 @@ CString CMainDlg::LocalStateName(int state)
 CString CMainDlg::ServerVerdictText() const
 {
 	if (m_deny_reason != 0) {
-		CString s = _T("거부 — ") + DenyReasonName(m_deny_reason);
+		CString s = _T("거부 — ") + pkt::DenyReasonName(m_deny_reason);
 
 		if (m_state == TUNNEL_STATE_STOPPED) {
 			s += _T(" (연결 종료)");
@@ -1030,8 +1027,8 @@ void CMainDlg::RefreshPosture(bool collect)
 	if (m_has_reported) {
 		s.Format(_T("%u"), m_reported.os_build);
 		SetPostureCell(POSTURE_ROW_OS, 2, s);
-		SetPostureCell(POSTURE_ROW_FIREWALL, 2, PostureStateName(m_reported.firewall));
-		SetPostureCell(POSTURE_ROW_ANTIVIRUS, 2, PostureStateName(m_reported.antivirus));
+		SetPostureCell(POSTURE_ROW_FIREWALL, 2, pkt::PostureStateName(m_reported.firewall));
+		SetPostureCell(POSTURE_ROW_ANTIVIRUS, 2, pkt::PostureStateName(m_reported.antivirus));
 	}
 	else {
 		SetPostureCell(POSTURE_ROW_OS, 2, _T("-"));
@@ -1078,276 +1075,7 @@ void CMainDlg::ShowDetail(int viewIndex)
 		return;
 	}
 
-	CString s;
-	CString t;
-
-	/* 우리가 설계한 16바이트를 필드별로 되짚는다. */
-	if (p->msg_type != 0) {
-		t.Format(_T("msg_header   version=%u  type=%u (%s)\r\n"),
-				(unsigned)PROTOCOL_VERSION, (unsigned)p->msg_type,
-				(LPCTSTR)TypeName(*p));
-		s += t;
-		t.Format(_T("             session_idx=0x%08x\r\n"), p->session_idx);
-		s += t;
-	}
-	else {
-		s += _T("msg_header   (읽지 못함)\r\n");
-	}
-
-	if (p->has_counter) {
-		t.Format(_T("data_header  counter=%llu\r\n"), p->counter);
-		s += t;
-	}
-
-	if (p->has_posture) {
-		t.Format(_T("posture      os_build=%u  firewall=%u (%s)  antivirus=%u (%s)\r\n"),
-				p->posture.os_build,
-				(unsigned)p->posture.firewall, (LPCTSTR)PostureStateName(p->posture.firewall),
-				(unsigned)p->posture.antivirus, (LPCTSTR)PostureStateName(p->posture.antivirus));
-		s += t;
-		s += _T("             (뒤의 32바이트는 HMAC-SHA256)\r\n");
-	}
-
-	if (p->msg_type == MSG_TYPE_DENY && p->deny_reason != 0) {
-		t.Format(_T("deny         reason=%u (%s)\r\n"),
-				(unsigned)p->deny_reason, (LPCTSTR)DenyReasonName(p->deny_reason));
-		s += t;
-	}
-
-	if (p->has_inner) {
-		TCHAR src[64] = { 0 };
-		TCHAR dst[64] = { 0 };
-		InetNtopW(AF_INET, &p->inner_src, src, 64);
-		InetNtopW(AF_INET, &p->inner_dst, dst, 64);
-
-		t.Format(_T("inner IPv4   %s -> %s  proto=%u (%s)  len=%u\r\n"),
-				src, dst, (unsigned)p->proto, (LPCTSTR)ProtoName(*p), p->inner_len);
-		s += t;
-
-		if (p->has_l4) {
-			if (p->proto == 1) {
-				LPCTSTR icmp = _T("");
-				if (p->icmp_type == 8) {
-					icmp = _T(" (echo request)");
-				}
-				else if (p->icmp_type == 0) {
-					icmp = _T(" (echo reply)");
-				}
-				t.Format(_T("ICMP         type=%u%s  code=%u\r\n"),
-						(unsigned)p->icmp_type, icmp, (unsigned)p->icmp_code);
-			}
-			else {
-				t.Format(_T("%-12s sport=%u  dport=%u\r\n"),
-						(LPCTSTR)ProtoName(*p), (unsigned)p->sport, (unsigned)p->dport);
-			}
-			s += t;
-		}
-	}
-
-	t.Format(_T("결과         %s  (와이어 %u 바이트)\r\n\r\n"),
-			(LPCTSTR)VerdictName(p->verdict), p->wire_len);
-	s += t;
-
-	/* hex 덤프. 앞 TUNNEL_SNAP_LEN 바이트만 떠 두었다. */
-	for (int off = 0; off < p->snap_len; off += 16) {
-		CString hex;
-		CString asc;
-
-		for (int i = 0; i < 16; i++) {
-			if (off + i < p->snap_len) {
-				BYTE b = p->snap[off + i];
-				t.Format(_T("%02x "), b);
-				hex += t;
-				asc += (b >= 0x20 && b < 0x7f) ? (TCHAR)b : _T('.');
-			}
-			else {
-				hex += _T("   ");
-			}
-			if (i == 7) {
-				hex += _T(" ");
-			}
-		}
-		t.Format(_T("%04x  %s %s\r\n"), off, (LPCTSTR)hex, (LPCTSTR)asc);
-		s += t;
-	}
-
-	m_detail.SetWindowText(s);
-}
-
-/* ---- 표시 문자열 ------------------------------------------------------- */
-CString CMainDlg::TimeText(ULONGLONG t_ms)
-{
-	CString s;
-
-	s.Format(_T("%llu:%02llu.%03llu"), t_ms / 60000, (t_ms / 1000) % 60, t_ms % 1000);
-
-	return s;
-}
-
-CString CMainDlg::DirName(const tunnel_packet_t &p)
-{
-	return (p.dir == TUNNEL_DIR_TX) ? _T("\x2191 송신") : _T("\x2193 수신");
-}
-
-CString CMainDlg::TypeName(const tunnel_packet_t &p)
-{
-	switch (p.msg_type) {
-	case MSG_TYPE_REQ_HANDSHAKE:	return _T("REQ_HS");
-	case MSG_TYPE_RES_HANDSHAKE:	return _T("RES_HS");
-	case MSG_TYPE_DATA:		return _T("DATA");
-	case MSG_TYPE_KEEPALIVE:	return _T("KEEPALIVE");
-	case MSG_TYPE_CHALLENGE:	return _T("CHALLENGE");
-	case MSG_TYPE_AUTH:		return _T("AUTH");
-	case MSG_TYPE_DENY:		return _T("DENY");
-	default:			return _T("-");
-	}
-}
-
-CString CMainDlg::PostureStateName(int state)
-{
-	switch (state) {
-	case POSTURE_STATE_ON:		return _T("켜짐");
-	case POSTURE_STATE_OFF:		return _T("꺼짐");
-	default:			return _T("확인 불가");
-	}
-}
-
-CString CMainDlg::DenyReasonName(int reason)
-{
-	switch (reason) {
-	case DENY_UNKNOWN_DEVICE:	return _T("등록되지 않은 기기");
-	case DENY_BAD_AUTH:		return _T("인증 실패");
-	case DENY_TUN_IP:		return _T("이 기기에 배정되지 않은 터널 IP");
-	case DENY_POSTURE:		return _T("포스처가 정책에 못 미침");
-	default:			return _T("알 수 없는 사유");
-	}
-}
-
-CString CMainDlg::PostureText(const posture_report_t &r)
-{
-	CString s;
-
-	s.Format(_T("빌드 %u  방화벽 %s  백신 %s"), r.os_build,
-			(LPCTSTR)PostureStateName(r.firewall), (LPCTSTR)PostureStateName(r.antivirus));
-
-	return s;
-}
-
-CString CMainDlg::VerdictName(int verdict)
-{
-	switch (verdict) {
-	case TUNNEL_PASS:		return _T("전달");
-	case TUNNEL_DROP_NON_IPV4:	return _T("IPv4 아님");
-	case TUNNEL_DROP_NON_UNICAST:	return _T("비유니캐스트");
-	case TUNNEL_DROP_TOO_LONG:	return _T("길이 초과");
-	case TUNNEL_DROP_NOT_SERVER:	return _T("서버 아닌 출발지");
-	case TUNNEL_DROP_BAD_HEADER:	return _T("헤더 불량");
-	case TUNNEL_DROP_WRONG_SESSION:	return _T("세션 불일치");
-	case TUNNEL_DROP_UNKNOWN_TYPE:	return _T("알 수 없는 타입");
-	case TUNNEL_DROP_IO_ERROR:	return _T("전달 실패");
-	case TUNNEL_DROP_DENIED:	return _T("접근 거부");
-	case TUNNEL_DROP_BAD_TAG:	return _T("위조 / 손상");
-	case TUNNEL_DROP_REPLAY:	return _T("재전송");
-	default:			return _T("?");
-	}
-}
-
-CString CMainDlg::ProtoName(const tunnel_packet_t &p)
-{
-	switch (p.proto) {
-	case 1:		return _T("ICMP");
-	case 2:		return _T("IGMP");
-	case 6:		return _T("TCP");
-	case 17:	return _T("UDP");
-	default:	break;
-	}
-
-	CString s;
-	s.Format(_T("%u"), (unsigned)p.proto);
-
-	return s;
-}
-
-CString CMainDlg::Summary(const tunnel_packet_t &p)
-{
-	/* 인증 메시지는 inner 패킷이 없다. 대신 실어 온 내용을 요약한다. */
-	if (p.msg_type == MSG_TYPE_DENY && p.deny_reason != 0) {
-		return _T("거부: ") + DenyReasonName(p.deny_reason);
-	}
-	if (p.has_posture) {
-		return PostureText(p.posture);
-	}
-
-	if (!p.has_inner) {
-		return _T("");
-	}
-
-	TCHAR src[64] = { 0 };
-	TCHAR dst[64] = { 0 };
-	InetNtopW(AF_INET, &p.inner_src, src, 64);
-	InetNtopW(AF_INET, &p.inner_dst, dst, 64);
-
-	CString s;
-	s.Format(_T("%s \x2192 %s  %s"), src, dst, (LPCTSTR)ProtoName(p));
-
-	if (p.has_l4) {
-		CString t;
-		if (p.proto == 1) {
-			if (p.icmp_type == 8) {
-				t = _T(" echo request");
-			}
-			else if (p.icmp_type == 0) {
-				t = _T(" echo reply");
-			}
-			else {
-				t.Format(_T(" type=%u"), (unsigned)p.icmp_type);
-			}
-		}
-		else {
-			t.Format(_T(" %u\x2192%u"), (unsigned)p.sport, (unsigned)p.dport);
-		}
-		s += t;
-	}
-
-	return s;
-}
-
-CString CMainDlg::ColumnText(const tunnel_packet_t &p, int col) const
-{
-	CString s;
-
-	switch (col) {
-	case 0:
-		s.Format(_T("%llu"), p.seq);
-		return s;
-	case 1:
-		return TimeText(p.t_ms);
-	case 2:
-		return DirName(p);
-	case 3:
-		return TypeName(p);
-	case 4:
-		if (p.session_idx == 0) {
-			return _T("-");
-		}
-		s.Format(_T("%08x"), p.session_idx);
-		return s;
-	case 5:
-		if (!p.has_counter) {
-			return _T("-");
-		}
-		s.Format(_T("%llu"), p.counter);
-		return s;
-	case 6:
-		return Summary(p);
-	case 7:
-		s.Format(_T("%u"), p.wire_len);
-		return s;
-	case 8:
-		return VerdictName(p.verdict);
-	default:
-		return _T("");
-	}
+	m_detail.SetWindowText(pkt::DetailText(*p));
 }
 
 /* ---- 상태 / 통계 ------------------------------------------------------- */
@@ -1482,7 +1210,7 @@ void CMainDlg::UpdateStatus()
 	 * 끊긴 뒤에도 남겨 둔다 — 첫 핸드셰이크에서 거부되면 곧바로 닫히므로, 지우면
 	 * 사유를 볼 틈이 없다. 경과 시간으로도 덮지 않는다. */
 	if (m_deny_reason != 0) {
-		sub = _T("거부 사유: ") + DenyReasonName(m_deny_reason);
+		sub = _T("거부 사유: ") + pkt::DenyReasonName(m_deny_reason);
 		subColor = c.danger;
 		if (m_state == TUNNEL_STATE_STOPPED) {
 			dot = c.danger;

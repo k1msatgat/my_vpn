@@ -125,18 +125,6 @@ private:
 	CString ServerVerdictText() const;
 	static CString LocalStateName(int state);
 
-	/* 표시 문자열은 UI 가 만든다 — 코어는 enum 만 올린다. */
-	CString ColumnText(const tunnel_packet_t &p, int col) const;
-	static CString DirName(const tunnel_packet_t &p);
-	static CString TypeName(const tunnel_packet_t &p);
-	static CString VerdictName(int verdict);
-	static CString PostureStateName(int state);
-	static CString DenyReasonName(int reason);
-	static CString PostureText(const posture_report_t &r);
-	static CString Summary(const tunnel_packet_t &p);
-	static CString ProtoName(const tunnel_packet_t &p);
-	static CString TimeText(ULONGLONG t_ms);
-
 	vpn_session_t *m_session;
 	CPacketStore m_store;
 	tunnel_state_t m_state;
