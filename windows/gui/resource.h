@@ -1,6 +1,7 @@
 #pragma once
 
 #define IDD_MAIN		100
+#define IDD_DIAG		103
 #define IDI_APP			110
 
 /* 연결 설정 */
@@ -17,6 +18,7 @@
 #define IDC_DETAIL		1013
 #define IDC_POSTURE		1014
 #define IDC_ENROLL		1015
+#define IDC_DIAG		1016
 
 /* 기기 등록 창 */
 #define IDD_ENROLL		101

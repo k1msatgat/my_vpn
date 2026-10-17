@@ -7,12 +7,12 @@
 
 #include "vpn_remote.h"
 #include "posture.h"
+#include <deque>
+
 #include "PacketStore.h"
+#include "DiagDlg.h"
 #include "ui_theme.h"
 #include "ui_controls.h"
-
-/* 텍스트 로그가 무한히 쌓이지 않게 자른다. */
-#define LOG_MAX_LINES 2000
 
 /* 한 번에 링버퍼에서 꺼내는 패킷 수. 너무 크면 UI 가 한 번에 오래 멈춘다. */
 #define PACKET_DRAIN_BATCH 256
@@ -22,23 +22,6 @@
 
 /* 포스처 탭이 이 PC 의 상태를 다시 읽는 주기 (틱 수). 코어의 보고 주기와 같은 2초. */
 #define POSTURE_REFRESH_TICKS 4
-
-/* 탭 순서 */
-enum {
-	TAB_PACKETS = 0,
-	TAB_LOG,
-	TAB_POSTURE
-};
-
-/* 통계 타일 */
-enum {
-	TILE_TX = 0,
-	TILE_RX,
-	TILE_KEEPALIVE,
-	TILE_DROPS,
-	TILE_REHANDSHAKE,
-	TILE_COUNT
-};
 
 /* 포스처 탭의 행 */
 enum {
@@ -60,10 +43,8 @@ protected:
 	void DoDataExchange(CDataExchange *pDX) override;
 
 	afx_msg void OnConnect();
-	afx_msg void OnClear();
-	afx_msg void OnSave();
-	afx_msg void OnFilterChanged();
 	afx_msg void OnEnroll();
+	afx_msg void OnDiag();
 	afx_msg void OnDestroy();
 	afx_msg void OnSize(UINT type, int cx, int cy);
 	afx_msg void OnGetMinMaxInfo(MINMAXINFO *mmi);
@@ -77,12 +58,6 @@ protected:
 	afx_msg void OnDrawItem(int id, LPDRAWITEMSTRUCT dis);
 	afx_msg void OnSysColorChange();
 
-	/* 가상 리스트: 행 내용을 컨트롤에 복사해 두지 않고 그릴 때마다 물어본다. */
-	afx_msg void OnGetDispInfo(NMHDR *pNMHDR, LRESULT *pResult);
-	afx_msg void OnPacketCustomDraw(NMHDR *pNMHDR, LRESULT *pResult);
-	afx_msg void OnPacketSelChanged(NMHDR *pNMHDR, LRESULT *pResult);
-	afx_msg void OnGetEmptyMarkup(NMHDR *pNMHDR, LRESULT *pResult);
-	afx_msg void OnTabChanged();
 	afx_msg void OnPostureCustomDraw(NMHDR *pNMHDR, LRESULT *pResult);
 
 	/* 워커 스레드가 PostMessage 로 보낸 것들. 모두 UI 스레드에서 처리된다. */
@@ -105,13 +80,7 @@ private:
 	void SetUiState(tunnel_state_t state);
 	void UpdateStatus();
 	void PaintBackground(HDC dc);
-	void PaintTile(HDC dc, int tile);
 	void StyleList(CListCtrl &list);
-	void SetupPacketColumns();
-	void ApplyFilter();
-	void RefreshPacketCount();
-	void UpdateStats();
-	void ShowDetail(int viewIndex);
 	void LayoutChildren(int cx, int cy);
 	void LoadSettings();
 	void SaveSettings();
@@ -147,11 +116,11 @@ private:
 	int m_link;			/* 서비스와의 연결 (vpn_remote_link_t) */
 	bool m_stopping;		/* 해제를 요청하고 워커가 끝나기를 기다리는 중 */
 
-	CListCtrl m_packets;
 	CListCtrl m_posture;
-	CListBox m_log;
-	CEdit m_detail;
-	HWND m_tabs;			/* ui_controls 의 탭 줄 */
+
+	/* 패킷과 로그는 진단 창이 닫혀 있어도 여기에 쌓는다. 진단 창은 이것을 보여 줄 뿐이다. */
+	std::deque<CString> m_logLines;
+	CDiagDlg m_diag;
 
 	/* 직접 그리는 것들. 자리는 LayoutChildren 이 정하고 PaintBackground 가 그린다. */
 	ui::Fonts m_fonts;
@@ -159,17 +128,12 @@ private:
 	CImageList m_row_pad;		/* 리스트의 행 높이를 늘리는 빈 이미지 목록 */
 	CRect m_rc_header;
 	CRect m_rc_status;		/* 상태 글자가 바뀔 때 다시 그릴 영역 */
-	CRect m_rc_tiles[TILE_COUNT];
 	CRect m_rc_content;
-	CRect m_rc_detail;
-	CRect m_rc_footer;
-	int m_sep_y;			/* 탭 줄 아래 구분선 */
+	CRect m_rc_content_title;
+	int m_sep_y;			/* 제목 줄 아래 구분선 */
 
 	CString m_status_title;
 	CString m_status_sub;
 	COLORREF m_status_dot;
 	COLORREF m_status_sub_color;
-	CString m_tile_value[TILE_COUNT];
-	CString m_tile_note[TILE_COUNT];
-	CString m_footer;
 };

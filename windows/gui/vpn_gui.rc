@@ -17,7 +17,7 @@ IDI_APP ICON "app.ico"
  *
  * 상태, 통계, 판(card)은 여기에 없다. 다이얼로그가 바탕에 직접 그린다. 그 위에 놓인
  * 컨트롤이 바탕 그리기에 덮이지 않게 WS_CLIPCHILDREN 을 준다. */
-IDD_MAIN DIALOGEX 0, 0, 600, 420
+IDD_MAIN DIALOGEX 0, 0, 600, 260
 STYLE DS_SETFONT | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU |
       WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_THICKFRAME | WS_CLIPCHILDREN
 CAPTION "ztgate"
@@ -34,29 +34,41 @@ BEGIN
 
     DEFPUSHBUTTON   "연결", IDC_CONNECT, 508, 22, 74, 20
 
-    CONTROL         "", IDC_TAB, "ZtgateTabs", WS_TABSTOP, 12, 104, 150, 18
+    PUSHBUTTON      "기기 등록...", IDC_ENROLL, 456, 70, 64, 14
+    PUSHBUTTON      "진단", IDC_DIAG, 524, 70, 42, 14
 
-    COMBOBOX        IDC_FILTER_DIR, 300, 106, 52, 80,
+    CONTROL         "", IDC_POSTURE, WC_LISTVIEW,
+                    LVS_REPORT | LVS_SINGLESEL | LVS_NOSORTHEADER |
+                    WS_TABSTOP, 10, 90, 580, 170
+END
+
+/* 진단 창. 패킷 표, 로그, 통계. 주 창과 같이 실제 배치는 CDiagDlg::LayoutChildren 이 잡고,
+ * 통계 타일과 판은 다이얼로그가 직접 그린다. */
+IDD_DIAG DIALOGEX 0, 0, 600, 380
+STYLE DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU |
+      WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_THICKFRAME | WS_CLIPCHILDREN
+CAPTION "ztgate 진단"
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    CONTROL         "", IDC_TAB, "ZtgateTabs", WS_TABSTOP, 12, 54, 100, 18
+
+    COMBOBOX        IDC_FILTER_DIR, 300, 56, 52, 80,
                     CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL
     CONTROL         "keepalive 숨김", IDC_HIDE_KA, "Button",
-                    BS_AUTOCHECKBOX | WS_TABSTOP, 358, 108, 76, 10
+                    BS_AUTOCHECKBOX | WS_TABSTOP, 358, 58, 76, 10
     CONTROL         "폐기만", IDC_ONLY_DROPS, "Button",
-                    BS_AUTOCHECKBOX | WS_TABSTOP, 438, 108, 44, 10
-    PUSHBUTTON      "지움", IDC_CLEAR, 496, 106, 36, 14
-    PUSHBUTTON      "저장...", IDC_SAVE, 536, 106, 42, 14
-    PUSHBUTTON      "기기 등록...", IDC_ENROLL, 514, 106, 64, 14, NOT WS_VISIBLE
+                    BS_AUTOCHECKBOX | WS_TABSTOP, 438, 58, 44, 10
+    PUSHBUTTON      "지움", IDC_CLEAR, 496, 56, 36, 14
+    PUSHBUTTON      "저장...", IDC_SAVE, 536, 56, 42, 14
 
     CONTROL         "", IDC_PACKETS, WC_LISTVIEW,
                     LVS_REPORT | LVS_OWNERDATA | LVS_SINGLESEL |
-                    LVS_SHOWSELALWAYS | WS_TABSTOP, 10, 126, 580, 170
-    LISTBOX         IDC_LOG, 10, 126, 580, 170,
+                    LVS_SHOWSELALWAYS | WS_TABSTOP, 10, 76, 580, 170
+    LISTBOX         IDC_LOG, 10, 76, 580, 170,
                     LBS_NOINTEGRALHEIGHT | LBS_NOSEL | WS_VSCROLL | WS_HSCROLL |
                     NOT WS_BORDER | NOT WS_VISIBLE
-    CONTROL         "", IDC_POSTURE, WC_LISTVIEW,
-                    LVS_REPORT | LVS_SINGLESEL | LVS_NOSORTHEADER |
-                    WS_TABSTOP | NOT WS_VISIBLE, 10, 126, 580, 170
 
-    EDITTEXT        IDC_DETAIL, 16, 322, 568, 68,
+    EDITTEXT        IDC_DETAIL, 16, 282, 568, 68,
                     ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL |
                     NOT WS_BORDER | NOT WS_TABSTOP
 END
