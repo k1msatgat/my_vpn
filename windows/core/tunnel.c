@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "wintun.h"
+#include "json.h"
 #include "proto.h"
 #include "posture.h"
 #include "secure.h"
@@ -74,6 +75,7 @@ typedef struct tunnel {
 	int login_due;		/* 이 세션에 토큰을 보내야 하는데 아직 답을 받지 못했다 */
 	int login_sent;		/* 이 세션에 토큰을 보낸 적이 있다 */
 	int logout;		/* 로그아웃했다. 사용자가 붙지 않은 새 세션을 연다 */
+	int64_t login_exp;	/* 지금 토큰의 exp. 읽지 못했으면 -1 */
 	uint64_t last_login_ms;
 	uint64_t t0_ms;		/* 패킷 타임스탬프 기준점 */
 	uint64_t seq;		/* 패킷 일련번호 */
@@ -1066,6 +1068,69 @@ int tunnel_login_set(tunnel_login_t *l, const char *token, size_t len)
 	return 0;
 }
 
+static int b64url_value(char c)
+{
+	if (c >= 'A' && c <= 'Z') return c - 'A';
+	if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+	if (c >= '0' && c <= '9') return c - '0' + 52;
+	if (c == '-') return 62;
+	if (c == '_') return 63;
+	return -1;
+}
+
+/* 토큰(JWT)의 exp. 서버가 OK 와 함께 돌려주는 expires 와 맞춰, 그 답이 지금 들고 있는 토큰에
+ * 대한 것인지 가린다. 서명은 보지 않는다 (서버가 본다). 읽지 못하면 -1. */
+static int64_t token_exp(const char *tok, uint32_t len)
+{
+	uint8_t payload[LOGIN_TOKEN_MAX];
+	json_tok_t jt[512];
+	const char *seg;
+	const char *end;
+	uint32_t acc = 0;
+	int64_t exp;
+	size_t o = 0;
+	int bits = 0;
+	int i;
+
+	seg = memchr(tok, '.', len);
+	if (!seg) {
+		return -1;
+	}
+	seg++;
+	end = memchr(seg, '.', len - (uint32_t)(seg - tok));
+	if (!end) {
+		return -1;
+	}
+
+	for (; seg < end; seg++) {
+		const int v = b64url_value(*seg);
+
+		if (v < 0) {
+			return -1;
+		}
+		acc = (acc << 6) | (uint32_t)v;
+		bits += 6;
+		if (bits >= 8) {
+			bits -= 8;
+			if (o >= sizeof(payload)) {
+				return -1;
+			}
+			payload[o++] = (uint8_t)(acc >> bits);
+		}
+	}
+
+	if (json_parse((const char *)payload, o, jt, (int)(sizeof(jt) / sizeof(jt[0]))) <= 0 ||
+			jt[0].type != JSON_OBJECT) {
+		return -1;
+	}
+	i = json_get((const char *)payload, jt, 0, "exp");
+	if (i < 0 || json_int64((const char *)payload, jt, i, &exp) < 0) {
+		return -1;
+	}
+
+	return exp;
+}
+
 /* 새 세션이 열렸다. 서버의 새 세션에는 사용자가 붙어 있지 않으므로 토큰이 있으면 다시 보낸다. */
 static void login_new_session(tunnel_t *t)
 {
@@ -1102,6 +1167,7 @@ static void login_tick(tunnel_t *t, uint64_t now)
 		t->login_has = l->len != 0;
 		t->login_due = t->login_has;
 		t->last_login_ms = 0;
+		t->login_exp = t->login_has ? token_exp(l->token, l->len) : -1;
 		if (!t->login_has && t->login_sent) {
 			t->logout = 1;
 		}
@@ -1165,6 +1231,19 @@ static void login_response(tunnel_t *t, const uint8_t *body, int n)
 	}
 	memcpy(name, body + LOGIN_RES_HEAD_LEN, (size_t)nl);
 	name[nl] = '\0';
+
+	/* 늦게 온 답을 지금 토큰의 답으로 읽지 않는다. 토큰을 갈아 끼운 직후에 새 토큰의 LOGIN 이
+	 * 사라지고 옛 토큰의 답이 오면, 새 토큰을 다시 보내지 않게 되고 서버는 옛 토큰의 exp 에
+	 * 사용자를 떼어 버린다 (서버는 그것을 알리지 않는다). OK 의 expires 는 그 토큰의 exp 이므로
+	 * 그것으로 가린다. 로그아웃한 뒤의 답은 모두 버린다. */
+	if (!t->login_has) {
+		tlog(t, "[login] reply after logout, ignored");
+		return;
+	}
+	if (body[0] == LOGIN_OK && t->login_exp >= 0 && (int64_t)expires != t->login_exp) {
+		tlog(t, "[login] reply for an earlier token, ignored");
+		return;
+	}
 
 	t->login_due = 0;
 
