@@ -36,6 +36,8 @@ struct vpn_session {
 	/* 등록의 답을 기다리는 자리. */
 	HANDLE enroll_done;	/* manual-reset */
 	ipc_enroll_result_t enroll_result;
+
+	ipc_login_t login;	/* 서비스가 마지막으로 알려 준 로그인 상태 */
 };
 
 static void post(vpn_session_t *s, UINT msg, WPARAM w)
@@ -243,6 +245,16 @@ static int on_message(vpn_session_t *s, const uint8_t *msg, DWORD n)
 	case IPC_EVT_ERROR:
 		on_error(s, body, h.len);
 		break;
+	case IPC_EVT_LOGIN:
+		if (h.len != sizeof(s->login)) {
+			return -1;
+		}
+		EnterCriticalSection(&s->lock);
+		memcpy(&s->login, body, sizeof(s->login));
+		s->login.user[sizeof(s->login.user) - 1] = '\0';
+		LeaveCriticalSection(&s->lock);
+		post(s, WM_VPN_LOGIN, 0);
+		break;
 	default:
 		break;	/* 모르는 사건은 넘긴다 */
 	}
@@ -334,8 +346,10 @@ out:
 	EnterCriticalSection(&s->lock);
 	s->enroll_result.result = TUNNEL_ENROLL_ERROR;
 	s->active = 0;
+	memset(&s->login, 0, sizeof(s->login));	/* 서비스는 떨어진 GUI 의 토큰을 버린다 */
 	LeaveCriticalSection(&s->lock);
 	SetEvent(s->enroll_done);
+	post(s, WM_VPN_LOGIN, 0);
 
 	/* 버전이 달라 끊은 것이면 그 표시를 남긴다. 그 밖에는 서비스가 사라진 것이다. */
 	if (vpn_remote_link(s) == VPN_REMOTE_UP) {
@@ -607,4 +621,32 @@ int vpn_remote_enroll_manual(vpn_session_t *s, device_t *out)
 	SecureZeroMemory(&r, sizeof(r));
 
 	return ret;
+}
+
+int vpn_remote_login(vpn_session_t *s, const char *token, size_t len)
+{
+	if (!s || !token || len == 0 || len > LOGIN_TOKEN_MAX) {
+		return -1;
+	}
+
+	return command(s, IPC_CMD_LOGIN, token, (uint32_t)len);
+}
+
+void vpn_remote_logout(vpn_session_t *s)
+{
+	if (s) {
+		command(s, IPC_CMD_LOGOUT, NULL, 0);
+	}
+}
+
+void vpn_remote_login_info(vpn_session_t *s, ipc_login_t *out)
+{
+	memset(out, 0, sizeof(*out));
+	if (!s) {
+		return;
+	}
+
+	EnterCriticalSection(&s->lock);
+	*out = s->login;
+	LeaveCriticalSection(&s->lock);
 }

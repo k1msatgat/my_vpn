@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <wchar.h>
 
 #include "tunnel.h"
@@ -69,6 +70,11 @@ static char logs[LOG_RING][IPC_LOG_LEN];
 static uint64_t log_seq;
 static tunnel_packet_t packets[PACKET_RING];
 static uint64_t pkt_seq;
+
+/* 사용자 로그인. 토큰은 터널과 함께 쓰는 자리에 두고, 화면에 보일 상태는 따로 둔다. */
+static tunnel_login_t login;
+static ipc_login_t login_info;	/* lock 이 지킨다 */
+static int login_dirty;
 
 /* 붙어 있는 GUI. 한 번에 하나다. */
 static HANDLE pipe = INVALID_HANDLE_VALUE;
@@ -130,6 +136,21 @@ static void on_state(void *ctx, tunnel_state_t s)
 {
 	(void)ctx;
 	set_state((uint32_t)s);
+}
+
+static void on_login(void *ctx, int status, int64_t expires, const char *user)
+{
+	(void)ctx;
+
+	EnterCriticalSection(&lock);
+	login_info.state = IPC_LOGIN_DONE;
+	login_info.status = (uint32_t)status;
+	login_info.expires = expires;
+	strncpy(login_info.user, user, sizeof(login_info.user) - 1);
+	login_info.user[sizeof(login_info.user) - 1] = '\0';
+	login_dirty = 1;
+	LeaveCriticalSection(&lock);
+	SetEvent(notify);
 }
 
 static void on_packet(void *ctx, const tunnel_packet_t *p)
@@ -217,6 +238,8 @@ static int tunnel_start(void)
 	run_cfg.on_log = on_log;
 	run_cfg.on_state = on_state;
 	run_cfg.on_packet = on_packet;
+	run_cfg.login = &login;
+	run_cfg.on_login = on_login;
 	run_cfg.ctx = NULL;
 
 	ResetEvent(tunnel_stop);
@@ -307,10 +330,23 @@ static HANDLE pipe_create(void)
 	return h;
 }
 
+static void login_set(const char *token, uint32_t len);
+
 static void client_drop(void)
 {
+	int had_login;
+
 	if (client_on) {
 		slog("the control program disconnected");
+	}
+
+	/* 토큰은 그것을 준 GUI 가 붙어 있는 동안만 쓴다 (ipc.h). */
+	EnterCriticalSection(&lock);
+	had_login = login_info.state != IPC_LOGIN_NONE;
+	LeaveCriticalSection(&lock);
+	if (had_login) {
+		login_set(NULL, 0);
+		slog("user logged out with the control program");
 	}
 
 	CancelIo(pipe);
@@ -392,6 +428,30 @@ static int send_device(void)
 	return send_msg(IPC_EVT_DEVICE, &d, sizeof(d));
 }
 
+static int send_login(void)
+{
+	ipc_login_t l;
+
+	EnterCriticalSection(&lock);
+	l = login_info;
+	login_dirty = 0;
+	LeaveCriticalSection(&lock);
+
+	return send_msg(IPC_EVT_LOGIN, &l, sizeof(l));
+}
+
+/* 토큰을 바꾸고 화면에 보일 상태를 처음으로 되돌린다. len 0 이면 로그아웃. */
+static void login_set(const char *token, uint32_t len)
+{
+	tunnel_login_set(&login, token, len);
+
+	EnterCriticalSection(&lock);
+	memset(&login_info, 0, sizeof(login_info));
+	login_info.state = len > 0 ? IPC_LOGIN_PENDING : IPC_LOGIN_NONE;
+	login_dirty = 1;
+	LeaveCriticalSection(&lock);
+}
+
 static int send_error(uint32_t code)
 {
 	ipc_error_t e;
@@ -416,6 +476,13 @@ static int client_flush(void)
 	dirty = state_dirty;
 	LeaveCriticalSection(&lock);
 	if (dirty && send_state() < 0) {
+		return -1;
+	}
+
+	EnterCriticalSection(&lock);
+	dirty = login_dirty;
+	LeaveCriticalSection(&lock);
+	if (dirty && send_login() < 0) {
 		return -1;
 	}
 
@@ -509,7 +576,7 @@ static int cmd_hello(const uint8_t *body, uint32_t len)
 	c_lost = 0;
 	client_ready = 1;
 
-	if (send_state() < 0 || send_device() < 0) {
+	if (send_state() < 0 || send_device() < 0 || send_login() < 0) {
 		return -1;
 	}
 
@@ -657,6 +724,28 @@ static int cmd_enroll_manual(void)
 	return ret < 0 ? -1 : send_device();
 }
 
+/* 토큰을 받았다. 서버가 서명을 보므로 여기서는 크기만 본다. */
+static int cmd_login(const uint8_t *body, uint32_t len)
+{
+	if (len == 0 || len > LOGIN_TOKEN_MAX) {
+		return send_error(IPC_ERR_BAD_REQUEST);
+	}
+
+	login_set((const char *)body, len);
+	SecureZeroMemory((void *)body, len);
+	slog("user token received (%u bytes)", len);
+
+	return send_login();
+}
+
+static int cmd_logout(void)
+{
+	login_set(NULL, 0);
+	slog("user logged out");
+
+	return send_login();
+}
+
 /* 0 이면 계속, -1 이면 이 GUI 와는 끝이다. */
 static int client_message(uint32_t n)
 {
@@ -680,6 +769,8 @@ static int client_message(uint32_t n)
 	case IPC_CMD_DISCONNECT:	return cmd_disconnect();
 	case IPC_CMD_ENROLL:		return cmd_enroll(body, h.len);
 	case IPC_CMD_ENROLL_MANUAL:	return cmd_enroll_manual();
+	case IPC_CMD_LOGIN:		return cmd_login(body, h.len);
+	case IPC_CMD_LOGOUT:		return cmd_logout();
 	default:			return send_error(IPC_ERR_BAD_REQUEST);
 	}
 }
@@ -690,6 +781,7 @@ static int service_init(void)
 	WSADATA wsa;
 
 	InitializeCriticalSection(&lock);
+	tunnel_login_init(&login);
 	stop_all = CreateEventW(NULL, TRUE, FALSE, NULL);
 	tunnel_stop = CreateEventW(NULL, TRUE, FALSE, NULL);
 	notify = CreateEventW(NULL, FALSE, FALSE, NULL);
@@ -1131,6 +1223,25 @@ static void ctl_print(const uint8_t *msg, DWORD n, int verbose)
 		SecureZeroMemory(&r, sizeof(r));
 		break;
 	}
+	case IPC_EVT_LOGIN: {
+		ipc_login_t l;
+
+		memcpy(&l, body, sizeof(l));
+		l.user[sizeof(l.user) - 1] = '\0';
+		if (l.state == IPC_LOGIN_NONE) {
+			printf("login: none\n");
+		}
+		else if (l.state == IPC_LOGIN_PENDING) {
+			printf("login: waiting for the server\n");
+		}
+		else if (l.status == LOGIN_OK) {
+			printf("login: %s (expires in %llds)\n", l.user, (long long)(l.expires - (int64_t)time(NULL)));
+		}
+		else {
+			printf("login: rejected (status %u)\n", l.status);
+		}
+		break;
+	}
 	case IPC_EVT_ERROR: {
 		ipc_error_t e;
 
@@ -1202,6 +1313,27 @@ static int ctl(int argc, wchar_t **argv)
 		seconds = 6;
 		sent = ipc_send(h, IPC_CMD_CONNECT, &c, sizeof(c), 3000, NULL);
 	}
+	else if (wcscmp(argv[0], L"login") == 0 && argc >= 2) {
+		/* 토큰은 GUI 가 붙어 있는 동안만 쓰이므로, 이 명령이 떠 있는 동안만 로그인해 있다. */
+		static char token[LOGIN_TOKEN_MAX + 2];
+		FILE *f = _wfopen(argv[1], L"rb");
+		size_t len;
+
+		if (!f) {
+			fprintf(stderr, "cannot read %ls\n", argv[1]);
+			CloseHandle(h);
+			return 1;
+		}
+		len = fread(token, 1, sizeof(token), f);
+		fclose(f);
+		while (len > 0 && (token[len - 1] == '\n' || token[len - 1] == '\r' || token[len - 1] == ' ')) {
+			len--;
+		}
+		verbose = 1;
+		seconds = argc >= 3 ? (DWORD)wcstoul(argv[2], NULL, 10) : 20;
+		sent = ipc_send(h, IPC_CMD_LOGIN, token, (uint32_t)len, 3000, NULL);
+		SecureZeroMemory(token, sizeof(token));
+	}
 	else if (wcscmp(argv[0], L"disconnect") == 0) {
 		verbose = 1;
 		sent = ipc_send(h, IPC_CMD_DISCONNECT, NULL, 0, 3000, NULL);
@@ -1268,6 +1400,7 @@ usage:
 	fprintf(stderr, "       vpn_service ctl connect <adapter-name> <server-ip> <port>\n");
 	fprintf(stderr, "       vpn_service ctl disconnect\n");
 	fprintf(stderr, "       vpn_service ctl enroll <server-ip> <port> <code>\n");
+	fprintf(stderr, "       vpn_service ctl login <token-file> [seconds]          logged in while this runs\n");
 
 	return 1;
 }

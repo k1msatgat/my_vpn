@@ -31,7 +31,7 @@ extern "C" {
 #endif
 
 #define IPC_PIPE_NAME	L"\\\\.\\pipe\\ztgate"
-#define IPC_VERSION	1
+#define IPC_VERSION	2	/* 2: 사용자 로그인 (LOGIN / LOGOUT) */
 
 /* 한 메시지의 최대 크기. 패킷 사건을 묶어 보내는 것이 가장 크다. */
 #define IPC_MAX_MSG	16384
@@ -46,6 +46,8 @@ typedef enum ipc_type {
 	IPC_CMD_DISCONNECT,		/* 내용 없음 */
 	IPC_CMD_ENROLL,			/* ipc_enroll */
 	IPC_CMD_ENROLL_MANUAL,		/* 내용 없음. 서비스가 ID 와 키를 만들어 돌려준다 */
+	IPC_CMD_LOGIN,			/* 사용자의 토큰 (JWT 글자들, 끝의 0 없이) */
+	IPC_CMD_LOGOUT,			/* 내용 없음 */
 
 	/* 서비스 -> GUI */
 	IPC_EVT_HELLO = 100,		/* ipc_hello. 이 뒤로 지금의 상태와 밀린 기록이 온다 */
@@ -54,7 +56,8 @@ typedef enum ipc_type {
 	IPC_EVT_LOG,			/* 글자들 (끝의 0 없이) */
 	IPC_EVT_PACKETS,		/* ipc_packets 뒤에 tunnel_packet_t 가 count 개 */
 	IPC_EVT_ENROLL_RESULT,		/* ipc_enroll_result */
-	IPC_EVT_ERROR			/* ipc_error. 명령을 받아 줄 수 없다 */
+	IPC_EVT_ERROR,			/* ipc_error. 명령을 받아 줄 수 없다 */
+	IPC_EVT_LOGIN			/* ipc_login. 로그인 상태가 바뀌었다 */
 } ipc_type_t;
 
 typedef struct ipc_header {
@@ -101,6 +104,28 @@ typedef struct ipc_enroll_result {
 	uint8_t id[DEVICE_ID_LEN];
 	uint8_t key[AUTH_KEY_LEN];
 } ipc_enroll_result_t;
+
+/* 사용자 로그인.
+ *
+ * 토큰을 IdP 에서 받아 오는 것은 GUI 다. 로그인은 그 사람의 일이라 그 사람의 계정으로 도는
+ * 프로그램이 브라우저를 띄우고, 갱신에 쓰는 refresh token 도 그쪽에 둔다. 서비스는 받은
+ * 토큰을 터널에 넘겨 서버로 보내기만 한다.
+ *
+ * 토큰은 그것을 준 GUI 가 붙어 있는 동안만 쓴다. GUI 가 떨어지면(로그오프, 종료) 서비스는
+ * 로그아웃한다. 터널은 PC 의 것이라 그대로 두지만, 다음에 앉는 사람이 앞사람의 신원으로
+ * 쓰면 안 된다. */
+typedef enum ipc_login_state {
+	IPC_LOGIN_NONE = 0,		/* 토큰이 없다 */
+	IPC_LOGIN_PENDING,		/* 토큰을 받았고 서버의 답을 기다린다 (터널이 닫혀 있으면 열릴 때까지) */
+	IPC_LOGIN_DONE			/* 서버가 답했다. status 를 본다 */
+} ipc_login_state_t;
+
+typedef struct ipc_login {
+	uint32_t state;		/* ipc_login_state_t */
+	uint32_t status;	/* login_status_t. DONE 일 때만 */
+	int64_t expires;	/* 토큰의 exp (Unix time). 실패면 0 */
+	char user[LOGIN_USER_MAX + 1];	/* 성공했을 때의 사용자 이름 */
+} ipc_login_t;
 
 typedef enum ipc_error_code {
 	IPC_ERR_BUSY = 1,		/* 터널이 열려 있다. 먼저 해제해야 한다 */

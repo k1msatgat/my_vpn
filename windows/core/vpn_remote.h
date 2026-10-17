@@ -20,6 +20,7 @@
 
 #include "vpn_session.h"
 #include "device.h"
+#include "ipc.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -29,6 +30,7 @@ extern "C" {
 #define WM_VPN_SERVICE	(WM_APP + 5)	/* wParam = vpn_remote_link_t. 서비스와의 연결이 바뀌었다 */
 #define WM_VPN_DEVICE	(WM_APP + 6)	/* 기기의 등록 상태가 바뀌었다. vpn_remote_device 로 읽는다 */
 #define WM_VPN_ERROR	(WM_APP + 7)	/* wParam = ipc_error_code_t. 서비스가 명령을 받지 않았다 */
+#define WM_VPN_LOGIN	(WM_APP + 8)	/* 사용자 로그인 상태가 바뀌었다. vpn_remote_login_info 로 읽는다 */
 
 typedef enum vpn_remote_link {
 	VPN_REMOTE_DOWN = 0,		/* 서비스에 닿지 못한다 (설치되지 않았거나 멈춰 있다) */
@@ -50,6 +52,16 @@ int vpn_remote_enroll(vpn_session_t *s, uint32_t server_ip, uint16_t server_port
 /* 코드 없이: 서비스가 새 신원을 만들어 저장하고 ID 와 키를 돌려준다. 관리자가 서버에
  * 손으로 옮겨 적는다. 키를 볼 수 있는 것은 이 한 번뿐이다. DEVICE_OK / DEVICE_ERROR. */
 int vpn_remote_enroll_manual(vpn_session_t *s, device_t *out);
+
+/* 사용자의 토큰(JWT)을 서비스에 건넨다. 서비스가 세션 안으로 서버에 보내고, 서버의 답은
+ * WM_VPN_LOGIN 으로 알게 된다. 토큰은 이 프로그램이 서비스에 붙어 있는 동안만 쓰인다 —
+ * 서비스에 다시 붙으면(서비스 재시작) 다시 건네야 한다. 0 성공, -1 실패. */
+int vpn_remote_login(vpn_session_t *s, const char *token, size_t len);
+
+void vpn_remote_logout(vpn_session_t *s);
+
+/* 서비스가 마지막으로 알려 준 로그인 상태. 붙어 있지 않으면 IPC_LOGIN_NONE. */
+void vpn_remote_login_info(vpn_session_t *s, ipc_login_t *out);
 
 #ifdef __cplusplus
 }
