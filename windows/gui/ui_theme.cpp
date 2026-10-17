@@ -122,6 +122,20 @@ static HFONT Derive(const LOGFONTW &base, int num, int den, LONG weight, LPCWSTR
 	return CreateFontIndirectW(&lf);
 }
 
+/* 기호 글꼴. 글자 폭이 고정된 글꼴로 만들면 안 된다 (Derive 의 face 는 고정폭용). */
+static HFONT DeriveSymbol(const LOGFONTW &base, int num, int den)
+{
+	LOGFONTW lf = base;
+
+	lf.lfHeight = MulDiv(base.lfHeight, num, den);
+	lf.lfWidth = 0;
+	lf.lfWeight = FW_NORMAL;
+	lf.lfCharSet = DEFAULT_CHARSET;
+	lstrcpynW(lf.lfFaceName, L"Segoe MDL2 Assets", LF_FACESIZE);
+
+	return CreateFontIndirectW(&lf);
+}
+
 void CreateFonts(HFONT dialogFont, Fonts *out)
 {
 	LOGFONTW lf;
@@ -142,11 +156,15 @@ void CreateFonts(HFONT dialogFont, Fonts *out)
 	out->value = Derive(lf, 14, 9, FW_SEMIBOLD, nullptr);
 	out->title = Derive(lf, 15, 9, FW_SEMIBOLD, nullptr);
 	out->mono = Derive(lf, 1, 1, FW_NORMAL, L"Consolas");
+	out->hero = Derive(lf, 18, 9, FW_SEMIBOLD, nullptr);
+	out->icon = DeriveSymbol(lf, 24, 9);
+	out->iconSmall = DeriveSymbol(lf, 9, 9);
 }
 
 void DestroyFonts(Fonts *fonts)
 {
-	HFONT *owned[] = { &fonts->label, &fonts->strong, &fonts->value, &fonts->title, &fonts->mono };
+	HFONT *owned[] = { &fonts->label, &fonts->strong, &fonts->value, &fonts->title, &fonts->mono,
+			   &fonts->hero, &fonts->icon, &fonts->iconSmall };
 
 	for (HFONT *f : owned) {
 		if (*f != nullptr) {

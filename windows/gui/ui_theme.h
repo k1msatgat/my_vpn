@@ -61,7 +61,18 @@ struct Fonts {
 	HFONT value;	/* 통계 타일의 숫자 */
 	HFONT title;	/* 연결 상태 */
 	HFONT mono;	/* 상세창, 로그, 16진수 */
+	HFONT hero;	/* 주 창 한가운데의 상태 */
+	HFONT icon;	/* 상태 원 안의 기호 (Segoe MDL2 Assets) */
+	HFONT iconSmall;	/* 목록 앞의 작은 기호 */
 };
+
+/* Segoe MDL2 Assets 의 기호. Windows 10 부터 늘 있는 글꼴이라 그림 파일을 따로 두지 않는다. */
+#define ICON_CHECK	L"\xE73E"
+#define ICON_CROSS	L"\xE711"
+#define ICON_SYNC	L"\xE895"
+#define ICON_POWER	L"\xE7E8"
+#define ICON_WARNING	L"\xE7BA"
+#define ICON_UNKNOWN	L"\xE9CE"
 
 void CreateFonts(HFONT dialogFont, Fonts *out);
 void DestroyFonts(Fonts *fonts);

@@ -158,6 +158,11 @@ bool DrawButton(const DRAWITEMSTRUCT *dis)
 		border = c.border;
 		text = c.disabledText;
 	}
+	else if (data->kind == BUTTON_LINK) {
+		fill = pressed ? c.buttonPressed : data->hover ? c.border : c.bg;
+		border = CLR_NONE;
+		text = (c.highContrast && (pressed || data->hover)) ? c.onAccent : c.accent;
+	}
 	else if (data->kind == BUTTON_PRIMARY) {
 		fill = pressed ? c.accentPressed : data->hover ? c.accentHover : c.accent;
 		border = CLR_NONE;
@@ -169,9 +174,9 @@ bool DrawButton(const DRAWITEMSTRUCT *dis)
 		text = (c.highContrast && (pressed || data->hover)) ? c.onAccent : c.text;
 	}
 
-	/* 둥근 모서리 바깥은 버튼이 놓인 판의 색이다. */
+	/* 둥근 모서리 바깥은 버튼이 놓인 곳의 색이다. 링크 버튼은 창 바탕에, 나머지는 판에. */
 	{
-		HBRUSH back = CreateSolidBrush(c.card);
+		HBRUSH back = CreateSolidBrush(data->kind == BUTTON_LINK ? c.bg : c.card);
 
 		FillRect(dis->hDC, &rc, back);
 		DeleteObject(back);

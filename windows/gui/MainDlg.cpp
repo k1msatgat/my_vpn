@@ -17,27 +17,34 @@ CMainDlg::CMainDlg(CWnd *parent)
 	, m_session(nullptr)
 	, m_state(TUNNEL_STATE_STOPPED)
 	, m_connected_at(0)
-	, m_has_reported(false)
 	, m_deny_reason(0)
 	, m_posture_ticks(0)
 	, m_session_idx(0)
 	, m_link(VPN_REMOTE_DOWN)
 	, m_stopping(false)
 	, m_diag(m_store, m_logLines)
-	, m_sep_y(0)
-	, m_status_dot(0)
-	, m_status_sub_color(0)
+	, m_status_icon(ICON_POWER)
+	, m_status_color(0)
+	, m_status_hint_color(0)
 {
 	ZeroMemory(&m_fonts, sizeof(m_fonts));
 	ZeroMemory(&m_local, sizeof(m_local));
-	ZeroMemory(&m_reported, sizeof(m_reported));
-	ZeroMemory(m_posture_bad, sizeof(m_posture_bad));
-}
 
-void CMainDlg::DoDataExchange(CDataExchange *pDX)
-{
-	CDialogEx::DoDataExchange(pDX);
-	DDX_Control(pDX, IDC_POSTURE, m_posture);
+	static const LPCTSTR checks[CHECK_COUNT] = {
+		_T("방화벽"), _T("백신"), _T("OS 빌드"), _T("서버 판정"),
+	};
+	static const LPCTSTR info[INFO_COUNT] = {
+		_T("서버"), _T("터널 주소"), _T("주고받은 데이터"), _T("기기 ID"),
+	};
+
+	for (int i = 0; i < CHECK_COUNT; i++) {
+		m_checks[i].name = checks[i];
+		m_checks[i].level = LEVEL_NONE;
+	}
+	for (int i = 0; i < INFO_COUNT; i++) {
+		m_info[i].name = info[i];
+		m_info[i].level = LEVEL_NONE;
+	}
 }
 
 BEGIN_MESSAGE_MAP(CMainDlg, CDialogEx)
@@ -47,7 +54,6 @@ BEGIN_MESSAGE_MAP(CMainDlg, CDialogEx)
 	ON_BN_CLICKED(IDC_SETTINGS, &CMainDlg::OnSettings)
 	ON_WM_DESTROY()
 	ON_WM_SIZE()
-	ON_WM_GETMINMAXINFO()
 	ON_WM_TIMER()
 	ON_WM_CTLCOLOR()
 	ON_WM_PAINT()
@@ -55,7 +61,6 @@ BEGIN_MESSAGE_MAP(CMainDlg, CDialogEx)
 	ON_WM_DRAWITEM()
 	ON_WM_SYSCOLORCHANGE()
 	ON_MESSAGE(WM_PRINTCLIENT, &CMainDlg::OnPrintClient)
-	ON_NOTIFY(NM_CUSTOMDRAW, IDC_POSTURE, &CMainDlg::OnPostureCustomDraw)
 	ON_MESSAGE(WM_VPN_LOG, &CMainDlg::OnVpnLog)
 	ON_MESSAGE(WM_VPN_STATE, &CMainDlg::OnVpnState)
 	ON_MESSAGE(WM_VPN_DONE, &CMainDlg::OnVpnDone)
@@ -82,16 +87,14 @@ BOOL CMainDlg::OnInitDialog()
 	m_card_brush.CreateSolidBrush(ui::Colors().card);
 
 	ui::StyleButton(::GetDlgItem(GetSafeHwnd(), IDC_CONNECT), ui::BUTTON_PRIMARY);
-	ui::StyleButton(::GetDlgItem(GetSafeHwnd(), IDC_ENROLL), ui::BUTTON_SECONDARY);
-	ui::StyleButton(::GetDlgItem(GetSafeHwnd(), IDC_DIAG), ui::BUTTON_SECONDARY);
-	ui::StyleButton(::GetDlgItem(GetSafeHwnd(), IDC_SETTINGS), ui::BUTTON_SECONDARY);
+	ui::StyleButton(::GetDlgItem(GetSafeHwnd(), IDC_SETTINGS), ui::BUTTON_LINK);
+	ui::StyleButton(::GetDlgItem(GetSafeHwnd(), IDC_ENROLL), ui::BUTTON_LINK);
+	ui::StyleButton(::GetDlgItem(GetSafeHwnd(), IDC_DIAG), ui::BUTTON_LINK);
 
-	SetupPostureList();
-	LoadDeviceId();
-	RefreshPosture(true);
+	/* 연결 버튼은 이 창에서 가장 중요한 버튼이다. 글자도 한 단계 키운다. */
+	GetDlgItem(IDC_CONNECT)->SetFont(CFont::FromHandle(m_fonts.strong));
 
 	LoadSettings();
-	UpdateInfo();
 
 	/* 창이 만들어진 뒤여야 PostMessage 대상 HWND 를 넘길 수 있다. */
 	m_session = vpn_session_create(GetSafeHwnd());
@@ -101,30 +104,16 @@ BOOL CMainDlg::OnInitDialog()
 		return TRUE;
 	}
 
+	LoadDeviceId();
+	RefreshPosture(true);
+	UpdateInfo();
 	SetUiState(TUNNEL_STATE_STOPPED);
 	SetTimer(TIMER_TICK_ID, TIMER_TICK_MS, nullptr);
 
-	/* 첫 WM_SIZE 는 컨트롤이 붙기 전에 와서 LayoutChildren 이 그냥 돌아간다. 여기서 한 번
-	 * 자리를 잡아 준다. 안 그러면 다음에 창 크기를 바꿀 때까지 .rc 의 초깃값 자리에 있고
-	 * 판도 그려지지 않는다. */
-	CRect rc;
-	GetClientRect(&rc);
-	LayoutChildren(rc.Width(), rc.Height());
+	/* 창 크기는 내용에 맞춘 고정 크기다. 늘려도 보여 줄 것이 더 없다. */
+	FitWindow();
 
 	return TRUE;
-}
-
-/* 리스트를 탐색기와 같은 모양으로 (선택 / 마우스 올림 표시가 납작해진다) 바꾸고 행을
- * 조금 높인다. 리스트뷰에는 행 높이를 정하는 설정이 없다. 행은 글꼴과 작은 아이콘
- * 중 큰 쪽에 맞춰지므로, 높이만 있는 빈 이미지 목록을 물려 준다. */
-void CMainDlg::StyleList(CListCtrl &list)
-{
-	SetWindowTheme(list.GetSafeHwnd(), L"Explorer", nullptr);
-
-	if (!m_row_pad.GetSafeHandle()) {
-		m_row_pad.Create(1, ui::Scale(22), ILC_COLOR32, 0, 1);
-	}
-	list.SetImageList(&m_row_pad, LVSIL_SMALL);
 }
 
 /* ---- 설정 저장 / 복원 --------------------------------------------------- */
@@ -243,7 +232,6 @@ void CMainDlg::OnConnect()
 
 	/* 지난 연결의 판정과 보고 값은 새 연결과 무관하다. */
 	m_deny_reason = 0;
-	m_has_reported = false;
 	m_session_idx = 0;
 
 	if (vpn_session_start(m_session, &cfg) < 0) {
@@ -458,36 +446,6 @@ LRESULT CMainDlg::OnVpnPackets(WPARAM, LPARAM)
 	return 0;
 }
 
-/* ---- 포스처 탭 --------------------------------------------------------- */
-/* 패킷 리스트와 달리 행이 다섯 개로 고정이라 가상 리스트를 쓰지 않는다. 행을 미리
- * 넣어 두고 값이 바뀐 칸만 고친다. */
-void CMainDlg::SetupPostureList()
-{
-	static const struct {
-		LPCTSTR title;
-		int du_width;
-	} cols[] = {
-		{ _T("항목"),               70 },
-		{ _T("이 PC (지금)"),       190 },
-		{ _T("서버에 보고한 값"),   190 },
-	};
-	static const LPCTSTR rows[POSTURE_ROW_COUNT] = {
-		_T("기기 ID"), _T("OS 빌드"), _T("방화벽"), _T("백신"), _T("서버 판정"),
-	};
-	CRect unit(0, 0, 4, 8);
-
-	MapDialogRect(&unit);
-	m_posture.SetExtendedStyle(LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
-	StyleList(m_posture);
-
-	for (int i = 0; i < (int)(sizeof(cols) / sizeof(cols[0])); i++) {
-		m_posture.InsertColumn(i, cols[i].title, LVCFMT_LEFT, cols[i].du_width * unit.Width() / 4);
-	}
-	for (int i = 0; i < POSTURE_ROW_COUNT; i++) {
-		m_posture.InsertItem(i, rows[i]);
-	}
-}
-
 /* 기기 ID 만 보여 준다. device_load 는 키까지 풀어 주므로 쓰지 않을 키는 바로 지운다. */
 void CMainDlg::LoadDeviceId()
 {
@@ -599,11 +557,6 @@ LRESULT CMainDlg::OnVpnError(WPARAM wParam, LPARAM)
  * 코어에 콜백을 더 만들지 않았다. 필요한 사실이 이미 패킷으로 올라온다. */
 void CMainDlg::TrackAuth(const tunnel_packet_t &p)
 {
-	if (p.dir == TUNNEL_DIR_TX && p.has_posture) {
-		m_reported = p.posture;
-		m_has_reported = true;
-	}
-
 	if (p.dir != TUNNEL_DIR_RX || p.verdict != TUNNEL_PASS) {
 		return;
 	}
@@ -646,103 +599,70 @@ CString CMainDlg::LocalStateName(int state)
 	}
 }
 
-CString CMainDlg::ServerVerdictText() const
-{
-	if (m_deny_reason != 0) {
-		CString s = _T("거부 — ") + pkt::DenyReasonName(m_deny_reason);
-
-		if (m_state == TUNNEL_STATE_STOPPED) {
-			s += _T(" (연결 종료)");
-		}
-		return s;
-	}
-
-	switch (m_state) {
-	case TUNNEL_STATE_CONNECTED:	return _T("허용");
-	case TUNNEL_STATE_CONNECTING:	return _T("확인 중");
-	case TUNNEL_STATE_RECONNECTING:	return _T("재연결 중");
-	case TUNNEL_STATE_DENIED:	return _T("거부");
-	default:			return _T("연결 안 됨");
-	}
-}
-
-/* 값이 그대로면 건드리지 않는다. 2초마다 같은 글자를 다시 쓰면 선택 표시가 깜빡인다. */
-void CMainDlg::SetPostureCell(int row, int col, const CString &text)
-{
-	if (m_posture.GetItemText(row, col) != text) {
-		m_posture.SetItemText(row, col, text);
-	}
-}
-
 /* collect 가 true 면 이 PC 의 상태를 다시 읽는다. 수십 ms 걸리는 호출이라 패킷이
- * 올 때마다 하지 않고 타이머와 탭 전환에서만 한다. */
+ * 올 때마다 하지 않고 타이머에서만 한다.
+ *
+ * 이 PC 의 값만 보고 "충족 / 미달"을 매기지 않는다. 서버가 무엇을 요구하는지 클라이언트는
+ * 모른다 — 백신이 꺼져 있어도 정책이 요구하지 않으면 접속된다. 그래서 켜짐은 초록, 꺼짐은
+ * 빨강으로 상태만 보이고, 접속이 되는지는 "서버 판정" 줄이 따로 말한다. */
 void CMainDlg::RefreshPosture(bool collect)
 {
-	bool bad[POSTURE_ROW_COUNT] = { false };
+	HomeRow rows[CHECK_COUNT];
 	CString s;
-
-	if (!m_posture.GetSafeHwnd()) {
-		return;
-	}
 
 	if (collect) {
 		posture_collect(&m_local);
 	}
 
-	SetPostureCell(POSTURE_ROW_DEVICE, 1,
-			m_device_id.IsEmpty() ? CString(_T("등록되지 않음")) : m_device_id);
-	bad[POSTURE_ROW_DEVICE] = m_device_id.IsEmpty();
+	for (int i = 0; i < CHECK_COUNT; i++) {
+		rows[i].name = m_checks[i].name;
+	}
+
+	rows[CHECK_FIREWALL].value = LocalStateName(m_local.firewall);
+	rows[CHECK_FIREWALL].level = m_local.firewall == POSTURE_ON ? LEVEL_OK :
+			m_local.firewall == POSTURE_OFF ? LEVEL_BAD : LEVEL_NONE;
+	rows[CHECK_ANTIVIRUS].value = LocalStateName(m_local.antivirus);
+	rows[CHECK_ANTIVIRUS].level = m_local.antivirus == POSTURE_ON ? LEVEL_OK :
+			m_local.antivirus == POSTURE_OFF ? LEVEL_BAD : LEVEL_NONE;
 
 	if (m_local.os_build != 0) {
 		s.Format(_T("%u.%u.%u"), m_local.os_major, m_local.os_minor, m_local.os_build);
+		rows[CHECK_OS].level = LEVEL_OK;
 	}
 	else {
 		s = _T("확인 불가");
+		rows[CHECK_OS].level = LEVEL_NONE;
 	}
-	SetPostureCell(POSTURE_ROW_OS, 1, s);
-	SetPostureCell(POSTURE_ROW_FIREWALL, 1, LocalStateName(m_local.firewall));
-	SetPostureCell(POSTURE_ROW_ANTIVIRUS, 1, LocalStateName(m_local.antivirus));
-	bad[POSTURE_ROW_FIREWALL] = (m_local.firewall != POSTURE_ON);
-	bad[POSTURE_ROW_ANTIVIRUS] = (m_local.antivirus != POSTURE_ON);
+	rows[CHECK_OS].value = s;
 
-	if (m_has_reported) {
-		s.Format(_T("%u"), m_reported.os_build);
-		SetPostureCell(POSTURE_ROW_OS, 2, s);
-		SetPostureCell(POSTURE_ROW_FIREWALL, 2, pkt::PostureStateName(m_reported.firewall));
-		SetPostureCell(POSTURE_ROW_ANTIVIRUS, 2, pkt::PostureStateName(m_reported.antivirus));
+	if (m_deny_reason != 0) {
+		rows[CHECK_SERVER].value = _T("차단 — ") + pkt::DenyReasonName(m_deny_reason);
+		rows[CHECK_SERVER].level = LEVEL_BAD;
+	}
+	else if (m_state == TUNNEL_STATE_CONNECTED) {
+		rows[CHECK_SERVER].value = _T("접속 허용");
+		rows[CHECK_SERVER].level = LEVEL_OK;
+	}
+	else if (m_state == TUNNEL_STATE_DENIED) {
+		rows[CHECK_SERVER].value = _T("차단");
+		rows[CHECK_SERVER].level = LEVEL_BAD;
 	}
 	else {
-		SetPostureCell(POSTURE_ROW_OS, 2, _T("-"));
-		SetPostureCell(POSTURE_ROW_FIREWALL, 2, _T("-"));
-		SetPostureCell(POSTURE_ROW_ANTIVIRUS, 2, _T("-"));
+		rows[CHECK_SERVER].value = m_state == TUNNEL_STATE_STOPPED ? _T("연결하면 확인") : _T("확인 중");
+		rows[CHECK_SERVER].level = LEVEL_NONE;
 	}
 
-	SetPostureCell(POSTURE_ROW_VERDICT, 1, ServerVerdictText());
-	bad[POSTURE_ROW_VERDICT] = (m_deny_reason != 0 || m_state == TUNNEL_STATE_DENIED);
+	/* 바뀐 것이 있을 때만 그 판을 다시 그린다. 2초마다 같은 것을 그리면 깜빡일 틈을 준다. */
+	bool changed = false;
 
-	if (memcmp(bad, m_posture_bad, sizeof(bad)) != 0) {
-		memcpy(m_posture_bad, bad, sizeof(bad));
-		m_posture.Invalidate(FALSE);
-	}
-}
-
-void CMainDlg::OnPostureCustomDraw(NMHDR *pNMHDR, LRESULT *pResult)
-{
-	LPNMLVCUSTOMDRAW cd = reinterpret_cast<LPNMLVCUSTOMDRAW>(pNMHDR);
-
-	*pResult = CDRF_DODEFAULT;
-
-	if (cd->nmcd.dwDrawStage == CDDS_PREPAINT) {
-		*pResult = CDRF_NOTIFYITEMDRAW;
-	}
-	else if (cd->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
-		int row = (int)cd->nmcd.dwItemSpec;
-
-		if (row >= 0 && row < POSTURE_ROW_COUNT && m_posture_bad[row] &&
-				!ui::Colors().highContrast) {
-			cd->clrTextBk = ui::Colors().dangerBg;
-			cd->clrText = ui::Colors().danger;
+	for (int i = 0; i < CHECK_COUNT; i++) {
+		if (rows[i].value != m_checks[i].value || rows[i].level != m_checks[i].level) {
+			m_checks[i] = rows[i];
+			changed = true;
 		}
+	}
+	if (changed && !m_rc_security.IsRectEmpty()) {
+		InvalidateRect(&m_rc_security, FALSE);
 	}
 }
 
@@ -793,11 +713,11 @@ void CMainDlg::SetUiState(tunnel_state_t state)
 	ui::SetButtonKind(connect->GetSafeHwnd(), stopped ? ui::BUTTON_PRIMARY : ui::BUTTON_SECONDARY);
 	connect->Invalidate(FALSE);
 
-	/* 리스트나 입력 칸에서 치는 Enter 는 다이얼로그의 기본 버튼으로 간다. 닫혀 있을 때는
-	 * 그것이 [연결]이라 편하지만, 열려 있을 때는 같은 버튼이 [연결 해제]다 — 패킷을
-	 * 보다가 Enter 를 눌렀다고 터널이 끊겨서는 안 된다. 그동안은 기본 버튼을 버튼이
-	 * 아닌 컨트롤로 돌려 둔다 (그쪽으로 가는 BN_CLICKED 는 받는 곳이 없다). */
-	SendMessage(DM_SETDEFID, stopped ? IDC_CONNECT : IDC_POSTURE);
+	/* Enter 는 다이얼로그의 기본 버튼으로 간다. 닫혀 있을 때는 그것이 [연결]이라 편하지만,
+	 * 열려 있을 때는 같은 버튼이 [연결 해제]다 — 창을 앞으로 가져오며 Enter 를 눌렀다고
+	 * 터널이 끊겨서는 안 된다. 그동안은 기본 버튼을 없는 컨트롤로 돌려 둔다 (그쪽으로
+	 * 가는 BN_CLICKED 는 받는 곳이 없다). */
+	SendMessage(DM_SETDEFID, stopped ? IDC_CONNECT : IDC_NO_DEFAULT);
 
 	/* 연결 중에 설정을 바꿔도 반영되지 않으므로 잠근다. */
 	GetDlgItem(IDC_SETTINGS)->EnableWindow(stopped);
@@ -809,113 +729,191 @@ void CMainDlg::SetUiState(tunnel_state_t state)
 	}
 }
 
-/* 머리 오른쪽의 연결 정보: 어느 서버로 붙는지와 서버가 배정한 터널 주소. 보는 칸이다 —
- * 서버 주소는 설정 창에서 바꾸고, 터널 주소는 서버가 정해 준다. */
+static CString BytesText(ULONGLONG bytes)
+{
+	CString s;
+
+	if (bytes < 1024) {
+		s.Format(_T("%llu B"), bytes);
+	}
+	else if (bytes < 1024 * 1024) {
+		s.Format(_T("%.1f KB"), (double)bytes / 1024.0);
+	}
+	else {
+		s.Format(_T("%.1f MB"), (double)bytes / (1024.0 * 1024.0));
+	}
+
+	return s;
+}
+
+/* 연결 정보 판: 어느 서버로 붙는지, 서버가 배정한 터널 주소, 주고받은 양, 이 기기.
+ * 보는 칸이다 — 서버 주소는 설정 창에서 바꾸고, 터널 주소는 서버가 정해 준다. */
 void CMainDlg::UpdateInfo()
 {
-	m_info_server = m_server + _T(" : ") + m_port;
-	m_info_tunnel = m_tun_text.IsEmpty() ? CString(_T("연결하면 서버가 배정")) : m_tun_text;
+	const PacketStats &st = m_store.Stats();
+	HomeRow rows[INFO_COUNT];
 
-	if (!m_rc_info.IsRectEmpty()) {
-		InvalidateRect(&m_rc_info, FALSE);
+	for (int i = 0; i < INFO_COUNT; i++) {
+		rows[i].name = m_info[i].name;
+		rows[i].level = LEVEL_NONE;
+	}
+
+	rows[INFO_SERVER].value = m_server + _T(" : ") + m_port;
+	rows[INFO_TUNNEL].value = m_tun_text.IsEmpty() ? CString(_T("연결하면 서버가 배정")) : m_tun_text;
+	/* 화살표(U+2191 / 2193)는 글꼴 대체로 컬러 이모지가 되어 혼자 튄다. 글자로 적는다. */
+	rows[INFO_TRAFFIC].value = _T("보냄 ") + BytesText(st.tx_bytes) + _T("   \x00b7   받음 ") + BytesText(st.rx_bytes);
+
+	/* ID 는 32자라 판에 다 들어가지 않는다. 앞 12자면 서버의 기기 목록에서 찾기에 충분하다.
+	 * 전체는 진단 창의 로그에 있다. */
+	if (m_device_id.IsEmpty()) {
+		rows[INFO_DEVICE].value = _T("등록되지 않음");
+		rows[INFO_DEVICE].level = LEVEL_BAD;
+	}
+	else {
+		rows[INFO_DEVICE].value = m_device_id.Left(12) + _T("\x2026");
+	}
+
+	bool changed = false;
+
+	for (int i = 0; i < INFO_COUNT; i++) {
+		if (rows[i].value != m_info[i].value || rows[i].level != m_info[i].level) {
+			m_info[i] = rows[i];
+			changed = true;
+		}
+	}
+	if (changed && !m_rc_conn.IsRectEmpty()) {
+		InvalidateRect(&m_rc_conn, FALSE);
 	}
 }
 
-/* 상태 줄의 글과 색을 지금 값으로 다시 정한다. 바뀐 것이 있을 때만 그 영역을 다시
+/* 거부됐을 때 사용자가 할 수 있는 일. 서버는 사유의 종류만 알려 준다 — 포스처 중 무엇이
+ * 모자랐는지는 말하지 않는다 (정책을 밖에 드러내지 않는다). 그래서 이 PC 에서 꺼져 있는
+ * 것을 먼저 가리키고, 다 켜져 있으면 관리자에게 넘긴다. */
+CString CMainDlg::DenyHint() const
+{
+	switch (m_deny_reason) {
+	case DENY_POSTURE:
+		if (m_local.firewall == POSTURE_OFF) {
+			return _T("Windows 방화벽이 꺼져 있습니다. 켜면 자동으로 다시 연결됩니다.");
+		}
+		if (m_local.antivirus == POSTURE_OFF) {
+			return _T("백신의 실시간 보호가 꺼져 있습니다. 켜면 자동으로 다시 연결됩니다.");
+		}
+		return _T("이 PC 의 보안 상태가 회사 정책에 맞지 않습니다. 업데이트를 확인하거나 관리자에게 문의하세요.");
+	case DENY_UNKNOWN_DEVICE:
+		return _T("서버에 이 기기가 없습니다. 관리자에게 새 등록 코드를 받아 [기기 등록] 을 해 주세요.");
+	case DENY_BAD_AUTH:
+		return _T("기기 인증에 실패했습니다. 다시 등록해야 할 수 있습니다. 관리자에게 문의하세요.");
+	case DENY_TUN_IP:
+		return _T("서버의 기기 설정이 맞지 않습니다. 관리자에게 문의하세요.");
+	default:
+		return _T("관리자에게 문의하세요.");
+	}
+}
+
+/* 상태 판의 글과 색을 지금 값으로 다시 정한다. 바뀐 것이 있을 때만 그 영역을 다시
  * 그린다 — 500ms 마다 불리므로 매번 그리면 쓸데없이 깜빡일 틈을 준다. */
 void CMainDlg::UpdateStatus()
 {
 	const ui::Palette &c = ui::Colors();
 	CString title;
 	CString sub;
-	COLORREF dot;
-	COLORREF subColor = c.muted;
+	CString hint;
+	LPCWSTR icon;
+	COLORREF color;
+	COLORREF hintColor = c.danger;
 
 	switch (m_state) {
 	case TUNNEL_STATE_CONNECTING:
 		title = _T("연결 중");
 		sub = _T("서버에 이 기기를 인증하고 있습니다");
-		dot = c.warn;
+		icon = ICON_SYNC;
+		color = c.warn;
 		break;
 	case TUNNEL_STATE_CONNECTED:
 		title = _T("연결됨");
-		dot = c.ok;
+		sub = _T("사내망에 안전하게 연결됐습니다");
 		if (m_connected_at) {
 			ULONGLONG sec = (GetTickCount64() - m_connected_at) / 1000;
+			CString t;
 
-			sub.Format(_T("%02llu:%02llu:%02llu"), sec / 3600, (sec / 60) % 60, sec % 60);
-			if (m_session_idx != 0) {
-				CString t;
-
-				t.Format(_T("   ·   세션 %08x"), m_session_idx);
-				sub += t;
-			}
+			t.Format(_T("   \x00b7   %02llu:%02llu:%02llu"), sec / 3600, (sec / 60) % 60, sec % 60);
+			sub += t;
 		}
+		icon = ICON_CHECK;
+		color = c.ok;
 		break;
 	case TUNNEL_STATE_RECONNECTING:
-		title = _T("재연결 중");
+		title = _T("다시 연결 중");
 		sub = _T("서버의 응답이 없어 세션을 다시 맺고 있습니다");
-		dot = c.warn;
+		icon = ICON_SYNC;
+		color = c.warn;
 		break;
 	case TUNNEL_STATE_DENIED:
-		title = _T("접근 거부됨");
-		sub = _T("서버가 이 기기의 접근을 막았습니다");
-		dot = c.danger;
+		title = _T("접속 차단됨");
+		sub = _T("서버가 이 기기의 접속을 막았습니다");
+		icon = ICON_CROSS;
+		color = c.danger;
 		break;
 	case TUNNEL_STATE_STOPPED:
 	default:
 		title = _T("연결되지 않음");
+		sub = _T("연결을 누르면 사내망에 연결됩니다");
+		icon = ICON_POWER;
+		color = c.idle;
+
 		/* 서비스에 붙지 못했으면 연결을 눌러도 아무 일도 일어나지 않는다. 그 이유가
 		 * 가장 먼저 보여야 한다. */
-		if (m_link == VPN_REMOTE_UP) {
-			sub = _T("서버 주소를 확인하고 연결을 누르세요");
-		}
-		else if (m_link == VPN_REMOTE_MISMATCH) {
-			sub = _T("서비스가 이 프로그램과 다른 버전입니다 — vpn_service.exe install 로 다시 설치하세요");
-			subColor = c.danger;
+		if (m_link == VPN_REMOTE_MISMATCH) {
+			hint = _T("서비스가 이 프로그램과 다른 버전입니다. 관리자 권한으로 vpn_service.exe install 로 다시 설치하세요.");
 		}
 		else if (m_link == VPN_REMOTE_BUSY) {
-			sub = _T("다른 프로그램이 이미 서비스에 붙어 있습니다");
-			subColor = c.danger;
+			hint = _T("다른 프로그램이 이미 서비스에 붙어 있습니다. 이 창이 하나 더 떠 있는지 확인하세요.");
 		}
-		else {
-			sub = _T("서비스가 돌고 있지 않습니다 — 관리자 권한으로 vpn_service.exe install");
-			subColor = c.danger;
+		else if (m_link != VPN_REMOTE_UP) {
+			hint = _T("터널을 맡는 서비스가 돌고 있지 않습니다. 관리자 권한으로 vpn_service.exe install 을 한 번 실행하세요.");
 		}
-		dot = c.idle;
+		else if (m_device_id.IsEmpty()) {
+			hint = _T("이 PC 는 아직 등록되지 않았습니다. 아래 [기기 등록] 에 관리자에게 받은 코드를 넣어 주세요.");
+			hintColor = c.muted;
+		}
 		break;
 	}
 
-	/* 거부됐으면 그 줄에 사유를 둔다. 탭을 옮기지 않아도 왜 막혔는지 보인다. 연결이
-	 * 끊긴 뒤에도 남겨 둔다 — 첫 핸드셰이크에서 거부되면 곧바로 닫히므로, 지우면
-	 * 사유를 볼 틈이 없다. 경과 시간으로도 덮지 않는다. */
+	/* 거부됐으면 사유와 할 일을 둔다. 연결이 끊긴 뒤에도 남겨 둔다 — 첫 핸드셰이크에서
+	 * 거부되면 곧바로 닫히므로, 지우면 사유를 볼 틈이 없다. 거부된 채 기다리는 동안
+	 * 클라이언트는 포스처가 바뀌면 스스로 다시 시도한다. */
 	if (m_deny_reason != 0) {
-		sub = _T("거부 사유: ") + pkt::DenyReasonName(m_deny_reason);
-		subColor = c.danger;
-		if (m_state == TUNNEL_STATE_STOPPED) {
-			dot = c.danger;
-		}
+		title = _T("접속 차단됨");
+		sub = _T("사유: ") + pkt::DenyReasonName(m_deny_reason);
+		hint = DenyHint();
+		hintColor = c.danger;
+		icon = (m_state == TUNNEL_STATE_STOPPED) ? ICON_WARNING : ICON_CROSS;
+		color = c.danger;
 	}
 
 	if (m_stopping) {
 		title = _T("해제 중");
 		sub = _T("터널을 닫고 어댑터를 정리하고 있습니다");
-		subColor = c.muted;
-		dot = c.idle;
+		hint.Empty();
+		icon = ICON_SYNC;
+		color = c.idle;
 	}
 
-	if (title == m_status_title && sub == m_status_sub &&
-			dot == m_status_dot && subColor == m_status_sub_color) {
+	if (title == m_status_title && sub == m_status_sub && hint == m_status_hint &&
+			icon == m_status_icon && color == m_status_color && hintColor == m_status_hint_color) {
 		return;
 	}
 
 	m_status_title = title;
 	m_status_sub = sub;
-	m_status_dot = dot;
-	m_status_sub_color = subColor;
+	m_status_hint = hint;
+	m_status_icon = icon;
+	m_status_color = color;
+	m_status_hint_color = hintColor;
 
-	if (!m_rc_status.IsRectEmpty()) {
-		InvalidateRect(&m_rc_status, FALSE);
+	if (!m_rc_hero_text.IsRectEmpty()) {
+		InvalidateRect(&m_rc_hero_text, FALSE);
 	}
 }
 
@@ -923,10 +921,12 @@ void CMainDlg::OnTimer(UINT_PTR id)
 {
 	if (id == TIMER_TICK_ID) {
 		UpdateStatus();		/* 경과 시간 */
+		UpdateInfo();		/* 주고받은 양 */
 
 		if (++m_posture_ticks >= POSTURE_REFRESH_TICKS) {
 			m_posture_ticks = 0;
 			RefreshPosture(true);
+			UpdateStatus();	/* 거부 안내는 지금 꺼져 있는 것을 가리킨다 */
 		}
 	}
 
@@ -1003,13 +1003,69 @@ void CMainDlg::OnPaint()
 	}
 }
 
+/* a 와 b 를 섞는다. t 는 a 쪽 비율(0..100). 상태 원 둘레의 옅은 띠에 쓴다. */
+static COLORREF Blend(COLORREF a, COLORREF b, int t)
+{
+	return RGB((GetRValue(a) * t + GetRValue(b) * (100 - t)) / 100,
+			(GetGValue(a) * t + GetGValue(b) * (100 - t)) / 100,
+			(GetBValue(a) * t + GetBValue(b) * (100 - t)) / 100);
+}
+
+/* 판 하나: 제목과 "이름 ... 값" 줄들. 보안 상태 판은 줄 앞에 판정 기호를 단다. */
+void CMainDlg::PaintCard(HDC dc, const CRect &card, LPCTSTR title, const HomeRow *rows, int count)
+{
+	const ui::Palette &c = ui::Colors();
+	const bool icons = (rows == m_checks);
+	const int pad = ui::Scale(HOME_PAD);
+	const int rowH = ui::Scale(HOME_ROW_H);
+	CRect rc;
+
+	ui::RoundRect(dc, card, ui::Scale(10), c.card, c.border);
+
+	rc.SetRect(card.left + pad, card.top, card.right - pad, card.top + ui::Scale(HOME_CARD_TITLE_H));
+	ui::Text(dc, rc, title, m_fonts.strong, c.muted, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+	for (int i = 0; i < count; i++) {
+		const HomeRow &row = rows[i];
+		const int top = card.top + ui::Scale(HOME_CARD_TITLE_H) + i * rowH;
+		int x = card.left + pad;
+
+		/* 줄 사이의 가는 선. 첫 줄 위에는 제목과의 경계로 하나 더. */
+		{
+			RECT line = { x, top, card.right - pad, top + 1 };
+			HBRUSH b = CreateSolidBrush(c.border);
+
+			FillRect(dc, &line, b);
+			DeleteObject(b);
+		}
+
+		if (icons) {
+			const int r = ui::Scale(9);
+			const int cy = top + rowH / 2;
+			COLORREF fill = row.level == LEVEL_OK ? c.ok : row.level == LEVEL_BAD ? c.danger : c.idle;
+			LPCWSTR glyph = row.level == LEVEL_OK ? ICON_CHECK : row.level == LEVEL_BAD ? ICON_CROSS : ICON_UNKNOWN;
+			CRect g(x, cy - r, x + 2 * r, cy + r);
+
+			ui::Dot(dc, x + r, cy, r, fill);
+			ui::Text(dc, g, glyph, m_fonts.iconSmall, c.onAccent, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+			x += 2 * r + ui::Scale(10);
+		}
+
+		rc.SetRect(x, top, x + ui::Scale(120), top + rowH);
+		ui::Text(dc, rc, row.name, m_fonts.label, icons ? c.text : c.muted,
+				DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+		rc.SetRect(rc.right, top, card.right - pad, top + rowH);
+		ui::Text(dc, rc, row.value, m_fonts.label, row.level == LEVEL_BAD ? c.danger : c.text,
+				DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+	}
+}
+
 /* 컨트롤이 아닌 모든 것. 좌표는 LayoutChildren 이 정해 둔 것을 그대로 쓴다. */
 void CMainDlg::PaintBackground(HDC dc)
 {
 	const ui::Palette &c = ui::Colors();
-	const int radius = ui::Scale(8);
 	CRect client;
-	CRect rc;
 	HBRUSH brush;
 
 	GetClientRect(&client);
@@ -1017,58 +1073,43 @@ void CMainDlg::PaintBackground(HDC dc)
 	FillRect(dc, &client, brush);
 	DeleteObject(brush);
 
-	/* 머리: 상태 */
-	if (!m_rc_header.IsRectEmpty()) {
-		const int dotR = ui::Scale(5);
-		CRect title = m_rc_status;
-		CRect sub = m_rc_status;
+	/* 상태 판: 큰 원 + 기호, 상태, 부제, 할 일 */
+	if (!m_rc_hero.IsRectEmpty()) {
+		const int cx = m_rc_hero.CenterPoint().x;
+		const int cy = m_rc_hero.top + ui::Scale(52);
+		const int r = ui::Scale(30);
+		CRect rc;
 
-		ui::RoundRect(dc, m_rc_header, radius, c.card, c.border);
+		ui::RoundRect(dc, m_rc_hero, ui::Scale(10), c.card, c.border);
 
-		title.bottom = title.top + title.Height() * 55 / 100;
-		sub.top = title.bottom;
+		/* 원 둘레의 옅은 띠. 고대비에서는 섞은 색이 시스템 색 조합을 깨므로 그리지 않는다. */
+		if (!c.highContrast) {
+			ui::Dot(dc, cx, cy, r + ui::Scale(8), Blend(m_status_color, c.card, 18));
+		}
+		ui::Dot(dc, cx, cy, r, m_status_color);
+		rc.SetRect(cx - r, cy - r, cx + r, cy + r);
+		ui::Text(dc, rc, m_status_icon, m_fonts.icon, c.onAccent, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-		ui::Dot(dc, title.left + dotR, title.CenterPoint().y + ui::Scale(1), dotR, m_status_dot);
-		title.left += dotR * 2 + ui::Scale(9);
-		sub.left = title.left;
+		rc.SetRect(m_rc_hero.left, m_rc_hero.top + ui::Scale(94), m_rc_hero.right, m_rc_hero.top + ui::Scale(122));
+		ui::Text(dc, rc, m_status_title, m_fonts.hero, c.text, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-		ui::Text(dc, title, m_status_title, m_fonts.title, c.text,
-				DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-		ui::Text(dc, sub, m_status_sub, m_fonts.label, m_status_sub_color,
-				DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS);
+		rc.SetRect(m_rc_hero.left + ui::Scale(12), rc.bottom + ui::Scale(4), m_rc_hero.right - ui::Scale(12), rc.bottom + ui::Scale(24));
+		ui::Text(dc, rc, m_status_sub, m_fonts.label, c.muted,
+				DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
-		/* 연결 정보: 이름은 흐리게, 값은 진하게. 두 줄. */
-		if (!m_rc_info.IsRectEmpty()) {
-			const int labelW = ui::Scale(64);
-			CRect row = m_rc_info;
-
-			row.bottom = row.top + m_rc_info.Height() / 2;
-			for (int i = 0; i < 2; i++) {
-				CRect name = row;
-				CRect value = row;
-
-				name.right = name.left + labelW;
-				value.left = name.right;
-				ui::Text(dc, name, i == 0 ? _T("서버") : _T("터널 주소"), m_fonts.label, c.muted,
-						DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-				ui::Text(dc, value, i == 0 ? m_info_server : m_info_tunnel, m_fonts.label,
-						(i == 1 && m_tun_text.IsEmpty()) ? c.muted : c.text,
-						DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-				row.OffsetRect(0, row.Height());
-			}
+		if (!m_status_hint.IsEmpty()) {
+			rc.SetRect(m_rc_hero.left + ui::Scale(24), rc.bottom + ui::Scale(4),
+					m_rc_hero.right - ui::Scale(24), rc.bottom + ui::Scale(40));
+			ui::Text(dc, rc, m_status_hint, m_fonts.label, m_status_hint_color,
+					DT_CENTER | DT_TOP | DT_WORDBREAK | DT_END_ELLIPSIS);
 		}
 	}
 
-	/* 내용: 제목 + 포스처 표 */
-	if (!m_rc_content.IsRectEmpty()) {
-		ui::RoundRect(dc, m_rc_content, radius, c.card, c.border);
-		ui::Text(dc, m_rc_content_title, _T("포스처"), m_fonts.strong, c.text,
-				DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-
-		rc.SetRect(m_rc_content.left + 1, m_sep_y, m_rc_content.right - 1, m_sep_y + 1);
-		brush = CreateSolidBrush(c.border);
-		FillRect(dc, &rc, brush);
-		DeleteObject(brush);
+	if (!m_rc_security.IsRectEmpty()) {
+		PaintCard(dc, m_rc_security, _T("보안 상태"), m_checks, CHECK_COUNT);
+	}
+	if (!m_rc_conn.IsRectEmpty()) {
+		PaintCard(dc, m_rc_conn, _T("연결 정보"), m_info, INFO_COUNT);
 	}
 }
 
@@ -1098,20 +1139,6 @@ void CMainDlg::OnSysColorChange()
 }
 
 /* ---- 레이아웃 ---------------------------------------------------------- */
-void CMainDlg::OnGetMinMaxInfo(MINMAXINFO *mmi)
-{
-	CRect rc(0, 0, 520, 200);
-
-	MapDialogRect(&rc);
-	/* 클라이언트 크기 기준이라 테두리 / 캡션을 더해 준다. */
-	AdjustWindowRectEx(&rc, GetStyle(), FALSE, GetExStyle());
-
-	mmi->ptMinTrackSize.x = rc.Width();
-	mmi->ptMinTrackSize.y = rc.Height();
-
-	CDialogEx::OnGetMinMaxInfo(mmi);
-}
-
 void CMainDlg::OnSize(UINT type, int cx, int cy)
 {
 	CDialogEx::OnSize(type, cx, cy);
@@ -1121,40 +1148,51 @@ void CMainDlg::OnSize(UINT type, int cx, int cy)
 	}
 }
 
-/*  +--------------------------------------------------------------+
- *  | (●) 연결됨                 서버 [....] 포트 [..]   [ 연결 해제 ] |  머리
- *  |     00:12:31 · 세션 ....   터널 [....] 어댑터 [..]              |
- *  +--------------------------------------------------------------+
- *  +--------------------------------------------------------------+
- *  | 포스처                               [기기 등록...]  [진단] |  내용
- *  |--------------------------------------------------------------|
- *  | 포스처 표                                                    |
- *  +--------------------------------------------------------------+
- */
-void CMainDlg::LayoutChildren(int cx, int cy)
+/* 판의 크기는 96 DPI 기준 픽셀로 정하고 ui::Scale 로 늘린다. 다이얼로그 단위를 쓰지 않는
+ * 것은, 이 창은 글자보다 판과 원의 크기가 먼저이기 때문이다. */
+static int HomeHeight()
 {
-	/* OnSize 는 컨트롤이 만들어지기 전에도 올 수 있다. */
-	if (!m_posture.GetSafeHwnd()) {
+	const int cards = 2 * (HOME_CARD_TITLE_H + 4 * HOME_ROW_H + 8);
+
+	return HOME_PAD + HOME_HERO_H + HOME_GAP + cards + HOME_GAP + HOME_LINKS_H + HOME_PAD;
+}
+
+void CMainDlg::FitWindow()
+{
+	CRect rc(0, 0, ui::Scale(HOME_WIDTH), ui::Scale(HomeHeight()));
+
+	/* 클라이언트 크기 기준이라 테두리 / 캡션을 더해 준다. */
+	AdjustWindowRectEx(&rc, GetStyle(), FALSE, GetExStyle());
+	SetWindowPos(nullptr, 0, 0, rc.Width(), rc.Height(), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+	CenterWindow();
+
+	GetClientRect(&rc);
+	LayoutChildren(rc.Width(), rc.Height());
+}
+
+void CMainDlg::LayoutChildren(int cx, int)
+{
+	/* OnSize 는 컨트롤이 만들어지기 전에도 온다. */
+	if (!GetDlgItem(IDC_CONNECT)) {
 		return;
 	}
 
-	CRect unit(0, 0, 4, 8);
-	MapDialogRect(&unit);
-	const int ux = unit.Width();
-	const int uy = unit.Height();
+	const int pad = ui::Scale(HOME_PAD);
+	const int gap = ui::Scale(HOME_GAP);
+	const int cardH = ui::Scale(HOME_CARD_TITLE_H + 4 * HOME_ROW_H + 8);
 
-	/* 다이얼로그 단위 -> 픽셀. .rc 와 같은 숫자를 쓸 수 있어 읽기 쉽다. */
-	auto DX = [ux](int du) { return du * ux / 4; };
-	auto DY = [uy](int du) { return du * uy / 8; };
+	m_rc_hero.SetRect(pad, pad, cx - pad, pad + ui::Scale(HOME_HERO_H));
+	m_rc_security.SetRect(pad, m_rc_hero.bottom + gap, cx - pad, m_rc_hero.bottom + gap + cardH);
+	m_rc_conn.SetRect(pad, m_rc_security.bottom + gap, cx - pad, m_rc_security.bottom + gap + cardH);
 
-	const int m = DX(8);
-	const int gap = DY(6);
+	const int btnInset = ui::Scale(28);
+	const int btnH = ui::Scale(38);
+	const int btnY = m_rc_hero.bottom - ui::Scale(18) - btnH;
 
-	m_rc_header.SetRect(m, DY(7), cx - m, DY(7) + DY(48));
-	m_rc_content.SetRect(m, m_rc_header.bottom + gap, cx - m, cy - DY(8));
+	/* 글자가 바뀌는 곳은 버튼 위까지다. 버튼은 스스로 다시 그린다. */
+	m_rc_hero_text.SetRect(m_rc_hero.left, m_rc_hero.top, m_rc_hero.right, btnY - 1);
 
-	/* 여러 컨트롤을 한 번에 옮긴다. 하나씩 MoveWindow 하면 중간 상태가 그려져 깜빡인다. */
-	HDWP dwp = BeginDeferWindowPos(12);
+	HDWP dwp = BeginDeferWindowPos(4);
 	if (!dwp) {
 		return;
 	}
@@ -1167,43 +1205,16 @@ void CMainDlg::LayoutChildren(int cx, int cy)
 		}
 	};
 
-	/* 머리: 오른쪽 끝에 [연결], 그 아래 작게 [설정]. 왼쪽에 상태, 가운데에 연결 정보. */
-	const int btnW = DX(74);
-	const int btnH = DY(20);
-	const int btnX = m_rc_header.right - DX(10) - btnW;
-	const int btnY = m_rc_header.top + DY(7);
-	Place(IDC_CONNECT, btnX, btnY, btnW, btnH);
-	Place(IDC_SETTINGS, btnX, btnY + btnH + DY(3), btnW, DY(13));
+	Place(IDC_CONNECT, m_rc_hero.left + btnInset, btnY, m_rc_hero.Width() - 2 * btnInset, btnH);
 
-	const int infoW = DX(170);
-	m_rc_info.SetRect(btnX - DX(14) - infoW, m_rc_header.top + DY(9),
-			btnX - DX(14), m_rc_header.bottom - DY(9));
+	/* 아래의 세 갈래길. 같은 폭으로 나눈다. */
+	const int linksY = m_rc_conn.bottom + gap;
+	const int linkW = (cx - 2 * pad) / 3;
+	const int linkH = ui::Scale(HOME_LINKS_H);
 
-	m_rc_status.SetRect(m_rc_header.left + DX(12), m_rc_header.top + DY(8),
-			m_rc_info.left - DX(8), m_rc_header.bottom - DY(8));
-
-	/* 내용의 윗줄: 왼쪽에 제목(그린다), 오른쪽에 버튼 */
-	const int rowTop = m_rc_content.top + DY(3);
-	const int rowH = DY(18);
-	const int toolH = DY(14);
-	const int toolY = rowTop + (rowH - toolH) / 2;
-	int x = m_rc_content.right - DX(8);
-
-	m_rc_content_title.SetRect(m_rc_content.left + DX(8), rowTop, x, rowTop + rowH);
-	m_sep_y = rowTop + rowH + DY(2);
-
-	x -= DX(42);
-	Place(IDC_DIAG, x, toolY, DX(42), toolH);
-	x -= DX(4) + DX(64);
-	Place(IDC_ENROLL, x, toolY, DX(64), toolH);
-
-	/* 리스트는 판의 둥근 모서리를 덮지 않게 조금 들여 넣는다. */
-	const int listX = m_rc_content.left + DX(2);
-	const int listY = m_sep_y + 1;
-	const int listW = m_rc_content.Width() - 2 * DX(2);
-	const int listH = m_rc_content.bottom - DY(4) - listY;
-
-	Place(IDC_POSTURE, listX, listY, listW, listH);
+	Place(IDC_SETTINGS, pad, linksY, linkW, linkH);
+	Place(IDC_ENROLL, pad + linkW, linksY, linkW, linkH);
+	Place(IDC_DIAG, pad + 2 * linkW, linksY, cx - pad - (pad + 2 * linkW), linkH);
 
 	EndDeferWindowPos(dwp);
 

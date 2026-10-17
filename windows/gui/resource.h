@@ -16,10 +16,12 @@
 #define IDC_PACKETS		1011
 #define IDC_LOG			1012
 #define IDC_DETAIL		1013
-#define IDC_POSTURE		1014
 #define IDC_ENROLL		1015
 #define IDC_DIAG		1016
 #define IDC_SETTINGS		1017
+
+/* 연결된 동안의 기본 버튼 자리. 이런 컨트롤은 없다 — Enter 가 아무 일도 하지 않게 한다. */
+#define IDC_NO_DEFAULT		1099
 
 /* 기기 등록 창 */
 #define IDD_ENROLL		101

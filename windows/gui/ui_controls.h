@@ -15,7 +15,9 @@ namespace ui {
 
 enum ButtonKind {
 	BUTTON_SECONDARY = 0,	/* 흰 바탕에 테두리 */
-	BUTTON_PRIMARY		/* 강조색. 화면에 하나만 둔다 */
+	BUTTON_PRIMARY,		/* 강조색. 화면에 하나만 둔다 */
+	BUTTON_LINK		/* 테두리 없이 강조색 글자. 판이 아니라 창 바탕 위에 놓는다.
+				 * 자주 쓰지 않는 곳으로 가는 길 */
 };
 
 /* 표준 푸시 버튼을 우리가 그리는 버튼으로 바꾼다. */

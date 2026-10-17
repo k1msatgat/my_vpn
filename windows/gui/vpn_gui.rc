@@ -11,27 +11,20 @@ LANGUAGE LANG_KOREAN, SUBLANG_DEFAULT
 
 IDI_APP ICON "app.ico"
 
-/* 여기 좌표는 초깃값일 뿐이다. 실제 배치는 CMainDlg::LayoutChildren 이 다시 잡는다.
- * 컨트롤의 순서가 Tab 키로 옮겨 다니는 순서이고, 라벨은 바로 뒤의 입력 칸의 이름이 된다
- * (화면 낭독기가 그렇게 읽는다).
- *
- * 상태, 통계, 판(card)은 여기에 없다. 다이얼로그가 바탕에 직접 그린다. 그 위에 놓인
- * 컨트롤이 바탕 그리기에 덮이지 않게 WS_CLIPCHILDREN 을 준다. */
-IDD_MAIN DIALOGEX 0, 0, 600, 260
+/* 주 창. 여기 좌표는 초깃값일 뿐이다 — 창 크기와 배치는 CMainDlg::FitWindow /
+ * LayoutChildren 이 다시 잡는다. 상태, 보안 상태, 연결 정보 판은 컨트롤이 아니라 다이얼로그가
+ * 바탕에 직접 그린다. 그 위에 놓인 버튼이 바탕 그리기에 덮이지 않게 WS_CLIPCHILDREN 을 준다.
+ * 컨트롤의 순서가 Tab 키로 옮겨 다니는 순서다. 크기는 고정이다 (늘려도 보여 줄 것이 없다). */
+IDD_MAIN DIALOGEX 0, 0, 240, 400
 STYLE DS_SETFONT | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU |
-      WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_THICKFRAME | WS_CLIPCHILDREN
+      WS_MINIMIZEBOX | WS_CLIPCHILDREN
 CAPTION "ztgate"
 FONT 9, "Segoe UI", 400, 0, 0x1
 BEGIN
-    DEFPUSHBUTTON   "연결", IDC_CONNECT, 508, 14, 74, 20
-    PUSHBUTTON      "설정...", IDC_SETTINGS, 508, 37, 74, 13
-
-    PUSHBUTTON      "기기 등록...", IDC_ENROLL, 456, 70, 64, 14
-    PUSHBUTTON      "진단", IDC_DIAG, 524, 70, 42, 14
-
-    CONTROL         "", IDC_POSTURE, WC_LISTVIEW,
-                    LVS_REPORT | LVS_SINGLESEL | LVS_NOSORTHEADER |
-                    WS_TABSTOP, 10, 90, 580, 170
+    DEFPUSHBUTTON   "연결", IDC_CONNECT, 20, 120, 200, 24
+    PUSHBUTTON      "설정", IDC_SETTINGS, 10, 370, 70, 18
+    PUSHBUTTON      "기기 등록", IDC_ENROLL, 85, 370, 70, 18
+    PUSHBUTTON      "진단", IDC_DIAG, 160, 370, 70, 18
 END
 
 /* 진단 창. 패킷 표, 로그, 통계. 주 창과 같이 실제 배치는 CDiagDlg::LayoutChildren 이 잡고,
