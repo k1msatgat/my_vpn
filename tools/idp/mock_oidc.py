@@ -13,7 +13,13 @@ mint.py keys 로 만든 키로 토큰을 발급한다. 127.0.0.1 에서만 듣�
   바로 돌려보낸다 (자동 시험). 토큰을 줄 때 code_verifier 의 SHA-256 이 처음 받은
   code_challenge 와 같은지, redirect_uri 와 client_id 가 같은지 본다. 코드는 한 번만 쓰인다.
 
-refresh token 으로 새 토큰도 준다 (한 번 쓴 refresh token 은 버린다).
+refresh token 으로 새 토큰도 준다 (한 번 쓴 refresh token 은 버린다). /revoke 는 RFC 7009 대로
+refresh token 을 버린다.
+
+시험용 어긋남:
+- --refresh-delay SEC: refresh 요청에 늦게 답한다 (갱신 중에 로그아웃하는 경우).
+- --exp-offset SEC: 토큰의 exp 를 그만큼 옮긴다. 음수로 주면 서버의 시계보다 앞서 끝난 토큰,
+  곧 PC 와 서버의 시계가 어긋난 경우가 된다.
 
 --issuer: 설정 문서와 토큰의 iss. 기본은 mint.ISSUER. Windows GUI 는 설정한 발급자 주소와
 설정 문서의 issuer 가 같은지 보므로(OIDC Discovery 4.3) 그때는 이 서버의 주소
@@ -32,6 +38,7 @@ import json
 import os
 import secrets
 import sys
+import time
 import urllib.parse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -57,6 +64,8 @@ def main():
     p.add_argument("--ttl", type=int, default=600)
     p.add_argument("--issuer", default=mint.ISSUER)
     p.add_argument("--auto-approve", action="store_true")
+    p.add_argument("--refresh-delay", type=float, default=0)
+    p.add_argument("--exp-offset", type=int, default=0)
     a = p.parse_args()
 
     base = "http://127.0.0.1:%d" % a.port
@@ -67,7 +76,9 @@ def main():
         state["issued"] += 1
         rt = secrets.token_urlsafe(16)
         state["refresh"].add(rt)
-        tok = mint.token(a.keys, a.user, groups=groups, ttl=a.ttl, iss=a.issuer)
+        now = int(time.time())
+        tok = mint.token(a.keys, a.user, groups=groups, ttl=a.ttl, iss=a.issuer,
+                         exp=now + a.ttl + a.exp_offset, now=now)
         return {"access_token": tok, "token_type": "Bearer", "expires_in": a.ttl, "refresh_token": rt}
 
     def approved(req):
@@ -113,6 +124,7 @@ def main():
                 return self.reply(200, {"issuer": a.issuer, "token_endpoint": base + "/token",
                                         "authorization_endpoint": base + "/authorize",
                                         "device_authorization_endpoint": base + "/device",
+                                        "revocation_endpoint": base + "/revoke",
                                         "code_challenge_methods_supported": ["S256"]})
             if u.path == "/authorize":
                 if (q.get("response_type") != "code" or not q.get("client_id") or not q.get("state")
@@ -140,6 +152,11 @@ def main():
         def do_POST(self):
             n = int(self.headers.get("Content-Length", 0))
             form = dict(urllib.parse.parse_qsl(self.rfile.read(n).decode()))
+            if self.path == "/revoke":
+                gone = form.get("token") in state["refresh"]
+                state["refresh"].discard(form.get("token"))
+                print("mock_oidc: revoked %s" % ("a live refresh token" if gone else "an unknown token"), flush=True)
+                return self.reply(200, {})
             if self.path == "/device":
                 return self.reply(200, {"device_code": "dc", "user_code": "WDJB-MJHT",
                                         "verification_uri": base + "/activate", "interval": 1, "expires_in": 60})
@@ -159,6 +176,9 @@ def main():
                 if s256(form.get("code_verifier", "")) != req["code_challenge"]:
                     return self.reply(400, {"error": "invalid_grant", "error_description": "PKCE verification failed"})
                 return self.reply(200, issue())
+            if grant == "refresh_token" and a.refresh_delay:
+                print("mock_oidc: holding a refresh for %gs" % a.refresh_delay, flush=True)
+                time.sleep(a.refresh_delay)
             if grant == "refresh_token" and form.get("refresh_token") in state["refresh"]:
                 state["refresh"].discard(form["refresh_token"])     # 한 번 쓴 refresh token 은 버린다
                 return self.reply(200, issue())
