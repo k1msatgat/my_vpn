@@ -96,6 +96,24 @@ typedef struct tunnel_packet {
 	uint8_t snap_len;
 } tunnel_packet_t;
 
+/* 사용자 로그인 토큰을 터널에 건네는 자리.
+ *
+ * 토큰은 터널이 도는 중에 바뀐다 (사용자가 로그인하거나 로그아웃하고, 토큰이 끝나기 전에
+ * GUI 가 새 것을 받아 온다). cfg 는 tunnel_run 이 시작할 때 받은 것을 끝까지 쓰므로, 바뀌는
+ * 값은 cfg 가 가리키는 이 자리에 둔다. 쓰는 쪽은 tunnel_login_set 만 부르고, 터널은 루프를
+ * 돌 때마다(1초) gen 이 바뀌었는지 본다. */
+typedef struct tunnel_login {
+	SRWLOCK lock;
+	uint32_t gen;			/* 토큰이 바뀔 때마다 는다 */
+	uint32_t len;			/* 0 이면 로그인하지 않은 상태 */
+	char token[LOGIN_TOKEN_MAX];
+} tunnel_login_t;
+
+void tunnel_login_init(tunnel_login_t *l);
+
+/* 토큰을 바꾼다. len 이 0 이면 로그아웃이다. 0 성공, -1 토큰이 패킷 하나에 들어가지 않는다. */
+int tunnel_login_set(tunnel_login_t *l, const char *token, size_t len);
+
 /* 콜백은 tunnel_run()을 호출한 스레드에서 불린다.
  * GUI에서는 여기서 컨트롤을 직접 건드리지 말고 PostMessage로 넘겨야 한다. */
 typedef struct tunnel_config {
@@ -115,6 +133,13 @@ typedef struct tunnel_config {
 	/* 설정하면 패킷마다 디코드 결과가 올라온다. 이때 log_packets 기반의
 	 * 패킷 텍스트 로그는 중복이므로 생략한다. */
 	void (*on_packet)(void *ctx, const tunnel_packet_t *pkt);
+
+	/* 사용자 로그인. NULL 이면 토큰을 보내지 않는다 (기기 신원만으로 연다). */
+	tunnel_login_t *login;
+
+	/* 서버가 LOGIN 에 답했다. status 는 login_status_t, expires 는 토큰의 exp (Unix time,
+	 * 실패면 0), user 는 성공했을 때의 사용자 이름이고 실패면 "". */
+	void (*on_login)(void *ctx, int status, int64_t expires, const char *user);
 
 	void *ctx;
 } tunnel_config_t;

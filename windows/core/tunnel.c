@@ -25,6 +25,9 @@
 #define POSTURE_POLL_MSEC 2000
 #define SERVER_TIMEOUT_MSEC (SERVER_TIMEOUT_SEC * 1000)
 
+/* 답이 없는 LOGIN 을 다시 보내는 간격. keepalive 보다 짧게 잡아 로그인이 늦지 않게 한다. */
+#define LOGIN_RETRY_MSEC 3000
+
 #define TUN_RING_CAPACITY 0x400000 /* 4MiB */
 
 /* 구버전 SDK / MinGW의 mstcpip.h에는 없다. */
@@ -66,6 +69,12 @@ typedef struct tunnel {
 	net_config_t applied;	/* 어댑터에 실제로 넣어 둔 것 */
 	int has_applied;
 	int readdress;		/* 서버가 터널 주소를 바꿨다. 다시 핸드셰이크해서 새 주소로 세션을 연다 */
+	uint32_t login_gen;	/* cfg->login 에서 마지막으로 읽은 gen */
+	int login_has;		/* 보낼 토큰이 있다 */
+	int login_due;		/* 이 세션에 토큰을 보내야 하는데 아직 답을 받지 못했다 */
+	int login_sent;		/* 이 세션에 토큰을 보낸 적이 있다 */
+	int logout;		/* 로그아웃했다. 사용자가 붙지 않은 새 세션을 연다 */
+	uint64_t last_login_ms;
 	uint64_t t0_ms;		/* 패킷 타임스탬프 기준점 */
 	uint64_t seq;		/* 패킷 일련번호 */
 	session_t session;
@@ -580,6 +589,20 @@ static const char *deny_reason_name(uint8_t reason)
 	}
 }
 
+static const char *login_status_name(uint8_t status)
+{
+	switch (status) {
+	case LOGIN_OK:		return "ok";
+	case LOGIN_NO_IDP:	return "this server does not take user logins";
+	case LOGIN_MALFORMED:	return "not a JWT, or too large";
+	case LOGIN_UNTRUSTED:	return "signature not trusted (algorithm, key id or signature)";
+	case LOGIN_WRONG_TOKEN:	return "token is for another issuer or audience";
+	case LOGIN_EXPIRED:	return "token expired or not yet valid";
+	case LOGIN_BAD_USER:	return "no usable user name in the token";
+	default:		return "?";
+	}
+}
+
 /* 수집한 포스처를 와이어 형식으로 옮긴다. 지금은 값이 같지만 수집 쪽 enum 과
  * 와이어 값을 캐스팅으로 잇지 않는다. 한쪽 순서를 바꾸면 조용히 어긋난다. */
 static uint8_t posture_wire_state(uint8_t state)
@@ -1018,6 +1041,146 @@ static int posture_changed(tunnel_t *t, uint64_t now)
 	return 1;
 }
 
+/* ---- 사용자 로그인 --------------------------------------------------------- */
+void tunnel_login_init(tunnel_login_t *l)
+{
+	memset(l, 0, sizeof(*l));
+	InitializeSRWLock(&l->lock);
+}
+
+int tunnel_login_set(tunnel_login_t *l, const char *token, size_t len)
+{
+	if (len > sizeof(l->token)) {
+		return -1;
+	}
+
+	AcquireSRWLockExclusive(&l->lock);
+	SecureZeroMemory(l->token, sizeof(l->token));
+	if (len > 0) {
+		memcpy(l->token, token, len);
+	}
+	l->len = (uint32_t)len;
+	l->gen++;
+	ReleaseSRWLockExclusive(&l->lock);
+
+	return 0;
+}
+
+/* 새 세션이 열렸다. 서버의 새 세션에는 사용자가 붙어 있지 않으므로 토큰이 있으면 다시 보낸다. */
+static void login_new_session(tunnel_t *t)
+{
+	t->login_due = t->login_has;
+	t->login_sent = 0;
+	t->last_login_ms = 0;
+}
+
+/* LOGIN (C -> S): 세션 패킷. 암호문 = 토큰.
+ *
+ * 토큰이 바뀌면 바로 보내고, 답이 없으면 LOGIN_RETRY_MSEC 마다 다시 보낸다. 서버는 같은
+ * 토큰에 같은 답을 하므로 다시 보내도 된다.
+ *
+ * 프로토콜에 로그아웃 메시지는 없다. 서버에 붙은 사용자를 떼려면 사용자가 없는 새 세션을
+ * 연다 (logout). 기다리면 토큰이 끝나며 떨어지지만, 그때까지 다음 사람이 앞사람의 권한으로
+ * 쓰게 된다. */
+static void login_tick(tunnel_t *t, uint64_t now)
+{
+	tunnel_login_t *l = t->cfg->login;
+	session_t *session = &t->session;
+	uint8_t packet[PKT_OVERHEAD + LOGIN_TOKEN_MAX];
+	tunnel_packet_t pkt;
+	uint64_t counter;
+	uint32_t len = 0;
+	int n;
+
+	if (!l) {
+		return;
+	}
+
+	AcquireSRWLockShared(&l->lock);
+	if (l->gen != t->login_gen) {
+		t->login_gen = l->gen;
+		t->login_has = l->len != 0;
+		t->login_due = t->login_has;
+		t->last_login_ms = 0;
+		if (!t->login_has && t->login_sent) {
+			t->logout = 1;
+		}
+	}
+	if (t->login_due && !session->denied && now - t->last_login_ms >= LOGIN_RETRY_MSEC) {
+		len = l->len;
+		memcpy(packet + PKT_HDR_LEN, l->token, len);
+	}
+	ReleaseSRWLockShared(&l->lock);
+
+	if (len == 0) {
+		return;
+	}
+
+	counter = session->secure.tx_counter;
+	n = secure_seal(&session->secure, MSG_TYPE_LOGIN, session->idx, packet, sizeof(packet), len);
+	if (n < 0) {
+		tlog(t, "[login] seal failed");
+		SecureZeroMemory(packet, sizeof(packet));
+		return;
+	}
+
+	udp_send(t, packet, n);
+	t->last_login_ms = now;
+	t->login_sent = 1;
+	tlog(t, "[login] token sent (%u bytes)", len);
+
+	/* 화면에는 헤더만 올린다. 토큰은 가진 사람이 곧 그 사용자라 진단 창의 덤프에도 남기지
+	 * 않는다. */
+	pkt_init(t, &pkt, TUNNEL_DIR_TX, TUNNEL_PASS);
+	pkt.msg_type = MSG_TYPE_LOGIN;
+	pkt.session_idx = session->idx;
+	pkt.has_counter = 1;
+	pkt.counter = counter;
+	pkt.wire_len = (uint32_t)n;
+	pkt_snap(&pkt, packet, PKT_HDR_LEN);
+	pkt_emit(t, &pkt);
+
+	SecureZeroMemory(packet, sizeof(packet));
+}
+
+/* LOGIN (S -> C): status(1) | expires(8, 빅엔디언) | 사용자 이름 */
+static void login_response(tunnel_t *t, const uint8_t *body, int n)
+{
+	char name[LOGIN_USER_MAX + 1];
+	uint64_t expires = 0;
+	int nl;
+	int i;
+
+	if (n < LOGIN_RES_HEAD_LEN) {
+		tlog(t, "[login] short response (%d bytes)", n);
+		return;
+	}
+
+	for (i = 1; i < LOGIN_RES_HEAD_LEN; i++) {
+		expires = (expires << 8) | body[i];
+	}
+	nl = n - LOGIN_RES_HEAD_LEN;
+	if (nl > LOGIN_USER_MAX) {
+		nl = LOGIN_USER_MAX;
+	}
+	memcpy(name, body + LOGIN_RES_HEAD_LEN, (size_t)nl);
+	name[nl] = '\0';
+
+	t->login_due = 0;
+
+	if (body[0] == LOGIN_OK) {
+		tlog(t, "[login] logged in as %s", name);
+	}
+	else {
+		tlog(t, "[login] rejected: %s", login_status_name(body[0]));
+		name[0] = '\0';
+	}
+
+	if (t->cfg->on_login) {
+		t->cfg->on_login(t->cfg->ctx, body[0], (int64_t)expires, name);
+	}
+}
+
 /* TUN -> UDP. Wintun 링버퍼에 쌓인 패킷을 모두 비운다. */
 static int pump_tun(tunnel_t *t)
 {
@@ -1246,6 +1409,10 @@ static int pump_udp(tunnel_t *t)
 				pkt.deny_reason = ip[0];
 				session->denied = 1;
 				set_state(t, TUNNEL_STATE_DENIED);
+				pkt_emit(t, &pkt);
+				continue;
+			case MSG_TYPE_LOGIN:
+				login_response(t, ip, n);
 				pkt_emit(t, &pkt);
 				continue;
 			case MSG_TYPE_DATA:
@@ -1492,6 +1659,7 @@ int tunnel_run(const tunnel_config_t *cfg, HANDLE stop_event)
 	tlog(t, "[%ls] tun device ready", cfg->adapter_name);
 
 	session->last_rx_ms = GetTickCount64();
+	login_new_session(t);
 	set_state(t, TUNNEL_STATE_CONNECTED);
 
 	waits[0] = t->stop_event;
@@ -1518,10 +1686,14 @@ int tunnel_run(const tunnel_config_t *cfg, HANDLE stop_event)
 		 *    있으니 30초를 기다리지 않고 바로 다시 물어본다.
 		 * 거절된 상태에서도 첫 번째 조건이 그대로 걸려, 포스처가 그대로여도 30초마다
 		 * 다시 물어본다. 서버 쪽 정책이 풀렸을 수 있다. */
-		if (now - session->last_rx_ms > SERVER_TIMEOUT_MSEC || t->readdress ||
+		if (now - session->last_rx_ms > SERVER_TIMEOUT_MSEC || t->readdress || t->logout ||
 				(session->denied && posture_changed(t, now))) {
 			if (session->denied) {
 				tlog(t, "[HS] retry after deny");
+			}
+			else if (t->logout) {
+				/* 연결은 그대로인 채 사용자만 바뀌는 것이라 재연결 중으로 보이지 않게 한다. */
+				tlog(t, "[login] logged out, opening a session without the user");
 			}
 			else if (t->readdress) {
 				tlog(t, "[HS] re-handshake for the new tunnel address");
@@ -1535,6 +1707,7 @@ int tunnel_run(const tunnel_config_t *cfg, HANDLE stop_event)
 			/* 실패하면 여기서 다시 묻지 않는다. 세션이 살아 있으면 다음 keepalive 응답이
 			 * 주소가 다르다는 것을 다시 알려 준다. 그대로 두면 매 틱마다 핸드셰이크한다. */
 			t->readdress = 0;
+			t->logout = 0;
 
 			switch (do_handshake(t)) {
 			case HS_OK:
@@ -1543,6 +1716,7 @@ int tunnel_run(const tunnel_config_t *cfg, HANDLE stop_event)
 					goto out;
 				}
 				session->denied = 0;
+				login_new_session(t);
 				set_state(t, TUNNEL_STATE_CONNECTED);
 				break;
 			case HS_DENIED:
@@ -1572,6 +1746,8 @@ int tunnel_run(const tunnel_config_t *cfg, HANDLE stop_event)
 				now - session->last_ka_ms > KEEPALIVE_INTERVAL_MSEC)) {
 			send_keepalive(t);
 		}
+
+		login_tick(t, now);
 
 		if (pump_tun(t) < 0 || pump_udp(t) < 0) {
 			goto out;

@@ -27,6 +27,7 @@ CString TypeName(const tunnel_packet_t &p)
 	case MSG_TYPE_CHALLENGE:	return _T("CHALLENGE");
 	case MSG_TYPE_AUTH:		return _T("AUTH");
 	case MSG_TYPE_DENY:		return _T("DENY");
+	case MSG_TYPE_LOGIN:		return _T("LOGIN");
 	default:			return _T("-");
 	}
 }
