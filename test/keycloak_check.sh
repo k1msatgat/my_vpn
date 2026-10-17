@@ -22,7 +22,7 @@
 #   6. 기기 인가 엔드포인트가 기기 코드를 준다 (client/ztgate_login 이 쓰는 첫 단계)
 #   7. Windows GUI 의 흐름: 인가 코드 + PKCE, 루프백 redirect. 브라우저가 하는 일(로그인 화면에
 #      입력하고 앱의 127.0.0.1:<포트> 로 돌아가기)을 스크립트가 대신한다. 포트 두 개로 해서
-#      IdP 가 루프백의 포트를 가리지 않는지 본다. PKCE 없는 요청은 거절돼야 한다.
+#      IdP 가 루프백의 포트를 가리지 않는지 본다.
 #   8. 받은 refresh token 으로 갱신되고, 폐기(RFC 7009)한 뒤에는 갱신되지 않는다.
 #
 # 3~5 의 토큰은 비밀번호 방식(direct access grant)으로 받는다. 기기 인가는 사람이 브라우저에서
@@ -71,14 +71,15 @@ api() {	# api <method> <path> [json]
 api POST "" "{\"realm\":\"$REALM\",\"enabled\":true}" || { echo "cannot create realm" >&2; exit 1; }
 
 # 공개 클라이언트: 비밀이 없다 (사용자의 장비에 비밀을 둘 수 없다). 기기 인가를 켠다.
-# Windows GUI 용으로 표준 흐름(인가 코드)을 켜고, 돌아올 주소는 루프백만, PKCE(S256)는 필수.
+# Windows GUI 용으로 표준 흐름(인가 코드)을 켜고, 돌아올 주소는 루프백만 둔다.
+# PKCE 를 클라이언트에서 필수로 걸지는 않는다 — Keycloak 은 그 설정을 기기 인가에도 적용해
+# PKCE 를 보내지 않는 client/ztgate_login 이 막힌다. Windows GUI 는 PKCE 를 늘 보낸다.
 # audience 매퍼가 토큰의 aud 에 ztgate 를 넣고, 그룹 매퍼가 groups 클레임에 그룹 이름을 넣는다.
 api POST "/$REALM/clients" '{
 	"clientId": "ztgate", "publicClient": true, "standardFlowEnabled": true,
 	"redirectUris": ["http://127.0.0.1/*"],
 	"directAccessGrantsEnabled": true,
-	"attributes": {"oauth2.device.authorization.grant.enabled": "true",
-	               "pkce.code.challenge.method": "S256"},
+	"attributes": {"oauth2.device.authorization.grant.enabled": "true"},
 	"protocolMappers": [
 		{"name": "audience", "protocol": "openid-connect", "protocolMapper": "oidc-audience-mapper",
 		 "config": {"included.client.audience": "ztgate", "access.token.claim": "true", "id.token.claim": "false"}},
@@ -168,16 +169,14 @@ def call(op, url, form=None):
         return e.code, e.read().decode(), e.headers
 
 
-def login(port, pkce=True):
+def login(port):
     jar = http.cookiejar.CookieJar()
     op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar), Stop)
     verifier = secrets.token_urlsafe(32)
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
     redirect = "http://127.0.0.1:%d/callback" % port
     q = {"response_type": "code", "client_id": "ztgate", "redirect_uri": redirect, "scope": "openid",
-         "state": secrets.token_urlsafe(8)}
-    if pkce:
-        q.update(code_challenge=challenge, code_challenge_method="S256")
+         "state": secrets.token_urlsafe(8), "code_challenge": challenge, "code_challenge_method": "S256"}
     _, body, _ = call(op, meta["authorization_endpoint"] + "?" + urllib.parse.urlencode(q))
     f = Form()
     f.feed(body)
@@ -206,7 +205,6 @@ a = login(49823)
 b = login(61234)
 print("port_a", "ok" if a and "access_token" in a else "fail")
 print("port_b", "ok" if b and "access_token" in b else "fail")
-print("no_pkce", "refused" if login(50001, pkce=False) is None else "accepted")
 if a:
     open(sys.argv[2], "w").write(a["access_token"])
     print("refresh", refresh(a["refresh_token"]))
@@ -219,7 +217,6 @@ python3 "$WORK/pkce.py" "$WORK/discovery.json" "$WORK/pkce.jwt" > "$WORK/pkce.ou
 pk() { awk -v k="$1" '$1 == k { print $2 }' "$WORK/pkce.out"; }
 check "keycloak: code + PKCE, loopback port 49823" "$(pk port_a)" ok
 check "keycloak: code + PKCE, loopback port 61234" "$(pk port_b)" ok
-check "keycloak: a code request without PKCE" "$(pk no_pkce)" refused
 check "keycloak: that token on the server" "$( [ -s "$WORK/pkce.jwt" ] && verify < "$WORK/pkce.jwt")" "ok user=alice groups=ops"
 check "keycloak: refresh token works" "$(pk refresh)" 200
 check "keycloak: revocation (RFC 7009)" "$(pk revoke)" 200

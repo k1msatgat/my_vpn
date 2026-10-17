@@ -277,7 +277,7 @@ sudo ./client/bin/vpn_client -t ~/.config/ztgate/token run <서버 IP> 9000
 
 **IdP (Keycloak 기준).** `test/keycloak_check.sh`가 CI에서 관리 API로 그대로 만드는 설정입니다.
 
-1. 클라이언트 `ztgate`: 공개 클라이언트(client secret 없음 — 사용자의 장비에 비밀을 둘 수 없다), *OAuth 2.0 Device Authorization Grant* 켜기. Windows GUI 를 쓰면 *Standard flow* 도 켜고, 유효한 redirect URI 에 `http://127.0.0.1/*` 를, *Advanced → Proof Key for Code Exchange* 를 `S256` 으로 둔다. 포트는 GUI 가 실행 때마다 빈 것을 고르는데(RFC 8252 7.3), Keycloak 은 루프백 주소면 포트를 가리지 않고 받아 준다 (26.0.7 에서 CI 가 포트 둘로 확인). 다른 IdP 는 그 IdP 의 문서에서 루프백 redirect 를 확인한다.
+1. 클라이언트 `ztgate`: 공개 클라이언트(client secret 없음 — 사용자의 장비에 비밀을 둘 수 없다), *OAuth 2.0 Device Authorization Grant* 켜기. Windows GUI 를 쓰면 *Standard flow* 도 켜고, 유효한 redirect URI 에 `http://127.0.0.1/*` 를 넣는다. GUI 는 PKCE(S256)를 늘 보낸다. Windows 만 쓰는 곳이면 *Advanced → Proof Key for Code Exchange* 를 `S256` 으로 걸어 PKCE 없는 요청을 막아도 되지만, Keycloak 은 그 설정을 기기 인가에도 적용해 PKCE 를 보내지 않는 `ztgate_login` 이 막힌다 (Linux 도 쓰면 걸지 않거나, 클라이언트를 둘로 나눈다). 포트는 GUI 가 실행 때마다 빈 것을 고르는데(RFC 8252 7.3), Keycloak 은 루프백 주소면 포트를 가리지 않고 받아 준다 (26.0.7 에서 CI 가 포트 둘로 확인). 다른 IdP 는 그 IdP 의 문서에서 루프백 redirect 를 확인한다.
 2. 그 클라이언트의 매퍼 두 개: *Audience*(`ztgate`를 access token의 `aud`에), *Group Membership*(클레임 이름 `groups`, full path 끄기).
 3. 사용자를 그룹에 넣는다.
 
@@ -818,7 +818,7 @@ sendto(buf, n + 32)     └─────────────────�
 | 컨테이너 | `docker/demo.sh` — 서버 + 클라이언트 두 컨테이너로 같은 시나리오 | CI |
 | 서버 처리량 | `tools/loadgen/bench.sh` — 아래 [성능](#성능) | CI |
 | 터널 처리량 | `tools/loadgen/iperf.sh` — 실제 서버와 클라이언트 사이의 iperf3 TCP / UDP, 같은 veth 의 직결 값과 나란히 | CI |
-| 실제 IdP | `test/keycloak_check.sh` — Keycloak 을 아래 설정대로 만들고, 그 토큰을 `vpn_server verify-token` 에 넣는다 (받기, 다른 앱의 토큰, 변조, 기기 인가 첫 단계). Windows GUI 의 흐름(인가 코드 + PKCE, 루프백 포트 둘, PKCE 없는 요청 거절, 갱신, 폐기 뒤 갱신 거절)은 브라우저가 하는 일을 스크립트가 대신해 돌린다 | CI |
+| 실제 IdP | `test/keycloak_check.sh` — Keycloak 을 아래 설정대로 만들고, 그 토큰을 `vpn_server verify-token` 에 넣는다 (받기, 다른 앱의 토큰, 변조, 기기 인가 첫 단계). Windows GUI 의 흐름(인가 코드 + PKCE, 루프백 포트 둘, 갱신, 폐기 뒤 갱신 거절)은 브라우저가 하는 일을 스크립트가 대신해 돌린다 | CI |
 | 두 장비 시나리오 | `test/server.sh` + `test/client.sh [idle\|stop\|restart]` — 유휴 중 keepalive, 클라이언트 정지 뒤 만료와 복구, 서버 재시작 복구 | 실제 장비 (v4 이후의 클라이언트로는 아직 돌려 보지 않음) |
 | Windows 사용자 로그인 (실제 IdP) | 이 PC 에 Keycloak 26.0.7 을 띄우고 GUI 의 [로그인] → 브라우저의 Keycloak 로그인 화면에 사람이 입력 → 서버가 Keycloak 토큰으로 `login alice ok groups=ops`, `group=ops` 포트 열림 → 3분 46초 뒤 브라우저 없이 갱신 → [로그아웃] 으로 포트 닫힘, Keycloak 에서 그 앱의 세션이 폐기됨 | 실제 장비, 손으로 (2026-10-17) |
 | Windows 사용자 로그인 | `windows/test/sso_e2e.ps1` — 이 PC 에 시험용 IdP 를 띄우고 GUI 의 로그인 버튼을 메시지로 눌러, 실서버의 `group=` 규칙 포트가 열리고 닫히는지를 터널 너머에서 본다: 로그인 전 막힘 → 브라우저 로그인(PKCE) 뒤 열림 → 자동 갱신 → GUI 종료 시 닫힘 → 다시 켜면 브라우저 없이 열림 → 로그아웃 시 닫힘과 IdP 폐기 → 갱신이 늦는 중의 로그아웃 → 시계가 어긋날 때 갱신을 한 번만 | 실제 장비 (2026-10-17) |
