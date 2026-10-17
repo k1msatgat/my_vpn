@@ -119,6 +119,15 @@
     <ClCompile Include="SettingsDlg.cpp" />
     <ClCompile Include="ui_theme.cpp" />
     <ClCompile Include="ui_controls.cpp" />
+    <!-- 사용자 로그인. IdP 의 JSON 은 서버가 JWT 를 읽는 파서(server/src/json.c)로 읽는다.
+         서버의 헤더 폴더에는 이 프로그램의 것과 이름이 같은 헤더(device.h)가 있어서 이 두
+         파일에만 붙이고, 맨 뒤에 둔다. -->
+    <ClCompile Include="Oidc.cpp">
+      <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories);$(RepoRoot)\server\include</AdditionalIncludeDirectories>
+    </ClCompile>
+    <ClCompile Include="..\..\server\src\json.c">
+      <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories);$(RepoRoot)\server\include</AdditionalIncludeDirectories>
+    </ClCompile>
     <!-- 터널(tunnel.c)과 암호 도구, 기기의 키를 읽는 코드는 이 프로그램에 들어 있지 않다.
          그것들은 서비스(svc)에 있고, 여기서는 파이프로 서비스에 붙는다 (vpn_remote.c).
          posture.c 는 "이 PC 의 지금 값"을 화면에 보여 주려고 남겼다. 권한 없이 읽힌다. -->
@@ -136,6 +145,8 @@
     <ClInclude Include="PacketText.h" />
     <ClInclude Include="DiagDlg.h" />
     <ClInclude Include="SettingsDlg.h" />
+    <ClInclude Include="Oidc.h" />
+    <ClInclude Include="..\..\server\include\json.h" />
     <ClInclude Include="ui_theme.h" />
     <ClInclude Include="ui_controls.h" />
     <ClInclude Include="..\core\vpn_session.h" />
